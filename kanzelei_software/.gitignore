@@ -1,0 +1,23 @@
+.env
+.env.*
+!.env.example
+
+# runtime data / local db
+data/
+*.db
+*.sqlite
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.venv-*/
+.venv*/
+venv/
+venv*/
+
+# frontend
+frontend/node_modules/
+frontend/build/
+node_modules/
+*.log

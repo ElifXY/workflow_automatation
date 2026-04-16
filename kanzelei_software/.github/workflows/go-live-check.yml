@@ -1,0 +1,67 @@
+name: Go Live Check
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  go-live-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run repository policy check
+        run: |
+          python scripts/repo_policy_check.py
+
+      - name: Start API (background)
+        env:
+          JWT_SECRET: ci-jwt-secret-very-long-value-1234567890
+          SAAS_MASTER_KEY: ci-saas-master-key-1234567890
+          STRIPE_SECRET_KEY: sk_test_ci_dummy_key_1234567890
+          STRIPE_WEBHOOK_SECRET: whsec_ci_dummy_key_1234567890
+          ANTHROPIC_API_KEY: sk-ant-ci-dummy
+          OPENAI_API_KEY: sk-proj-ci-dummy
+          PORTAL_SECRET: ci-portal-secret-1234567890abcdef
+          PORTAL_ADMIN_KEY: ci-admin-key
+          ENVIRONMENT: production
+          DATABASE_URL: postgresql://kanzlei:kanzlei_passwort@localhost:5432/kanzlei_ai
+          FORCE_HTTPS: "0"
+          SECURITY_HEADERS: "1"
+        run: |
+          nohup python -m uvicorn backend.api:app --host 127.0.0.1 --port 8000 > api.log 2>&1 &
+          sleep 6
+
+      - name: Run go-live check
+        env:
+          JWT_SECRET: ci-jwt-secret-very-long-value-1234567890
+          SAAS_MASTER_KEY: ci-saas-master-key-1234567890
+          STRIPE_SECRET_KEY: sk_test_ci_dummy_key_1234567890
+          STRIPE_WEBHOOK_SECRET: whsec_ci_dummy_key_1234567890
+          DATABASE_URL: postgresql://kanzlei:kanzlei_passwort@localhost:5432/kanzlei_ai
+        run: |
+          python scripts/go_live_check.py --base-url http://127.0.0.1:8000
+
+      - name: Upload API log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-log
+          path: api.log

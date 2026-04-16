@@ -1,0 +1,1012 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Mandantenportal — Kanzlei AI</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+:root{
+  --bg:#0b0d11;--bg2:#111419;--bg3:#181c24;
+  --text:#e8eaf0;--text2:#8b91a0;--text3:#555d6e;
+  --accent:#c8a96e;--red:#e05555;--orange:#e08c45;
+  --green:#5cb87a;--blue:#5b8de8;--purple:#9b72e8;
+  --border:rgba(255,255,255,0.07);--border2:rgba(255,255,255,0.14);
+  --radius:14px;--shadow:0 8px 40px rgba(0,0,0,0.6);
+  --safe-bottom:env(safe-area-inset-bottom,0px);
+}
+html,body{height:100%;background:var(--bg);color:var(--text);font-family:'DM Sans',system-ui,sans-serif;
+  font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased;overscroll-behavior:none}
+::-webkit-scrollbar{width:3px}::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+@keyframes fadeUp{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:translateY(0)}}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes pulse{0%,100%{opacity:.3}50%{opacity:1}}
+@keyframes slideIn{from{transform:translateX(105%)}to{transform:translateX(0)}}
+a{color:var(--accent);text-decoration:none}
+
+/* ── LAYOUT ── */
+#app{min-height:100%;display:flex;flex-direction:column}
+#login-screen{flex:1;display:flex;align-items:center;justify-content:center;padding:20px;
+  background:radial-gradient(ellipse at 30% 30%,rgba(200,169,110,.08) 0%,transparent 60%),
+              radial-gradient(ellipse at 70% 80%,rgba(91,141,232,.05) 0%,transparent 50%)}
+.login-box{background:var(--bg2);border:1px solid var(--border2);border-radius:20px;
+  padding:44px 36px;width:100%;max-width:400px;animation:fadeUp .5s ease;box-shadow:var(--shadow)}
+.logo{font-family:'DM Serif Display',serif;font-size:28px;color:var(--accent);margin-bottom:4px}
+.logo-sub{font-size:13px;color:var(--text3);margin-bottom:32px}
+
+/* ── PORTAL LAYOUT ── */
+#portal-screen{display:none;flex-direction:column;height:100%;overflow:hidden}
+.portal-header{background:var(--bg2);border-bottom:1px solid var(--border);padding:14px 20px;
+  display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+.header-left{display:flex;align-items:center;gap:12px}
+.header-logo{font-family:'DM Serif Display',serif;font-size:18px;color:var(--accent)}
+.header-mandant{font-size:12px;color:var(--text3)}
+.portal-content{flex:1;overflow-y:auto;padding-bottom:calc(80px + var(--safe-bottom))}
+
+/* ── BOTTOM NAV (Mobile-First) ── */
+.bottom-nav{position:fixed;bottom:0;left:0;right:0;
+  background:var(--bg2);border-top:1px solid var(--border);
+  display:flex;padding:8px 4px calc(8px + var(--safe-bottom));z-index:100;
+  backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px)}
+.nav-item{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;
+  padding:8px 4px;cursor:pointer;border:none;background:transparent;
+  color:var(--text3);font-size:10px;font-family:'DM Sans',sans-serif;
+  border-radius:12px;transition:all .2s;position:relative}
+.nav-item.active{color:var(--accent)}
+.nav-item .icon{font-size:22px;transition:transform .2s}
+.nav-item.active .icon{transform:scale(1.1)}
+.nav-badge{position:absolute;top:4px;right:20%;background:var(--red);color:#fff;
+  border-radius:10px;font-size:9px;font-weight:700;padding:1px 5px;min-width:16px;text-align:center}
+
+/* ── TABS ── */
+.tab{display:none;padding:20px 16px;animation:fadeUp .3s ease}
+.tab.active{display:block}
+
+/* ── CARDS ── */
+.card{background:var(--bg2);border:1px solid var(--border);
+  border-radius:var(--radius);padding:18px;margin-bottom:14px}
+.card-title{font-family:'DM Serif Display',serif;font-size:18px;color:var(--text);margin-bottom:14px}
+.section-label{font-size:11px;color:var(--text3);text-transform:uppercase;
+  letter-spacing:.07em;margin-bottom:6px;margin-top:14px}
+
+/* ── FORM ── */
+input,textarea,select{width:100%;background:var(--bg3);border:1px solid var(--border2);
+  border-radius:10px;color:var(--text);padding:11px 14px;font-family:'DM Sans',sans-serif;
+  font-size:15px;outline:none;transition:border .15s;appearance:none;-webkit-appearance:none;
+  margin-bottom:10px}
+input:focus,textarea:focus,select:focus{border-color:var(--accent)}
+
+/* ── BUTTONS ── */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;
+  padding:12px 20px;border-radius:12px;border:none;font-family:'DM Sans',sans-serif;
+  font-size:15px;font-weight:500;cursor:pointer;transition:all .15s;
+  appearance:none;-webkit-appearance:none;letter-spacing:.01em}
+.btn-primary{background:var(--accent);color:#1a1200}
+.btn-ghost{background:transparent;color:var(--text2);border:1px solid var(--border2)}
+.btn-success{background:rgba(92,184,122,.18);color:var(--green);border:1px solid rgba(92,184,122,.3)}
+.btn-danger{background:rgba(224,85,85,.15);color:var(--red);border:1px solid rgba(224,85,85,.3)}
+.btn-full{width:100%;padding:14px}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn-sm{padding:7px 13px;font-size:13px;border-radius:9px}
+
+/* ── STATUS BADGES ── */
+.badge{display:inline-block;padding:3px 10px;border-radius:20px;font-size:11px;
+  font-weight:600;letter-spacing:.05em;text-transform:uppercase}
+
+/* ── UPLOAD ── */
+.upload-zone{border:2px dashed var(--border2);border-radius:var(--radius);
+  padding:36px 20px;text-align:center;cursor:pointer;transition:all .2s;background:var(--bg3)}
+.upload-zone.drag{border-color:var(--accent);background:rgba(200,169,110,.06)}
+.upload-zone input[type=file]{display:none}
+
+/* ── UNTERSCHRIFT CANVAS ── */
+.sig-container{background:var(--bg3);border:1px solid var(--border2);border-radius:12px;overflow:hidden}
+#sig-canvas{display:block;width:100%;touch-action:none;cursor:crosshair}
+
+/* ── SPINNER ── */
+.spinner{width:22px;height:22px;border-radius:50%;border:2px solid rgba(255,255,255,.2);
+  border-top-color:var(--accent);animation:spin .7s linear infinite;display:inline-block}
+.loading-box{display:flex;align-items:center;justify-content:center;padding:40px;gap:12px;color:var(--text3)}
+
+/* ── AUFGABEN ── */
+.aufgabe{padding:13px 14px;border-radius:10px;border:1px solid var(--border);
+  background:var(--bg3);margin-bottom:8px}
+.aufgabe.kritisch{border-color:rgba(224,85,85,.4);background:rgba(224,85,85,.05)}
+.aufgabe.dringend{border-color:rgba(224,140,69,.4);background:rgba(224,140,69,.05)}
+
+/* ── DOK-LISTE ── */
+.dok-item{display:flex;align-items:center;gap:12px;padding:11px 14px;
+  border-radius:10px;border:1px solid var(--border);background:var(--bg3);margin-bottom:8px}
+
+/* ── TOAST ── */
+#toast{position:fixed;bottom:calc(90px + var(--safe-bottom));left:16px;right:16px;
+  background:var(--bg3);border-radius:12px;padding:13px 16px;
+  font-size:13px;font-weight:500;color:var(--text);
+  box-shadow:var(--shadow);z-index:9999;display:none;animation:slideIn .25s ease}
+
+/* ── MODAL ── */
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:200;
+  display:flex;align-items:flex-end;justify-content:center;padding:16px}
+.modal-box{background:var(--bg2);border:1px solid var(--border2);border-radius:20px 20px 0 0;
+  width:100%;max-width:600px;max-height:90vh;overflow-y:auto;padding:24px 20px 40px;
+  animation:fadeUp .3s ease}
+@media(min-width:600px){.modal{align-items:center}
+  .modal-box{border-radius:20px;padding:28px 28px 28px}}
+
+/* ── PDF VIEWER ── */
+.pdf-viewer{background:var(--bg3);border-radius:10px;overflow:hidden;
+  border:1px solid var(--border);width:100%;min-height:200px;
+  display:flex;align-items:center;justify-content:center}
+.pdf-viewer embed{width:100%;height:60vh;border:none}
+.pdf-viewer img{width:100%;object-fit:contain;max-height:60vh}
+
+/* ── FREIGABE ── */
+.freigabe-card{background:linear-gradient(135deg,rgba(91,141,232,.1),rgba(200,169,110,.05));
+  border:1px solid rgba(91,141,232,.25);border-radius:var(--radius);padding:18px;margin-bottom:12px}
+</style>
+</head>
+<body>
+<div id="app">
+
+<!-- ═══ LOGIN ════════════════════════════════════════════ -->
+<div id="login-screen">
+  <div class="login-box">
+    <div class="logo">Kanzlei AI</div>
+    <div class="logo-sub">Ihr persönliches Mandantenportal</div>
+
+    <div id="login-form">
+      <p style="color:var(--text2);font-size:14px;margin-bottom:20px;line-height:1.7">
+        Ihr Zugangslink wurde Ihnen per E-Mail zugesendet.<br>
+        Alternativ Token direkt eingeben:
+      </p>
+      <label class="section-label">Zugangs-Token</label>
+      <input id="token-input" type="text" placeholder="Token aus E-Mail einfügen..."
+             style="font-family:monospace;font-size:13px" oninput="pruefeToken()">
+      <button class="btn btn-primary btn-full" id="login-btn" onclick="login()" disabled>
+        Anmelden
+      </button>
+      <p style="font-size:12px;color:var(--text3);margin-top:14px;text-align:center">
+        Kein Zugangslink? Bitte Kanzlei kontaktieren.
+      </p>
+    </div>
+
+    <div id="login-loading" style="display:none;text-align:center;padding:20px">
+      <div class="spinner"></div>
+      <p style="color:var(--text3);margin-top:12px;font-size:13px">Anmeldung...</p>
+    </div>
+
+    <div id="login-error" style="display:none;margin-top:14px;padding:10px 14px;
+         background:rgba(224,85,85,.1);border:1px solid rgba(224,85,85,.3);
+         border-radius:10px;color:var(--red);font-size:13px"></div>
+  </div>
+</div>
+
+<!-- ═══ PORTAL ════════════════════════════════════════════ -->
+<div id="portal-screen">
+
+  <!-- HEADER -->
+  <div class="portal-header">
+    <div class="header-left">
+      <div>
+        <div class="header-logo">Kanzlei AI</div>
+        <div class="header-mandant" id="header-mandant">Mandantenportal</div>
+      </div>
+    </div>
+    <button class="btn btn-ghost btn-sm" onclick="abmelden()">Abmelden</button>
+  </div>
+
+  <!-- CONTENT AREA -->
+  <div class="portal-content">
+
+    <!-- TAB: ÜBERSICHT -->
+    <div id="tab-uebersicht" class="tab active">
+      <div style="padding:16px 0 8px">
+        <div id="willkommen" style="font-family:'DM Serif Display',serif;font-size:22px;
+             color:var(--text);margin-bottom:4px">Willkommen</div>
+        <div id="uebersicht-datum" style="font-size:12px;color:var(--text3)"></div>
+      </div>
+
+      <!-- Benachrichtigungs-Banner -->
+      <div id="banner-unterschriften" style="display:none" class="card"
+           style="background:rgba(91,141,232,.08);border-color:rgba(91,141,232,.25)">
+        <div style="display:flex;align-items:center;gap:10px">
+          <span style="font-size:24px">✍</span>
+          <div style="flex:1">
+            <div style="font-weight:600;color:var(--blue)">Dokumente zur Unterzeichnung</div>
+            <div style="font-size:13px;color:var(--text2)" id="banner-sign-text"></div>
+          </div>
+          <button class="btn btn-ghost btn-sm" onclick="wechsleTab('unterschrift')">Ansehen →</button>
+        </div>
+      </div>
+
+      <div id="uebersicht-kpis"></div>
+
+      <div class="card">
+        <div class="card-title">Offene Aufgaben</div>
+        <div id="uebersicht-aufgaben"><div class="loading-box"><div class="spinner"></div></div></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Fehlende Dokumente</div>
+        <div id="uebersicht-docs"><div class="loading-box"><div class="spinner"></div></div></div>
+      </div>
+    </div>
+
+    <!-- TAB: DOKUMENTE -->
+    <div id="tab-dokumente" class="tab">
+      <div class="card">
+        <div class="card-title">Dokumente hochladen</div>
+        <p style="color:var(--text2);font-size:13px;margin-bottom:16px">
+          Laden Sie Belege, Kontoauszüge oder andere Unterlagen direkt hoch.
+          Die Kanzlei wird automatisch informiert.
+        </p>
+
+        <div class="upload-zone" id="upload-zone"
+             ondragover="event.preventDefault();this.classList.add('drag')"
+             ondragleave="this.classList.remove('drag')"
+             ondrop="handleDrop(event)"
+             onclick="document.getElementById('datei-input').click()">
+          <input type="file" id="datei-input" multiple
+                 accept=".pdf,.jpg,.jpeg,.png,.xlsx,.csv,.docx,.xml,.txt"
+                 onchange="dateienGewaehlt(this)">
+          <div style="font-size:40px;margin-bottom:12px">📎</div>
+          <div style="font-weight:600;color:var(--text);margin-bottom:6px">Dateien hier ablegen</div>
+          <div style="font-size:13px;color:var(--text3)">PDF, Foto, Excel, CSV — mehrere auf einmal</div>
+          <button class="btn btn-ghost btn-sm" style="margin-top:12px" onclick="event.stopPropagation();document.getElementById('datei-input').click()">
+            Dateien auswählen
+          </button>
+        </div>
+
+        <div id="upload-warteschlange" style="margin-top:14px"></div>
+
+        <div id="upload-kategorie-box" style="display:none;margin-top:12px">
+          <div class="section-label">Kategorie</div>
+          <select id="upload-kategorie">
+            <option>Kontoauszug</option><option>Eingangsrechnung</option>
+            <option>Ausgangsrechnung</option><option>Lohnunterlagen</option>
+            <option>Vertrag</option><option>Sonstiges</option>
+          </select>
+          <div class="section-label">Beschreibung (optional)</div>
+          <input type="text" id="upload-beschreibung" placeholder="z.B. Kontoauszug Januar 2026">
+          <button class="btn btn-primary btn-full" id="upload-btn" onclick="alleHochladen()">
+            Alle hochladen
+          </button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Meine Uploads</div>
+        <div id="meine-uploads"><div class="loading-box"><div class="spinner"></div></div></div>
+      </div>
+    </div>
+
+    <!-- TAB: UNTERSCHRIFT -->
+    <div id="tab-unterschrift" class="tab">
+      <div class="card">
+        <div class="card-title">✍ Digitale Unterschrift</div>
+        <p style="color:var(--text2);font-size:13px;margin-bottom:14px">
+          Dokumente der Kanzlei digital unterzeichnen.
+          Rechtsgültig nach eIDAS (Einfache Elektronische Signatur).
+        </p>
+        <div id="unterschriften-liste"><div class="loading-box"><div class="spinner"></div></div></div>
+      </div>
+    </div>
+
+    <!-- TAB: FREIGABEN -->
+    <div id="tab-freigaben" class="tab">
+      <div class="card">
+        <div class="card-title">📋 Freigaben</div>
+        <p style="color:var(--text2);font-size:13px;margin-bottom:14px">
+          Bestätigen Sie Jahresabschlüsse und Steuererklärungen.
+        </p>
+        <div id="freigaben-liste"><div class="loading-box"><div class="spinner"></div></div></div>
+      </div>
+    </div>
+
+    <!-- TAB: NACHRICHTEN -->
+    <div id="tab-nachrichten" class="tab">
+      <div class="card">
+        <div class="card-title">Nachricht senden</div>
+        <div class="section-label">Betreff</div>
+        <input type="text" id="msg-betreff" placeholder="Betreff Ihrer Nachricht">
+        <div class="section-label">Nachricht</div>
+        <textarea id="msg-inhalt" rows="4" placeholder="Ihre Nachricht an die Kanzlei..."></textarea>
+        <button class="btn btn-primary btn-full" onclick="nachrichtSenden()">Senden</button>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Letzte Nachrichten</div>
+        <div id="nachrichten-liste"><div class="loading-box"><div class="spinner"></div></div></div>
+      </div>
+    </div>
+
+    <!-- TAB: SIMULATION -->
+    <div id="tab-simulation" class="tab">
+      <div class="card">
+        <div class="card-title">📊 Steuer-Simulation</div>
+        <p style="color:var(--text2);font-size:13px;margin-bottom:16px">
+          Berechnen Sie Auswirkungen auf Ihre Steuerlast (Orientierungswert, 30% Ø-Satz).
+        </p>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <div><div class="section-label">Investition (€)</div>
+          <input type="number" id="sim-inv" value="0" min="0"></div>
+          <div><div class="section-label">Zusatzeinnahmen (€)</div>
+          <input type="number" id="sim-ein" value="0" min="0"></div>
+          <div><div class="section-label">Abschreibungen (€)</div>
+          <input type="number" id="sim-abs" value="0" min="0"></div>
+          <div><div class="section-label">Sonderausgaben (€)</div>
+          <input type="number" id="sim-son" value="0" min="0"></div>
+        </div>
+        <button class="btn btn-primary btn-full" onclick="simulation()">Berechnen</button>
+        <div id="sim-ergebnis" style="display:none;margin-top:16px;background:var(--bg3);
+             border-radius:12px;padding:16px;border:1px solid var(--border)"></div>
+      </div>
+    </div>
+
+  </div><!-- /.portal-content -->
+
+  <!-- BOTTOM NAVIGATION -->
+  <nav class="bottom-nav">
+    <button class="nav-item active" id="nav-uebersicht" onclick="wechsleTab('uebersicht')">
+      <span class="icon">🏠</span><span>Übersicht</span>
+    </button>
+    <button class="nav-item" id="nav-dokumente" onclick="wechsleTab('dokumente')">
+      <span class="icon">📎</span><span>Uploads</span>
+    </button>
+    <button class="nav-item" id="nav-unterschrift" onclick="wechsleTab('unterschrift')">
+      <span class="icon">✍</span><span>Unterschrift</span>
+      <span class="nav-badge" id="badge-unterschrift" style="display:none">0</span>
+    </button>
+    <button class="nav-item" id="nav-freigaben" onclick="wechsleTab('freigaben')">
+      <span class="icon">📋</span><span>Freigaben</span>
+      <span class="nav-badge" id="badge-freigaben" style="display:none">0</span>
+    </button>
+    <button class="nav-item" id="nav-nachrichten" onclick="wechsleTab('nachrichten')">
+      <span class="icon">💬</span><span>Nachrichten</span>
+    </button>
+  </nav>
+</div><!-- /#portal-screen -->
+</div><!-- /#app -->
+
+<!-- ═══ TOAST ════════════════════════════════════════════ -->
+<div id="toast"></div>
+
+<!-- ═══ UNTERSCHRIFT MODAL ═══════════════════════════════ -->
+<div id="sig-modal" class="modal" style="display:none">
+  <div class="modal-box">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <div style="font-family:'DM Serif Display',serif;font-size:20px;color:var(--accent)">
+        Dokument unterzeichnen
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="schliesseModal()">✕</button>
+    </div>
+
+    <div id="sig-dokument-info" style="background:var(--bg3);border-radius:10px;padding:12px 14px;
+         margin-bottom:16px;font-size:13px;color:var(--text2)"></div>
+
+    <!-- Dokument-Vorschau -->
+    <div id="sig-vorschau" class="pdf-viewer" style="margin-bottom:16px">
+      <div style="color:var(--text3);font-size:13px">Dokument wird geladen...</div>
+    </div>
+
+    <!-- Unterschrift-Pad -->
+    <div class="section-label" style="margin-bottom:6px">Ihre Unterschrift</div>
+    <div class="sig-container">
+      <canvas id="sig-canvas" width="500" height="150"></canvas>
+    </div>
+    <div style="display:flex;justify-content:space-between;margin-top:8px;margin-bottom:16px">
+      <span style="font-size:12px;color:var(--text3)">Feld mit Finger oder Maus unterschreiben</span>
+      <button class="btn btn-ghost btn-sm" onclick="loescheUnterschrift()">↺ Löschen</button>
+    </div>
+
+    <!-- Bestätigung -->
+    <div style="background:rgba(91,141,232,.08);border:1px solid rgba(91,141,232,.2);
+         border-radius:10px;padding:12px 14px;margin-bottom:16px">
+      <label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer">
+        <input type="checkbox" id="sig-bestaetigung" style="width:auto;margin:0;margin-top:2px;flex-shrink:0">
+        <span style="font-size:13px;color:var(--text2);line-height:1.5">
+          Ich bestätige, dass ich das Dokument vollständig gelesen und verstanden habe.
+          Diese digitale Unterschrift ist rechtsgültig nach eIDAS (EES).
+        </span>
+      </label>
+    </div>
+
+    <button class="btn btn-success btn-full" id="sig-submit-btn" onclick="unterschriftLeisten()">
+      ✓ Jetzt verbindlich unterzeichnen
+    </button>
+    <button class="btn btn-danger btn-full" style="margin-top:8px" onclick="unterschriftAblehnen()">
+      ✕ Ablehnen
+    </button>
+  </div>
+</div>
+
+<script>
+// ============================================================
+// KONFIGURATION
+// ============================================================
+const PORTAL_URL = window.location.origin;
+let TOKEN    = "";
+let MANDANT  = "";
+let AKTUELLE_SIG_ID = "";
+
+// Upload-Warteschlange
+let UPLOAD_DATEIEN = [];
+
+// ============================================================
+// API
+// ============================================================
+const api = async (url, opts={}) => {
+  const headers = {"Content-Type":"application/json",
+    ...(TOKEN?{Authorization:`Bearer ${TOKEN}`}:{}), ...(opts.headers||{})};
+  const r = await fetch(PORTAL_URL+url,{...opts,headers});
+  const d = await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(d.detail||`Fehler ${r.status}`);
+  return d;
+};
+
+const b64 = f => new Promise((res,rej)=>{
+  const reader = new FileReader();
+  reader.onload = ()=>res(reader.result.split(",")[1]);
+  reader.onerror = ()=>rej(new Error("Lesen fehlgeschlagen"));
+  reader.readAsDataURL(f);
+});
+
+// ============================================================
+// TOAST
+// ============================================================
+function toast(text, type="success", ms=4000){
+  const el = document.getElementById("toast");
+  el.textContent = text;
+  el.style.display = "block";
+  el.style.borderLeft = `3px solid var(--${type==="error"?"red":type==="warn"?"orange":"green"})`;
+  clearTimeout(el._t);
+  el._t = setTimeout(()=>el.style.display="none", ms);
+}
+
+// ============================================================
+// LOGIN
+// ============================================================
+function pruefeToken(){
+  const v = document.getElementById("token-input").value.trim();
+  document.getElementById("login-btn").disabled = v.length < 20;
+}
+
+async function login(){
+  const urlToken = new URLSearchParams(window.location.search).get("token");
+  const token    = document.getElementById("token-input").value.trim() || urlToken;
+  if(!token) return;
+
+  document.getElementById("login-form").style.display   = "none";
+  document.getElementById("login-loading").style.display = "block";
+  document.getElementById("login-error").style.display   = "none";
+
+  try{
+    const d = await api(`/portal/login?token=${encodeURIComponent(token)}`);
+    TOKEN   = d.token || token;
+    MANDANT = d.mandant;
+    localStorage.setItem("portal_token", TOKEN);
+    localStorage.setItem("portal_mandant", MANDANT);
+    zeigePortal(d);
+  }catch(e){
+    document.getElementById("login-loading").style.display = "none";
+    document.getElementById("login-form").style.display    = "block";
+    document.getElementById("login-error").style.display   = "block";
+    document.getElementById("login-error").textContent = "Anmeldung fehlgeschlagen: "+(e.message||"Ungültiger Token");
+  }
+}
+
+function abmelden(){
+  TOKEN=""; MANDANT="";
+  localStorage.removeItem("portal_token");
+  localStorage.removeItem("portal_mandant");
+  document.getElementById("portal-screen").style.display = "none";
+  document.getElementById("login-screen").style.display  = "flex";
+  document.getElementById("login-form").style.display    = "block";
+  document.getElementById("login-loading").style.display = "none";
+  document.getElementById("token-input").value = "";
+  document.getElementById("login-btn").disabled = true;
+}
+
+function zeigePortal(d){
+  document.getElementById("login-screen").style.display  = "none";
+  document.getElementById("portal-screen").style.display = "flex";
+  document.getElementById("header-mandant").textContent  = MANDANT;
+  document.getElementById("willkommen").textContent      = d.willkommen||`Willkommen, ${MANDANT}!`;
+  document.getElementById("uebersicht-datum").textContent =
+    new Date().toLocaleDateString("de-DE",{weekday:"long",day:"numeric",month:"long",year:"numeric"});
+
+  // Badges
+  if(d.offene_unterschriften>0){
+    document.getElementById("badge-unterschrift").style.display = "block";
+    document.getElementById("badge-unterschrift").textContent   = d.offene_unterschriften;
+    document.getElementById("banner-unterschriften").style.display = "block";
+    document.getElementById("banner-sign-text").textContent =
+      `${d.offene_unterschriften} Dokument(e) warten auf Ihre Unterschrift`;
+  }
+  if(d.offene_freigaben>0){
+    document.getElementById("badge-freigaben").style.display = "block";
+    document.getElementById("badge-freigaben").textContent   = d.offene_freigaben;
+  }
+
+  ladeUebersicht();
+}
+
+// ============================================================
+// TABS
+// ============================================================
+function wechsleTab(id){
+  document.querySelectorAll(".tab").forEach(t=>t.classList.remove("active"));
+  document.querySelectorAll(".nav-item").forEach(b=>b.classList.remove("active"));
+  document.getElementById(`tab-${id}`).classList.add("active");
+  document.getElementById(`nav-${id}`)?.classList.add("active");
+  document.querySelector(".portal-content").scrollTop = 0;
+
+  const loaders = {
+    uebersicht:   ladeUebersicht,
+    dokumente:    ladeDokumente,
+    unterschrift: ladeUnterschriften,
+    freigaben:    ladeFreigaben,
+    nachrichten:  ladeNachrichten,
+  };
+  loaders[id]?.();
+}
+
+// ============================================================
+// ÜBERSICHT
+// ============================================================
+async function ladeUebersicht(){
+  try{
+    const [aufgaben, docs] = await Promise.all([
+      api("/portal/aufgaben"), api("/portal/dokumente")
+    ]);
+
+    // KPIs
+    document.getElementById("uebersicht-kpis").innerHTML = `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
+        ${kpiCard("Aufgaben offen", aufgaben.offen,
+          aufgaben.offen>0?"var(--orange)":"var(--green)")}
+        ${kpiCard("Fehlende Docs", docs.anzahl,
+          docs.anzahl>0?"var(--red)":"var(--green)")}
+      </div>`;
+
+    // Aufgaben
+    const offene = (aufgaben.aufgaben||[]).filter(a=>!a.erledigt).slice(0,5);
+    document.getElementById("uebersicht-aufgaben").innerHTML =
+      !offene.length ? '<div style="color:var(--green);padding:8px 0">✓ Keine offenen Aufgaben</div>' :
+      offene.map(a=>aufgabeHtml(a)).join("");
+
+    // Dokumente
+    const fehlende = docs.fehlende_dokumente||[];
+    document.getElementById("uebersicht-docs").innerHTML = !fehlende.length
+      ? '<div style="color:var(--green);padding:8px 0">✓ Alle Dokumente vollständig</div>'
+      : fehlende.map(d=>`
+          <div class="dok-item">
+            <span style="font-size:20px">⚠</span>
+            <div style="flex:1;font-size:13px;color:var(--orange)">${esc(d)}</div>
+            <button class="btn btn-ghost btn-sm" onclick="wechsleTab('dokumente')">Hochladen</button>
+          </div>`).join("");
+  }catch(e){ console.error(e); }
+}
+
+const kpiCard = (label, val, color) => `
+  <div class="card" style="margin-bottom:0;text-align:center">
+    <div style="font-size:11px;color:var(--text3);text-transform:uppercase;
+         letter-spacing:.07em;margin-bottom:4px">${label}</div>
+    <div style="font-family:'DM Serif Display',serif;font-size:28px;color:${color}">${val}</div>
+  </div>`;
+
+const aufgabeHtml = a => {
+  const t = a.tage;
+  const c = a.erledigt?"var(--green)":t!==null&&t<0?"var(--red)":a.dringend?"var(--orange)":"var(--text3)";
+  const label = a.erledigt?"Erledigt":t===null?"":t<0?`${Math.abs(t)}d überfällig`:t===0?"Heute":t<=1?"Morgen":`in ${t}d`;
+  return `<div class="aufgabe${t!==null&&t<0&&!a.erledigt?" kritisch":a.dringend?" dringend":""}">
+    <div style="font-weight:500;font-size:14px;color:var(--text)">${esc(a.beschreibung)}</div>
+    <div style="display:flex;gap:10px;margin-top:5px;font-size:12px">
+      ${a.frist?`<span style="color:var(--text3)">📅 ${a.frist}</span>`:""}
+      ${label?`<span style="color:${c};font-weight:600">${label}</span>`:""}
+    </div></div>`;
+};
+
+// ============================================================
+// DOKUMENTE UPLOAD
+// ============================================================
+function handleDrop(e){
+  e.preventDefault();
+  document.getElementById("upload-zone").classList.remove("drag");
+  dateienGewaehlt({files:e.dataTransfer.files});
+}
+
+function dateienGewaehlt(input){
+  const neu = Array.from(input.files||[]);
+  if(!neu.length) return;
+  UPLOAD_DATEIEN = [...UPLOAD_DATEIEN, ...neu];
+  renderWarteschlange();
+}
+
+function renderWarteschlange(){
+  const el = document.getElementById("upload-warteschlange");
+  if(!UPLOAD_DATEIEN.length){ el.innerHTML=""; return; }
+  el.innerHTML = UPLOAD_DATEIEN.map((f,i)=>`
+    <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;
+         background:var(--bg3);border-radius:8px;margin-bottom:6px;border:1px solid var(--border)">
+      <span style="font-size:20px">${f.name.endsWith(".pdf")?"📄":
+        /\.(jpg|jpeg|png)$/i.test(f.name)?"🖼":"📁"}</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(f.name)}</div>
+        <div style="font-size:11px;color:var(--text3)">${(f.size/1024).toFixed(1)} KB</div>
+      </div>
+      <button onclick="entferneDatei(${i})" style="background:transparent;border:none;
+              color:var(--text3);cursor:pointer;font-size:18px;padding:4px">✕</button>
+    </div>`).join("");
+  document.getElementById("upload-kategorie-box").style.display = "block";
+}
+
+function entferneDatei(i){
+  UPLOAD_DATEIEN.splice(i,1);
+  renderWarteschlange();
+  if(!UPLOAD_DATEIEN.length) document.getElementById("upload-kategorie-box").style.display="none";
+}
+
+async function alleHochladen(){
+  if(!UPLOAD_DATEIEN.length) return;
+  const btn = document.getElementById("upload-btn");
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Wird hochgeladen...';
+  const kat  = document.getElementById("upload-kategorie").value;
+  const desc = document.getElementById("upload-beschreibung").value.trim();
+
+  try{
+    const dateien = await Promise.all(UPLOAD_DATEIEN.map(async f=>{
+      const inhalt = await b64(f);
+      return {dateiname:f.name,dateityp:f.type||"application/octet-stream",
+              inhalt_b64:inhalt,beschreibung:desc,kategorie:kat};
+    }));
+
+    const result = await api("/portal/dokumente/bulk-upload",{
+      method:"POST", body:JSON.stringify({dateien})});
+
+    toast(`✓ ${result.erfolgreich} von ${result.gesamt} Datei(en) hochgeladen`);
+    UPLOAD_DATEIEN = [];
+    renderWarteschlange();
+    document.getElementById("upload-kategorie-box").style.display = "none";
+    document.getElementById("upload-beschreibung").value = "";
+    await ladeDokumente();
+  }catch(e){
+    toast("Upload fehlgeschlagen: "+e.message,"error");
+  }finally{
+    btn.disabled=false; btn.textContent="Alle hochladen";
+  }
+}
+
+async function ladeDokumente(){
+  try{
+    const d = await api("/portal/dokumente/meine-uploads");
+    const el = document.getElementById("meine-uploads");
+    const uploads = d.uploads||[];
+    if(!uploads.length){ el.innerHTML='<div style="color:var(--text3);padding:12px 0">Noch keine Uploads</div>'; return; }
+    el.innerHTML = uploads.map(u=>`
+      <div class="dok-item">
+        <span style="font-size:20px">${u.dateiname.endsWith(".pdf")?"📄":
+          /\.(jpg|jpeg|png)$/i.test(u.dateiname)?"🖼":"📁"}</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(u.original||u.dateiname)}</div>
+          <div style="font-size:11px;color:var(--text3)">${u.kategorie} · ${u.groesse_kb} KB · ${formatDatum(u.hochgeladen_am)}</div>
+        </div>
+      </div>`).join("");
+  }catch(e){ console.error(e); }
+}
+
+// ============================================================
+// ✍ UNTERSCHRIFT
+// ============================================================
+let sigCanvas, sigCtx, sigZeichnet = false, sigLeer = true;
+
+async function ladeUnterschriften(){
+  try{
+    const d = await api("/portal/unterschrift/offen");
+    const el = document.getElementById("unterschriften-liste");
+    const liste = d.unterschriften||[];
+    if(!liste.length){
+      el.innerHTML='<div style="color:var(--green);padding:16px 0;text-align:center">✓ Keine offenen Unterschriften</div>';
+      return;
+    }
+    el.innerHTML = liste.map(u=>`
+      <div style="background:${u.status==="abgelaufen"?"rgba(85,85,85,.1)":"rgba(91,141,232,.08)"};
+           border:1px solid ${u.status==="abgelaufen"?"rgba(85,85,85,.25)":"rgba(91,141,232,.25)"};
+           border-radius:12px;padding:16px;margin-bottom:12px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:10px">
+          <div>
+            <div style="font-weight:600;color:var(--text);font-size:15px">${esc(u.dokumentname)}</div>
+            <div style="font-size:12px;color:var(--text3);margin-top:3px">${esc(u.betreff)}</div>
+            ${u.hinweis?`<div style="font-size:12px;color:var(--text2);margin-top:4px">${esc(u.hinweis)}</div>`:""}
+          </div>
+          <span class="badge" style="background:${u.status==="abgelaufen"?"rgba(85,85,85,.2)":"rgba(91,141,232,.2)"};
+                color:${u.status==="abgelaufen"?"var(--text3)":"var(--blue)"};flex-shrink:0">
+            ${u.status==="abgelaufen"?"Abgelaufen":"Ausstehend"}
+          </span>
+        </div>
+        ${u.status!=="abgelaufen"?`
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-success btn-sm" onclick="oeffneUnterschriftModal('${u.id}','${esc(u.dokumentname)}','${esc(u.betreff)}',${u.hat_dokument})">
+            ✍ Unterzeichnen
+          </button>
+          <button class="btn btn-danger btn-sm" onclick="schnellAblehnen('${u.id}')">Ablehnen</button>
+        </div>`:`<div style="font-size:12px;color:var(--text3)">Frist abgelaufen — Kanzlei kontaktieren</div>`}
+      </div>`).join("");
+  }catch(e){ console.error(e); }
+}
+
+async function oeffneUnterschriftModal(id, dokname, betreff, hatDok){
+  AKTUELLE_SIG_ID = id;
+  document.getElementById("sig-modal").style.display = "flex";
+  document.getElementById("sig-dokument-info").innerHTML =
+    `<strong>${esc(dokname)}</strong><br><span style="font-size:12px;color:var(--text3)">${esc(betreff)}</span>`;
+
+  // Canvas initialisieren
+  sigCanvas = document.getElementById("sig-canvas");
+  sigCtx    = sigCanvas.getContext("2d");
+  // Tatsächliche Größe setzen
+  const rect = sigCanvas.getBoundingClientRect();
+  sigCanvas.width  = rect.width  || 500;
+  sigCanvas.height = rect.height || 150;
+  sigCtx.clearRect(0,0,sigCanvas.width,sigCanvas.height);
+  sigCtx.strokeStyle = "#c8a96e";
+  sigCtx.lineWidth   = 2.5;
+  sigCtx.lineCap     = "round";
+  sigCtx.lineJoin    = "round";
+  sigLeer = true;
+  registriereSignaturEvents();
+
+  // Dokument laden
+  const vorschau = document.getElementById("sig-vorschau");
+  if(hatDok){
+    vorschau.innerHTML = '<div style="color:var(--text3);font-size:13px"><div class="loading-box"><div class="spinner"></div><span>Dokument laden...</span></div></div>';
+    try{
+      const dokD = await api(`/portal/unterschrift/${id}/dokument`);
+      if(dokD.dokumenttyp==="pdf"){
+        vorschau.innerHTML = `<embed src="data:application/pdf;base64,${dokD.dokument_b64}" type="application/pdf">`;
+      } else {
+        vorschau.innerHTML = `<img src="data:image/${dokD.dokumenttyp||'jpeg'};base64,${dokD.dokument_b64}" alt="Dokument">`;
+      }
+    }catch(e){
+      vorschau.innerHTML = `<div style="color:var(--text3);padding:20px;font-size:13px">
+        Dokument konnte nicht geladen werden: ${e.message}</div>`;
+    }
+  } else {
+    vorschau.innerHTML = '<div style="color:var(--text3);padding:20px;font-size:13px">Kein Dokument beigefügt — bitte bei Kanzlei nachfragen</div>';
+  }
+}
+
+function registriereSignaturEvents(){
+  const canvas = sigCanvas;
+  let aktiv = false;
+
+  const getPos = e => {
+    const rect = canvas.getBoundingClientRect();
+    const scX  = canvas.width  / rect.width;
+    const scY  = canvas.height / rect.height;
+    if(e.touches){
+      return {x:(e.touches[0].clientX-rect.left)*scX,
+              y:(e.touches[0].clientY-rect.top)*scY};
+    }
+    return {x:(e.clientX-rect.left)*scX, y:(e.clientY-rect.top)*scY};
+  };
+
+  const start = e => { aktiv=true; const p=getPos(e); sigCtx.beginPath(); sigCtx.moveTo(p.x,p.y); e.preventDefault(); };
+  const draw  = e => { if(!aktiv) return; const p=getPos(e); sigCtx.lineTo(p.x,p.y); sigCtx.stroke(); sigLeer=false; e.preventDefault(); };
+  const stop  = ()  => { aktiv=false; };
+
+  canvas.removeEventListener("mousedown",canvas._sd);  canvas.removeEventListener("touchstart",canvas._st);
+  canvas.removeEventListener("mousemove",canvas._md);  canvas.removeEventListener("touchmove",canvas._mt);
+  canvas.removeEventListener("mouseup",canvas._su);    canvas.removeEventListener("touchend",canvas._te);
+
+  canvas._sd=start; canvas._st=start; canvas._md=draw; canvas._mt=draw; canvas._su=stop; canvas._te=stop;
+  canvas.addEventListener("mousedown",start); canvas.addEventListener("touchstart",start,{passive:false});
+  canvas.addEventListener("mousemove",draw);  canvas.addEventListener("touchmove",draw,{passive:false});
+  canvas.addEventListener("mouseup",stop);    canvas.addEventListener("touchend",stop);
+}
+
+function loescheUnterschrift(){
+  if(!sigCtx) return;
+  sigCtx.clearRect(0,0,sigCanvas.width,sigCanvas.height);
+  sigLeer = true;
+}
+
+function schliesseModal(){
+  document.getElementById("sig-modal").style.display = "none";
+  AKTUELLE_SIG_ID = "";
+  document.getElementById("sig-bestaetigung").checked = false;
+}
+
+async function unterschriftLeisten(){
+  if(sigLeer){ toast("Bitte erst unterschreiben","warn"); return; }
+  if(!document.getElementById("sig-bestaetigung").checked){
+    toast("Bitte Kenntnisnahme bestätigen","warn"); return;
+  }
+  const btn = document.getElementById("sig-submit-btn");
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Wird übermittelt...';
+
+  try{
+    const unterschrift_b64 = sigCanvas.toDataURL("image/png").split(",")[1];
+    await api(`/portal/unterschrift/${AKTUELLE_SIG_ID}/leisten`,{
+      method:"POST",
+      body:JSON.stringify({unterschrift_b64, bestaetigung:true})
+    });
+    schliesseModal();
+    toast("✓ Erfolgreich unterzeichnet! Kanzlei wurde informiert.");
+    document.getElementById("badge-unterschrift").style.display="none";
+    await ladeUnterschriften();
+  }catch(e){
+    toast("Fehler: "+e.message,"error");
+  }finally{
+    btn.disabled=false; btn.textContent="✓ Jetzt verbindlich unterzeichnen";
+  }
+}
+
+async function unterschriftAblehnen(){
+  const grund = prompt("Ablehnungsgrund (optional):") || "";
+  try{
+    await api(`/portal/unterschrift/${AKTUELLE_SIG_ID}/ablehnen?grund=${encodeURIComponent(grund)}`,
+              {method:"POST"});
+    schliesseModal();
+    toast("Ablehnung übermittelt","warn");
+    await ladeUnterschriften();
+  }catch(e){ toast(e.message,"error"); }
+}
+
+async function schnellAblehnen(id){
+  if(!confirm("Unterschrift ablehnen?")) return;
+  try{
+    await api(`/portal/unterschrift/${id}/ablehnen`,{method:"POST"});
+    toast("Ablehnung übermittelt","warn");
+    await ladeUnterschriften();
+  }catch(e){ toast(e.message,"error"); }
+}
+
+// ============================================================
+// FREIGABEN
+// ============================================================
+async function ladeFreigaben(){
+  try{
+    const d = await api("/portal/freigaben");
+    const el = document.getElementById("freigaben-liste");
+    const liste = d.freigaben||[];
+    if(!liste.length){
+      el.innerHTML='<div style="color:var(--green);padding:16px 0;text-align:center">✓ Keine ausstehenden Freigaben</div>';
+      return;
+    }
+    el.innerHTML = liste.map(f=>`
+      <div class="freigabe-card">
+        <div style="font-weight:600;color:var(--text);font-size:15px;margin-bottom:6px">${esc(f.titel)}</div>
+        <div style="font-size:13px;color:var(--text2);margin-bottom:14px">${esc(f.beschreibung)}</div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-success btn-sm" onclick="freigebeErteilen('${f.id}')">✓ Freigabe erteilen</button>
+        </div>
+      </div>`).join("");
+  }catch(e){ console.error(e); }
+}
+
+async function freigebeErteilen(id){
+  const kommentar = prompt("Kommentar (optional):") || "";
+  try{
+    await api(`/portal/freigaben/${id}/freigeben?kommentar=${encodeURIComponent(kommentar)}`,{method:"POST"});
+    toast("✓ Freigabe erteilt");
+    document.getElementById("badge-freigaben").style.display="none";
+    await ladeFreigaben();
+  }catch(e){ toast(e.message,"error"); }
+}
+
+// ============================================================
+// NACHRICHTEN
+// ============================================================
+async function nachrichtSenden(){
+  const betreff = document.getElementById("msg-betreff").value.trim();
+  const inhalt  = document.getElementById("msg-inhalt").value.trim();
+  if(!betreff||!inhalt){ toast("Bitte alle Felder ausfüllen","warn"); return; }
+  try{
+    await api("/portal/nachricht",{method:"POST",body:JSON.stringify({betreff,inhalt})});
+    toast("✓ Nachricht gesendet");
+    document.getElementById("msg-betreff").value = "";
+    document.getElementById("msg-inhalt").value  = "";
+    await ladeNachrichten();
+  }catch(e){ toast(e.message,"error"); }
+}
+
+async function ladeNachrichten(){
+  try{
+    const d   = await api("/portal/nachrichten");
+    const el  = document.getElementById("nachrichten-liste");
+    const lst = d.nachrichten||[];
+    if(!lst.length){ el.innerHTML='<div style="color:var(--text3);padding:12px 0">Keine Nachrichten</div>'; return; }
+    const icons = {portal_nachricht:"💬",auto_email:"✉",dokument_unterschrieben:"✍",
+                   portal_upload:"📎",freigabe_erteilt:"✅",unterschrift_abgelehnt:"❌"};
+    el.innerHTML = lst.map(n=>`
+      <div style="padding:12px 14px;background:var(--bg3);border-radius:10px;
+           border:1px solid var(--border);margin-bottom:8px">
+        <div style="display:flex;gap:8px;align-items:flex-start">
+          <span style="font-size:18px">${icons[n.typ]||"📌"}</span>
+          <div style="flex:1">
+            ${n.betreff?`<div style="font-weight:500;color:var(--text);font-size:14px">${esc(n.betreff)}</div>`:""}
+            <div style="font-size:13px;color:var(--text2)">${esc((n.text||"").slice(0,120))}</div>
+            <div style="font-size:11px;color:var(--text3);margin-top:4px">${formatDatum(n.timestamp)}</div>
+          </div>
+        </div>
+      </div>`).join("");
+  }catch(e){ console.error(e); }
+}
+
+// ============================================================
+// SIMULATION
+// ============================================================
+async function simulation(){
+  const btn = document.querySelector("#tab-simulation .btn-primary");
+  btn.disabled=true; btn.innerHTML='<span class="spinner"></span>';
+  try{
+    const r = await api("/portal/simulation",{method:"POST",body:JSON.stringify({
+      investition:      parseFloat(document.getElementById("sim-inv").value)||0,
+      zusatz_einnahmen: parseFloat(document.getElementById("sim-ein").value)||0,
+      abschreibungen:   parseFloat(document.getElementById("sim-abs").value)||0,
+      sonderausgaben:   parseFloat(document.getElementById("sim-son").value)||0,
+    })});
+    const el = document.getElementById("sim-ergebnis");
+    el.style.display="block";
+    const f = v=>`€ ${Number(v).toLocaleString("de-DE",{minimumFractionDigits:2})}`;
+    const e = r.steuerersparnis;
+    el.innerHTML = [
+      ["Basis-Gewinn",        f(r.basis_gewinn),       "var(--text2)"],
+      ["Simulierter Gewinn",  f(r.simulierter_gewinn), "var(--blue)"],
+      ["Steuerlast aktuell",  f(r.steuerlast_aktuell), "var(--orange)"],
+      ["Steuerlast simuliert",f(r.steuerlast_simuliert),"var(--green)"],
+      ["Steuerersparnis",     f(Math.abs(e)),           e>0?"var(--green)":"var(--red)"],
+    ].map(([l,v,c])=>`
+      <div style="display:flex;justify-content:space-between;padding:7px 0;
+           border-bottom:1px solid var(--border);font-size:13px">
+        <span style="color:var(--text3)">${l}</span>
+        <span style="font-weight:600;color:${c}">${v}</span>
+      </div>`).join("")+
+      `<div style="font-size:11px;color:var(--text3);margin-top:10px;line-height:1.6">${esc(r.hinweis||"")}</div>`;
+  }catch(e){ toast(e.message,"error"); }
+  finally{ btn.disabled=false; btn.textContent="Berechnen"; }
+}
+
+// ============================================================
+// UTILS
+// ============================================================
+const esc = s => String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+
+const formatDatum = s => {
+  if(!s) return "—";
+  try{ return new Date(s).toLocaleDateString("de-DE",{day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"}); }
+  catch{ return s; }
+};
+
+// ============================================================
+// AUTO-LOGIN
+// ============================================================
+window.addEventListener("load", async () => {
+  const urlToken = new URLSearchParams(window.location.search).get("token");
+  if(urlToken){
+    document.getElementById("token-input").value = urlToken;
+    await login();
+    return;
+  }
+  const savedToken = localStorage.getItem("portal_token");
+  if(savedToken){
+    TOKEN   = savedToken;
+    MANDANT = localStorage.getItem("portal_mandant")||"";
+    try{
+      const d = await api(`/portal/login?token=${encodeURIComponent(savedToken)}`);
+      zeigePortal(d);
+    }catch{
+      localStorage.removeItem("portal_token");
+      localStorage.removeItem("portal_mandant");
+    }
+  }
+});
+</script>
+</body>
+</html>

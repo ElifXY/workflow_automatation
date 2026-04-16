@@ -1,0 +1,43 @@
+# ============================================================
+# KANZLEI AI — DOCKERFILE (API + Portal)
+# ============================================================
+# Build:  docker build -t kanzlei-ai .
+# Run:    docker run -p 8000:8000 --env-file .env kanzlei-ai
+# ============================================================
+
+FROM python:3.11-slim
+
+# System-Dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    libmagic1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Arbeitsverzeichnis
+WORKDIR /app
+
+# Dependencies zuerst (für besseres Caching)
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# App-Code kopieren
+COPY . .
+
+# Verzeichnisse anlegen
+RUN mkdir -p data/uploads data/backups data/dokumente \
+    modules core
+
+# Nicht-Root User (Sicherheit)
+RUN useradd -m -u 1000 kanzlei && \
+    chown -R kanzlei:kanzlei /app
+USER kanzlei
+
+# Health-Check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+EXPOSE 8000 8001
+
+# Standard: API starten
+CMD ["uvicorn", "backend.api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]

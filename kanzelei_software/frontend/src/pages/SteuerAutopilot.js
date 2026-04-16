@@ -1,0 +1,689 @@
+// ============================================================
+// KANZLEI AI — STEUER AUTOPILOT v1.0
+// Datei: src/pages/SteuerAutopilot.js
+//
+// 3 Module in einem:
+//   1. Steuer-Autopilot (KI verarbeitet Steuerfälle vollautomatisch)
+//   2. Finanzierung (Nachzahlung → sofort Lösungen)
+//   3. ML-Buchung (zeigt was das System gelernt hat)
+// ============================================================
+
+import { useState, useEffect, useCallback } from "react";
+
+const C = {
+  red:"#e05555", orange:"#e08c45", green:"#5cb87a", blue:"#5b8de8",
+  accent:"#c8a96e", purple:"#9b72e8",
+  text:"#e8eaf0", text2:"#8b91a0", text3:"#555d6e",
+  bg:"#0b0d11", bg2:"#111419", bg3:"#181c24",
+  border:"rgba(255,255,255,0.07)", border2:"rgba(255,255,255,0.14)",
+};
+
+const BASE = process.env.REACT_APP_API_URL || "http://127.0.0.1:8000";
+const api  = async (url, opts={}) => {
+  const token = localStorage.getItem("kanzlei_token");
+  const r = await fetch(BASE+url, {...opts, headers:{
+    "Content-Type":"application/json",
+    ...(token?{Authorization:`Bearer ${token}`}:{}), ...(opts.headers||{}),
+  }});
+  const d = await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(d.detail||`${r.status}`);
+  return d;
+};
+
+const fmt = v => `€${Number(v||0).toLocaleString("de-DE",{minimumFractionDigits:2})}`;
+
+const Btn = ({children,onClick,variant="primary",size="md",loading=false,disabled=false,style={}}) => {
+  const vs={primary:{background:C.accent,color:"#1a1200",border:"none"},
+    ghost:{background:"transparent",color:C.text2,border:`1px solid ${C.border2}`},
+    subtle:{background:C.bg3,color:C.text2,border:`1px solid ${C.border}`},
+    success:{background:C.green+"18",color:C.green,border:`1px solid ${C.green}30`},
+    danger:{background:C.red+"18",color:C.red,border:`1px solid ${C.red}30`}};
+  const ss={xs:"4px 9px",sm:"7px 14px",md:"9px 18px",lg:"12px 24px"};
+  const fs={xs:11,sm:13,md:14,lg:15};
+  return <button onClick={!loading&&!disabled?onClick:undefined} style={{
+    display:"inline-flex",alignItems:"center",gap:6,padding:ss[size],
+    fontSize:fs[size],fontWeight:500,borderRadius:10,
+    cursor:loading||disabled?"not-allowed":"pointer",opacity:loading||disabled?0.5:1,
+    transition:"all 0.15s",fontFamily:"'DM Sans',sans-serif",...vs[variant],...style}}>
+    {loading&&<span style={{width:12,height:12,borderRadius:"50%",
+      border:"2px solid currentColor",borderTopColor:"transparent",
+      animation:"spin 0.7s linear infinite",display:"inline-block"}}/>}
+    {children}
+  </button>;
+};
+
+const TABS = [
+  {id:"autopilot", label:"Steuer-Autopilot", icon:"🤖"},
+  {id:"finanzierung",label:"Finanzierung",   icon:"💳"},
+  {id:"ml",         label:"ML-Buchung",      icon:"🧠"},
+];
+
+const KONFIDENZ_FARBE = (score) =>
+  score >= 92 ? C.green : score >= 75 ? C.blue : score >= 50 ? C.orange : C.red;
+
+const KONFIDENZ_LABEL = (score) =>
+  score >= 92 ? "Auto-Freigabe möglich" :
+  score >= 75 ? "Kurzer Review (15 Min)" :
+  score >= 50 ? "Standard-Review" : "Manuell erforderlich";
+
+// ══════════════════════════════════════════════════════════
+// AUTOPILOT TAB
+// ══════════════════════════════════════════════════════════
+
+const AutopilotTab = () => {
+  const [mandanten,  setMandanten]  = useState([]);
+  const [faelle,     setFaelle]     = useState([]);
+  const [stats,      setStats]      = useState(null);
+  const [loading,    setLoading]    = useState(true);
+  const [processing, setProcessing] = useState(false);
+  const [selectedM,  setSelectedM]  = useState("");
+  const [steuerart,  setSteuerart]  = useState("ESt");
+  const [jahr,       setJahr]       = useState(new Date().getFullYear()-1);
+  const [toast,      setToast]      = useState(null);
+  const [aktiverFall,setAktiverFall]= useState(null);
+
+  const showToast = (t,type="success") => { setToast({t,type}); setTimeout(()=>setToast(null),5000); };
+
+  const laden = useCallback(async () => {
+    try {
+      const [m,f,s] = await Promise.allSettled([
+        api("/mandanten"), api("/steuer/faelle"), api("/steuer/statistiken"),
+      ]);
+      if(m.status==="fulfilled") {
+        const raw = m.value?.data||[];
+        setMandanten(Array.isArray(raw)?raw.map(x=>x.name):Object.keys(raw));
+      }
+      if(f.status==="fulfilled") setFaelle(f.value?.faelle||[]);
+      if(s.status==="fulfilled") setStats(s.value);
+    } catch(e){console.error(e);}
+    finally{setLoading(false);}
+  },[]);
+
+  useEffect(()=>{laden();},[laden]);
+
+  const starte = async () => {
+    if(!selectedM) { showToast("Bitte Mandanten wählen","warn"); return; }
+    setProcessing(true);
+    try {
+      const fall = await api("/steuer/verarbeiten",{
+        method:"POST",
+        body:JSON.stringify({mandant:selectedM,jahr,steuerart}),
+      });
+      setAktiverFall(fall);
+      showToast(`✓ Steuerfall verarbeitet — Konfidenz: ${fall.konfidenz_score}%`);
+      await laden();
+    } catch(e){showToast(e.message,"error");}
+    finally{setProcessing(false);}
+  };
+
+  const freigeben = async (fallId) => {
+    try {
+      await api(`/steuer/${fallId}/freigeben?freigegeben_von=Steuerberater`,{method:"POST"});
+      showToast("✓ Steuerfall freigegeben");
+      setAktiverFall(null);
+      await laden();
+    } catch(e){showToast(e.message,"error");}
+  };
+
+  const inp = (style={}) => ({
+    background:C.bg,border:`1px solid ${C.border2}`,borderRadius:8,
+    color:C.text,padding:"8px 11px",fontSize:13,
+    fontFamily:"'DM Sans',sans-serif",outline:"none",...style,
+  });
+
+  return (
+    <div>
+      {toast&&<div style={{position:"fixed",bottom:24,right:24,zIndex:9999,
+        background:C.bg3,borderRadius:12,padding:"12px 18px",color:C.text,
+        fontSize:13,border:`1px solid ${toast.type==="error"?C.red:C.green}44`,
+        borderLeft:`3px solid ${toast.type==="error"?C.red:C.green}`}}>
+        {toast.t}</div>}
+
+      {/* Statistiken */}
+      {stats&&(
+        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:14,marginBottom:22}}>
+          {[
+            {l:"Fälle verarbeitet",    v:stats.faelle_gesamt,         c:C.blue},
+            {l:"Freigegeben",          v:stats.faelle_freigegeben,    c:C.green},
+            {l:"Ø Konfidenz",          v:`${stats.durchschnitt_konfidenz}%`, c:C.accent},
+            {l:"Gesparte Stunden",     v:`${stats.gespar_stunden_schätzung}h`, c:C.purple},
+          ].map((s,i)=>(
+            <div key={i} style={{background:C.bg2,border:`1px solid ${C.border}`,
+              borderRadius:12,padding:"14px 16px"}}>
+              <div style={{fontSize:10,color:C.text3,textTransform:"uppercase",
+                letterSpacing:"0.07em",marginBottom:4}}>{s.l}</div>
+              <div style={{fontFamily:"'DM Serif Display',serif",fontSize:24,color:s.c}}>{s.v}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Neuer Steuerfall */}
+      <div style={{background:C.bg2,border:`1px solid ${C.border}`,
+        borderRadius:14,padding:20,marginBottom:22}}>
+        <div style={{fontFamily:"'DM Serif Display',serif",fontSize:17,
+          color:C.accent,marginBottom:14}}>
+          🤖 Neuen Steuerfall automatisch verarbeiten
+        </div>
+        <div style={{fontSize:13,color:C.text2,marginBottom:14,lineHeight:1.7}}>
+          Das System sammelt alle Daten, berechnet die Steuer, erstellt das ELSTER XML
+          und gibt einen Konfidenz-Score. Bei &gt;92%: fast kein manueller Aufwand.
+        </div>
+        <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:14}}>
+          <select value={selectedM} onChange={e=>setSelectedM(e.target.value)} style={inp({flex:2})}>
+            <option value="">— Mandant wählen —</option>
+            {mandanten.map(m=><option key={m} value={m}>{m}</option>)}
+          </select>
+          <select value={steuerart} onChange={e=>setSteuerart(e.target.value)} style={inp()}>
+            {["ESt","USt","GewSt","KSt"].map(s=><option key={s} value={s}>{s}</option>)}
+          </select>
+          <input type="number" value={jahr}
+            onChange={e=>setJahr(parseInt(e.target.value))}
+            min={2020} max={2026} style={inp({width:90})} />
+        </div>
+        <Btn onClick={starte} loading={processing} variant="primary" size="lg">
+          🤖 Steuerfall automatisch verarbeiten
+        </Btn>
+        {processing&&(
+          <div style={{marginTop:12,color:C.text3,fontSize:13}}>
+            Sammle Daten → KI analysiert → ELSTER vorbereiten...
+          </div>
+        )}
+      </div>
+
+      {/* Aktiver Fall */}
+      {aktiverFall&&(
+        <div style={{background:C.bg2,border:`1px solid ${KONFIDENZ_FARBE(aktiverFall.konfidenz_score)}40`,
+          borderRadius:14,padding:20,marginBottom:22,
+          borderLeft:`4px solid ${KONFIDENZ_FARBE(aktiverFall.konfidenz_score)}`}}>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:14}}>
+            <div>
+              <div style={{fontFamily:"'DM Serif Display',serif",fontSize:18,color:C.text}}>
+                {aktiverFall.mandant} — {aktiverFall.steuerart} {aktiverFall.jahr}
+              </div>
+              <div style={{fontSize:12,color:C.text3,marginTop:3}}>{aktiverFall.empfehlung_text}</div>
+            </div>
+            <div style={{textAlign:"right"}}>
+              <div style={{fontFamily:"'DM Serif Display',serif",fontSize:28,
+                color:KONFIDENZ_FARBE(aktiverFall.konfidenz_score)}}>
+                {aktiverFall.konfidenz_score}%
+              </div>
+              <div style={{fontSize:11,color:KONFIDENZ_FARBE(aktiverFall.konfidenz_score)}}>
+                {KONFIDENZ_LABEL(aktiverFall.konfidenz_score)}
+              </div>
+            </div>
+          </div>
+
+          {/* Steuer-Ergebnis */}
+          {aktiverFall.ki_analyse?.steuerberechnung&&(
+            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:14}}>
+              {[
+                {l:"Nachzahlung/Erstattung",
+                 v:fmt(aktiverFall.ki_analyse.steuerberechnung.nachzahlung_oder_erstattung),
+                 c:aktiverFall.ist_nachzahlung?C.red:C.green},
+                {l:"Einkommensteuer",
+                 v:fmt(aktiverFall.ki_analyse.steuerberechnung.einkommensteuer||0),
+                 c:C.text},
+                {l:"Solidaritätszuschlag",
+                 v:fmt(aktiverFall.ki_analyse.steuerberechnung.solidaritaetszuschlag||0),
+                 c:C.text},
+              ].map((x,i)=>(
+                <div key={i} style={{background:C.bg3,borderRadius:8,padding:"10px 12px"}}>
+                  <div style={{fontSize:10,color:C.text3,textTransform:"uppercase",
+                    letterSpacing:"0.06em",marginBottom:3}}>{x.l}</div>
+                  <div style={{fontFamily:"'DM Serif Display',serif",fontSize:18,color:x.c}}>{x.v}</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Optimierungen */}
+          {aktiverFall.ki_analyse?.optimierungen?.length>0&&(
+            <div style={{marginBottom:14}}>
+              <div style={{fontSize:12,color:C.text3,textTransform:"uppercase",
+                letterSpacing:"0.06em",marginBottom:8}}>Steueroptimierungen</div>
+              {aktiverFall.ki_analyse.optimierungen.map((o,i)=>(
+                <div key={i} style={{background:C.green+"0d",border:`1px solid ${C.green}25`,
+                  borderRadius:8,padding:"8px 12px",marginBottom:6}}>
+                  <div style={{fontWeight:600,color:C.green,fontSize:13}}>
+                    💡 {o.titel} — {fmt(o.betrag)} Ersparnis
+                  </div>
+                  <div style={{fontSize:12,color:C.text2}}>{o.beschreibung}</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Nachzahlung → Finanzierung */}
+          {aktiverFall.ist_nachzahlung&&aktiverFall.finanzierungsangebot&&(
+            <div style={{background:C.orange+"0d",border:`1px solid ${C.orange}25`,
+              borderRadius:10,padding:"12px 14px",marginBottom:14}}>
+              <div style={{fontWeight:600,color:C.orange,fontSize:13,marginBottom:4}}>
+                💳 Nachzahlung erkannt — Finanzierungsoptionen verfügbar
+              </div>
+              <div style={{fontSize:12,color:C.text2}}>
+                Stundungsantrag (§ 222 AO) ist bereits ausgefüllt.
+                Günstigste Option: Ratenzahlung beim Finanzamt (1,8% p.a.)
+              </div>
+            </div>
+          )}
+
+          {/* Aktionen */}
+          <div style={{display:"flex",gap:8}}>
+            {aktiverFall.empfehlung==="auto_freigabe"&&(
+              <Btn variant="success" onClick={()=>freigeben(aktiverFall.id)}>
+                ✓ Automatisch freigeben ({aktiverFall.konfidenz_score}% Konfidenz)
+              </Btn>
+            )}
+            {aktiverFall.empfehlung!=="auto_freigabe"&&(
+              <Btn variant="primary" onClick={()=>freigeben(aktiverFall.id)}>
+                ✓ Nach Review freigeben
+              </Btn>
+            )}
+            {aktiverFall.elster_xml_b64&&(
+              <Btn variant="ghost" onClick={()=>{
+                const b = atob(aktiverFall.elster_xml_b64);
+                const blob = new Blob([b],{type:"application/xml"});
+                const a = document.createElement("a");
+                a.href = URL.createObjectURL(blob);
+                a.download = `ELSTER_${aktiverFall.mandant}_${aktiverFall.steuerart}_${aktiverFall.jahr}.xml`;
+                a.click();
+              }}>⬇ ELSTER XML</Btn>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Fälle-Liste */}
+      <div style={{fontFamily:"'DM Serif Display',serif",fontSize:18,
+        color:C.text,marginBottom:12}}>Verarbeitete Steuerfälle</div>
+
+      {faelle.length===0 ? (
+        <div style={{color:C.text3,textAlign:"center",padding:"32px 0"}}>
+          <div style={{fontSize:36,marginBottom:12}}>🤖</div>
+          Noch keine Steuerfälle verarbeitet.
+        </div>
+      ) : (
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {faelle.map((f,i)=>{
+            const kc = KONFIDENZ_FARBE(f.konfidenz_score);
+            return (
+              <div key={f.id} style={{background:C.bg2,border:`1px solid ${C.border}`,
+                borderRadius:12,padding:"12px 16px",
+                display:"flex",alignItems:"center",gap:14,
+                animation:`fadeUp 0.3s ease ${i*30}ms both`}}>
+                <div style={{width:52,height:52,borderRadius:"50%",flexShrink:0,
+                  border:`2px solid ${kc}`,display:"flex",alignItems:"center",
+                  justifyContent:"center",flexDirection:"column"}}>
+                  <div style={{fontSize:14,fontWeight:700,color:kc}}>
+                    {f.konfidenz_score}%
+                  </div>
+                </div>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontWeight:600,color:C.text,fontSize:14}}>
+                    {f.mandant} — {f.steuerart} {f.jahr}
+                  </div>
+                  <div style={{fontSize:12,color:C.text3}}>
+                    {new Date(f.erstellt_am).toLocaleDateString("de-DE")} ·{" "}
+                    {f.status==="freigegeben"
+                      ? <span style={{color:C.green}}>Freigegeben ✓</span>
+                      : <span style={{color:C.orange}}>{f.empfehlung_text}</span>}
+                  </div>
+                </div>
+                {f.status!=="freigegeben"&&(
+                  <Btn size="xs" variant="success" onClick={()=>freigeben(f.id)}>Freigeben</Btn>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ══════════════════════════════════════════════════════════
+// FINANZIERUNG TAB
+// ══════════════════════════════════════════════════════════
+
+const FinanzierungTab = () => {
+  const [mandanten, setMandanten] = useState([]);
+  const [form,      setForm]      = useState({mandant:"",betrag:0,steuerart:"ESt",frist_datum:""});
+  const [angebot,   setAngebot]   = useState(null);
+  const [loading,   setLoading]   = useState(false);
+
+  useEffect(()=>{
+    api("/mandanten").then(d=>{
+      const raw=d?.data||[];
+      setMandanten(Array.isArray(raw)?raw.map(x=>x.name):Object.keys(raw));
+    }).catch(()=>{});
+  },[]);
+
+  const erstelle = async () => {
+    if(!form.mandant||!form.betrag){alert("Bitte Mandant und Betrag eingeben");return;}
+    setLoading(true);
+    try{
+      const a = await api("/finanzierung/angebot",{method:"POST",body:JSON.stringify(form)});
+      setAngebot(a);
+    }catch(e){alert(e.message);}
+    finally{setLoading(false);}
+  };
+
+  const inp = (style={}) => ({
+    background:C.bg,border:`1px solid ${C.border2}`,borderRadius:8,
+    color:C.text,padding:"8px 11px",fontSize:13,
+    fontFamily:"'DM Sans',sans-serif",outline:"none",...style,
+  });
+
+  return (
+    <div>
+      <div style={{background:C.bg2,border:`1px solid ${C.border}`,
+        borderRadius:14,padding:20,marginBottom:20}}>
+        <div style={{fontFamily:"'DM Serif Display',serif",fontSize:17,
+          color:C.accent,marginBottom:14}}>
+          💳 Finanzierungsangebot erstellen
+        </div>
+        <div style={{fontSize:13,color:C.text2,marginBottom:14,lineHeight:1.7}}>
+          Steuernachzahlung erkannt? Das System erstellt sofort:
+          Stundungsantrag (§ 222 AO), Ratenzahlungsoptionen und Partner-Empfehlungen.
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"2fr 1fr 1fr",gap:10,marginBottom:12}}>
+          <div>
+            <div style={{fontSize:11,color:C.text3,marginBottom:4}}>Mandant</div>
+            <select value={form.mandant} onChange={e=>setForm(f=>({...f,mandant:e.target.value}))}
+              style={inp({width:"100%"})}>
+              <option value="">— wählen —</option>
+              {mandanten.map(m=><option key={m} value={m}>{m}</option>)}
+            </select>
+          </div>
+          <div>
+            <div style={{fontSize:11,color:C.text3,marginBottom:4}}>Nachzahlung (€)</div>
+            <input type="number" value={form.betrag}
+              onChange={e=>setForm(f=>({...f,betrag:parseFloat(e.target.value)||0}))}
+              style={inp({width:"100%"})} />
+          </div>
+          <div>
+            <div style={{fontSize:11,color:C.text3,marginBottom:4}}>Steuerart</div>
+            <select value={form.steuerart}
+              onChange={e=>setForm(f=>({...f,steuerart:e.target.value}))}
+              style={inp({width:"100%"})}>
+              {["ESt","USt","GewSt","KSt"].map(s=><option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+        </div>
+        <Btn onClick={erstelle} loading={loading} variant="primary">
+          💳 Finanzierungsoptionen berechnen
+        </Btn>
+      </div>
+
+      {angebot&&(
+        <div>
+          {/* Sofort-Maßnahmen */}
+          <div style={{marginBottom:16}}>
+            <div style={{fontFamily:"'DM Serif Display',serif",fontSize:17,
+              color:C.text,marginBottom:12}}>Sofort-Maßnahmen</div>
+            {angebot.sofort_massnahmen?.map((m,i)=>{
+              const bc = m.prioritaet==="kritisch"?C.red:m.prioritaet==="hoch"?C.orange:C.blue;
+              return (
+                <div key={i} style={{background:bc+"0d",border:`1px solid ${bc}25`,
+                  borderRadius:10,padding:"12px 14px",marginBottom:8,
+                  display:"flex",gap:12}}>
+                  <span style={{fontSize:22,flexShrink:0}}>{m.icon}</span>
+                  <div>
+                    <div style={{fontWeight:600,color:bc,fontSize:13,marginBottom:3}}>{m.titel}</div>
+                    <div style={{fontSize:12,color:C.text2,lineHeight:1.6}}>{m.text}</div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Stundungsantrag */}
+          {angebot.stundungsantrag&&(
+            <div style={{marginBottom:16,background:C.bg2,border:`1px solid ${C.border}`,
+              borderRadius:14,padding:18}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
+                <div style={{fontFamily:"'DM Serif Display',serif",fontSize:16,color:C.accent}}>
+                  Stundungsantrag (§ 222 AO)
+                </div>
+                <Btn size="xs" variant="ghost" onClick={()=>{
+                  navigator.clipboard.writeText(angebot.stundungsantrag.text);
+                  alert("Antrag kopiert!");
+                }}>📋 Kopieren</Btn>
+              </div>
+              <pre style={{fontFamily:"'DM Sans',sans-serif",fontSize:12,
+                color:C.text2,lineHeight:1.8,background:C.bg3,
+                borderRadius:8,padding:14,maxHeight:200,overflowY:"auto",
+                whiteSpace:"pre-wrap"}}>
+                {angebot.stundungsantrag.text}
+              </pre>
+              <div style={{fontSize:11,color:C.orange,marginTop:8}}>
+                ⚠ {angebot.stundungsantrag.hinweis}
+              </div>
+            </div>
+          )}
+
+          {/* Finanzierungs-Optionen */}
+          <div style={{fontFamily:"'DM Serif Display',serif",fontSize:17,
+            color:C.text,marginBottom:12}}>Finanzierungsoptionen</div>
+          {angebot.optionen?.map((o,i)=>(
+            <div key={i} style={{background:C.bg2,border:`1px solid ${o.empfehlung?C.green+"40":C.border}`,
+              borderRadius:12,padding:"14px 18px",marginBottom:10}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
+                <div>
+                  <div style={{fontWeight:600,color:C.text,fontSize:15}}>
+                    {o.name}
+                    {o.empfehlung&&<span style={{marginLeft:8,fontSize:11,
+                      background:C.green+"20",color:C.green,padding:"2px 8px",
+                      borderRadius:10}}>Empfohlen</span>}
+                  </div>
+                  <div style={{fontSize:12,color:C.text3,marginTop:2}}>{o.beschreibung}</div>
+                </div>
+                <div style={{textAlign:"right",flexShrink:0}}>
+                  <div style={{fontFamily:"'DM Serif Display',serif",fontSize:20,color:C.accent}}>
+                    {o.zinssatz}% p.a.
+                  </div>
+                </div>
+              </div>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:8}}>
+                {o.raten_optionen?.slice(0,3).map((r,j)=>(
+                  <div key={j} style={{background:C.bg3,borderRadius:8,padding:"8px 12px",
+                    fontSize:12,color:C.text2}}>
+                    <div style={{color:C.text,fontWeight:600}}>{r.monate} Monate</div>
+                    <div>{fmt(r.rate_monatlich)}/Monat</div>
+                    <div style={{fontSize:11,color:C.text3}}>Zinsen: {fmt(r.zinsen_gesamt)}</div>
+                  </div>
+                ))}
+              </div>
+              {o.link&&(
+                <a href={o.link} target="_blank" rel="noopener noreferrer"
+                   style={{fontSize:12,color:C.accent,marginTop:8,display:"block"}}>
+                  → {o.name} aufrufen
+                </a>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ══════════════════════════════════════════════════════════
+// ML-BUCHUNG TAB
+// ══════════════════════════════════════════════════════════
+
+const MLTab = () => {
+  const [stats,       setStats]       = useState(null);
+  const [lieferanten, setLieferanten] = useState([]);
+  const [testInput,   setTestInput]   = useState({lieferant:"",betrag:0,inhalt:"",branche:""});
+  const [testResult,  setTestResult]  = useState(null);
+  const [loading,     setLoading]     = useState(true);
+  const [testing,     setTesting]     = useState(false);
+
+  useEffect(()=>{
+    Promise.allSettled([api("/ml/statistiken"),api("/ml/lieferanten")]).then(([s,l])=>{
+      if(s.status==="fulfilled") setStats(s.value);
+      if(l.status==="fulfilled") setLieferanten(l.value?.lieferanten||[]);
+      setLoading(false);
+    });
+  },[]);
+
+  const teste = async () => {
+    setTesting(true);
+    try{
+      const r = await api("/ml/kategorisieren",{method:"POST",body:JSON.stringify(testInput)});
+      setTestResult(r);
+    }catch(e){alert(e.message);}
+    finally{setTesting(false);}
+  };
+
+  const inp = (style={}) => ({
+    background:C.bg,border:`1px solid ${C.border2}`,borderRadius:8,
+    color:C.text,padding:"8px 11px",fontSize:13,
+    fontFamily:"'DM Sans',sans-serif",outline:"none",...style,
+  });
+
+  if(loading) return <div style={{color:C.text3,padding:"20px 0"}}>Laden...</div>;
+
+  return (
+    <div>
+      {stats&&(
+        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:14,marginBottom:20}}>
+          {[
+            {l:"Trainings-Buchungen",    v:stats.trainings_buchungen, c:C.blue},
+            {l:"Bekannte Lieferanten",   v:stats.bekannte_lieferanten,c:C.green},
+            {l:"Gelernte Patterns",      v:stats.patterns,           c:C.accent},
+          ].map((s,i)=>(
+            <div key={i} style={{background:C.bg2,border:`1px solid ${C.border}`,
+              borderRadius:12,padding:"14px 16px"}}>
+              <div style={{fontSize:10,color:C.text3,textTransform:"uppercase",
+                letterSpacing:"0.07em",marginBottom:4}}>{s.l}</div>
+              <div style={{fontFamily:"'DM Serif Display',serif",fontSize:24,color:s.c}}>{s.v}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{background:C.bg2,border:`1px solid ${C.border}`,
+        borderRadius:14,padding:20,marginBottom:20}}>
+        <div style={{fontFamily:"'DM Serif Display',serif",fontSize:17,
+          color:C.accent,marginBottom:12}}>🧪 Kategorisierung testen</div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
+          <div>
+            <div style={{fontSize:11,color:C.text3,marginBottom:4}}>Lieferant</div>
+            <input value={testInput.lieferant}
+              onChange={e=>setTestInput(f=>({...f,lieferant:e.target.value}))}
+              placeholder="z.B. Amazon, Tankstelle Shell..." style={inp({width:"100%"})}/>
+          </div>
+          <div>
+            <div style={{fontSize:11,color:C.text3,marginBottom:4}}>Betrag (€)</div>
+            <input type="number" value={testInput.betrag}
+              onChange={e=>setTestInput(f=>({...f,betrag:parseFloat(e.target.value)||0}))}
+              style={inp({width:"100%"})}/>
+          </div>
+          <div>
+            <div style={{fontSize:11,color:C.text3,marginBottom:4}}>Beleg-Inhalt (Stichworte)</div>
+            <input value={testInput.inhalt}
+              onChange={e=>setTestInput(f=>({...f,inhalt:e.target.value}))}
+              placeholder="z.B. Druckerpatronen, Büropapier..." style={inp({width:"100%"})}/>
+          </div>
+          <div>
+            <div style={{fontSize:11,color:C.text3,marginBottom:4}}>Branche (optional)</div>
+            <input value={testInput.branche}
+              onChange={e=>setTestInput(f=>({...f,branche:e.target.value}))}
+              placeholder="z.B. Gastronomie / Lebensmittel" style={inp({width:"100%"})}/>
+          </div>
+        </div>
+        <Btn onClick={teste} loading={testing} variant="primary">🧠 Kategorisieren</Btn>
+
+        {testResult&&(
+          <div style={{marginTop:14,background:C.bg3,borderRadius:10,padding:14,
+            border:`1px solid ${C.border}`}}>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10}}>
+              {[
+                {l:"Kategorie",     v:testResult.kategorie_name||testResult.kategorie, c:C.accent},
+                {l:"SKR03-Konto",   v:testResult.skr03_konto,   c:C.blue},
+                {l:"Konfidenz",     v:`${Math.round((testResult.konfidenz||0)*100)}%`,
+                 c:testResult.konfidenz>=0.8?C.green:testResult.konfidenz>=0.6?C.orange:C.red},
+              ].map((x,i)=>(
+                <div key={i} style={{background:C.bg2,borderRadius:8,padding:"8px 12px"}}>
+                  <div style={{fontSize:10,color:C.text3,textTransform:"uppercase",
+                    letterSpacing:"0.06em",marginBottom:2}}>{x.l}</div>
+                  <div style={{fontSize:14,fontWeight:600,color:x.c}}>{x.v}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{fontSize:12,color:C.text3,marginTop:10}}>
+              Methode: {testResult.methode} · {testResult.begruendung}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Bekannte Lieferanten */}
+      <div style={{fontFamily:"'DM Serif Display',serif",fontSize:17,
+        color:C.text,marginBottom:12}}>
+        Bekannte Lieferanten ({lieferanten.length})
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:8}}>
+        {lieferanten.slice(0,20).map((l,i)=>(
+          <div key={i} style={{background:C.bg2,border:`1px solid ${C.border}`,
+            borderRadius:8,padding:"8px 12px",display:"flex",
+            justifyContent:"space-between",alignItems:"center"}}>
+            <div>
+              <div style={{fontSize:13,color:C.text,fontWeight:500}}>{l.lieferant}</div>
+              <div style={{fontSize:11,color:C.text3}}>{l.hauptkategorie}</div>
+            </div>
+            <div style={{fontSize:11,color:C.text3}}>
+              {l.buchungen||0}×
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+// ═══════════════════════════════════════════════════════════
+// HAUPT-COMPONENT
+// ═══════════════════════════════════════════════════════════
+
+export default function SteuerAutopilot() {
+  const [tab, setTab] = useState("autopilot");
+  return (
+    <div style={{flex:1,background:C.bg,overflowY:"auto",fontFamily:"'DM Sans',sans-serif"}}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@300;400;500;600&display=swap');
+        @keyframes spin{to{transform:rotate(360deg)}} @keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+        *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+        ::-webkit-scrollbar{width:4px} ::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.1);border-radius:4px}
+      `}</style>
+      <div style={{background:C.bg2,borderBottom:`1px solid ${C.border}`,
+        padding:"20px 32px",position:"sticky",top:0,zIndex:10}}>
+        <div style={{fontFamily:"'DM Serif Display',serif",fontSize:22,
+          color:C.text,marginBottom:14}}>KI-Automatisierung</div>
+        <div style={{display:"flex",gap:4}}>
+          {TABS.map(t=>(
+            <button key={t.id} onClick={()=>setTab(t.id)} style={{
+              display:"flex",alignItems:"center",gap:7,padding:"8px 14px",
+              borderRadius:10,border:"none",
+              background:tab===t.id?C.bg3:"transparent",
+              color:tab===t.id?C.accent:C.text2,
+              fontWeight:tab===t.id?600:400,fontSize:13,cursor:"pointer",
+              fontFamily:"'DM Sans',sans-serif",
+              borderBottom:tab===t.id?`2px solid ${C.accent}`:"2px solid transparent",
+              transition:"all 0.15s"}}>
+              <span>{t.icon}</span>{t.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div style={{padding:"28px 32px"}}>
+        {tab==="autopilot"   && <AutopilotTab />}
+        {tab==="finanzierung" && <FinanzierungTab />}
+        {tab==="ml"          && <MLTab />}
+      </div>
+    </div>
+  );
+}
