@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
+from models import ApiKeyCreateRequest
 
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -66,6 +67,12 @@ from backend.services.aufgaben_service import AufgabenService
 from backend.services.settings_service import SettingsService
 
 load_dotenv()
+
+from pydantic import BaseModel
+
+class WebhookCreateRequest(BaseModel):
+    url: str
+    event: str
 
 # ── Logging ──────────────────────────────────────────────────
 os.makedirs("data", exist_ok=True)
@@ -1134,6 +1141,8 @@ _AUTH_EXEMPT_PREFIXES = (
 @app.middleware("http")
 async def auth_guard_middleware(request: Request, call_next):
     path = request.url.path or "/"
+    if path.startswith("/api/auth/"):
+        return await call_next(request)
     if request.method == "OPTIONS":
         return await call_next(request)
     if path == "/" or path.startswith(_AUTH_EXEMPT_PREFIXES):
@@ -5202,3 +5211,23 @@ async def live_update_senden(typ: str, data: dict):
         pass
 
 
+# --- runtime health aliases (server hotfix) ---
+@app.get("/health")
+@app.get("/api/health")
+def health():
+    return {"ok": True, "service": "api"}
+@app.get("/ready")
+@app.get("/api/ready")
+def ready():
+    return {"ok": True, "service": "api", "ready": True}
+
+# --- runtime health aliases (server hotfix) ---
+@app.get("/health")
+@app.get("/api/health")
+def health():
+    return {"ok": True, "service": "api"}
+
+@app.get("/ready")
+@app.get("/api/ready")
+def ready():
+    return {"ok": True, "service": "api", "ready": True}
