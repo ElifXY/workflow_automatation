@@ -102,13 +102,16 @@ _log_dir = (os.getenv("API_LOG_DIR") or "data").strip() or "data"
 os.makedirs(_log_dir, exist_ok=True)
 _log_path = os.path.join(_log_dir, "api.log")
 
+_log_handlers_api: list[logging.Handler] = [logging.StreamHandler()]
+try:
+    _log_handlers_api.append(logging.FileHandler(_log_path, encoding="utf-8"))
+except OSError:
+    pass  # bereits in backend.application geloggt oder nur stdout
+
 logging.basicConfig(
     level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(_log_path, encoding="utf-8"),
-    ]
+    handlers=_log_handlers_api,
 )
 log = logging.getLogger("kanzlei_api")
 
