@@ -36,11 +36,11 @@ RUN useradd -m -u 1000 kanzlei && \
     chown -R kanzlei:kanzlei /app
 USER kanzlei
 
-# Health-Check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=5 \
-    CMD curl -f http://localhost:8000/ready || exit 1
+# Health-Check (127.0.0.1: konsistent mit compose; start_period groß für ersten Cold-Start)
+HEALTHCHECK --interval=15s --timeout=10s --start-period=120s --retries=10 \
+    CMD curl -fsS http://127.0.0.1:8000/ready || exit 1
 
 EXPOSE 8000 8001
 
 # Standard: API starten
-CMD ["uvicorn", "backend.application:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+CMD ["uvicorn", "backend.application:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

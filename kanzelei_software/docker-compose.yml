@@ -74,22 +74,23 @@ services:
   api:
     <<: *api-common
     container_name: kanzlei_api
+    # Ein Worker: vermeidet parallele Doppel-Imports / init_db beim Start (häufige Ursache für „child died“ + unhealthy).
     command: >
       uvicorn backend.application:app
       --host 0.0.0.0
       --port 8000
-      --workers 2
+      --workers 1
       --loop asyncio
       --timeout-keep-alive 30
     ports:
       - "8000:8000"
-    # /health prüft Datenspeicher (Postgres) → kann 503 liefern. Für Compose-Liveness: /ready (Prozess lauscht).
+    # /ready = leichtgewichtig; 127.0.0.1 vermeidet IPv6-localhost-Probleme. start_period großzügig für ersten Import.
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/ready"]
-      interval: 30s
-      timeout: 15s
-      retries: 5
-      start_period: 90s
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/ready"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
 
   frontend:
     profiles: [dev]
@@ -201,11 +202,11 @@ services:
       api:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://api:8000/ready"]
-      interval: 60s
+      test: ["CMD", "curl", "-fsS", "http://api:8000/ready"]
+      interval: 30s
       timeout: 15s
       retries: 5
-      start_period: 90s
+      start_period: 120s
 
   certbot:
     image: certbot/certbot:latest
