@@ -1,17 +1,16 @@
+from __future__ import annotations
+
 # ============================================================
 # KANZLEI AI — PRODUCTION API v3.0
 # Fixes: Thread-safe DB, Rate-Limiting, Auth auf allen Endpoints,
 #        Standardisierte Responses, Globales Error-Handling
 # ============================================================
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Query, status, Depends, Header, Body, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse
+from fastapi import HTTPException, BackgroundTasks, Query, status, Depends, Header, Body, Request
+from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse
 from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, List, Dict, Any
-from models import ApiKeyCreateRequest
 
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -21,12 +20,19 @@ import os
 import json
 import logging
 import time
+import re
 import smtplib
 import hmac
+import hashlib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import httpx
 import secrets
+import html as html_module
+from urllib.parse import quote
+from urllib.parse import urlencode
+from urllib.parse import urlsplit
+import base64
 
 from dotenv import load_dotenv
 
@@ -41,8 +47,13 @@ from core.daten_speicher import (
     email_outbox_mark_sent,
     email_outbox_mark_failed,
     email_outbox_recent,
+    email_outbox_dead_24h_count,
+    webhook_queue_failed_24h_count,
     agent_action_record,
     agent_action_update,
+    agent_actions_list,
+    agent_lock_try_acquire,
+    agent_lock_release,
     usage_get,
     usage_increment,
     api_key_create,
@@ -59,60 +70,50 @@ from core.daten_speicher import (
     webhook_mark_sent,
     webhook_mark_failed,
 )
-from core.rbac import has_permission
+from core.aufgabe_erledigt import aufgabe_ist_erledigt, aufgabe_ist_offen
 from core.decision_engine import analysiere_alle_mandanten, berechne_steuerfristen, berechne_mandant_score
 from core.ai_email import generate_ai_email
+from core.ai_service import assistant_chat, analyze_document, analyze_receipt
+from core.ai_guardrails import guard_input_text
 from backend.services.mandanten_service import MandantenService
 from backend.services.aufgaben_service import AufgabenService
 from backend.services.settings_service import SettingsService
 
 load_dotenv()
 
-from pydantic import BaseModel
+from backend.deps import get_current_user, require_admin, require_owner
+from backend.permissions import require_permission as _require_permission
+from backend.schemas import CreateUserRequest
+from backend.feature_gate import should_block_advanced_path
+from backend.tenant import tenant_id_from_user
+from core.rbac import has_permission
+from core.tenant_nav_policy import merged_settings_for_user
+from modules.settings_manager import setting_holen as global_setting_holen
+
 
 class WebhookCreateRequest(BaseModel):
     url: str
     event: str
 
+
 # ── Logging ──────────────────────────────────────────────────
 os.makedirs("data", exist_ok=True)
+_log_dir = (os.getenv("API_LOG_DIR") or "data").strip() or "data"
+os.makedirs(_log_dir, exist_ok=True)
+_log_path = os.path.join(_log_dir, "api.log")
 
 logging.basicConfig(
     level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("data/api.log", encoding="utf-8"),
+        logging.FileHandler(_log_path, encoding="utf-8"),
     ]
 )
 log = logging.getLogger("kanzlei_api")
 
-# ── App ───────────────────────────────────────────────────────
-app = FastAPI(
-    title="Kanzlei AI — API v3.0",
-    description="Vollautomatisches Kanzlei-Management",
-    version="3.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc"
-)
-
-app.add_middleware(GZipMiddleware, minimum_size=1000)
-_origins_env = os.getenv(
-    "ALLOWED_ORIGINS",
-    "http://localhost:3000,http://127.0.0.1:3000,http://localhost:80,http://127.0.0.1:80",
-)
-_cors_origins = [o.strip() for o in _origins_env.split(",") if o.strip()]
-# Wildcard + credentials ist im Browser ungültig — dann Credentials aus
-_cors_creds = "*" not in _cors_origins and not (
-    len(_cors_origins) == 1 and _cors_origins[0] == "*"
-)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_cors_origins if _cors_origins else ["http://localhost:3000"],
-    allow_credentials=_cors_creds,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# ── App (eine Instanz: ``backend.application``) ─────────────────
+from backend.application import app  # noqa: E402
 
 ds = DatenSpeicher()   # Fallback für Startup + nicht-User-spezifische Calls
 
@@ -121,15 +122,38 @@ def get_ds(user: dict = None) -> DatenSpeicher:
     Gibt DatenSpeicher für die Kanzlei des eingeloggten Users zurück.
     Kern des Multi-Kanzlei-Systems: jeder User sieht nur seine Daten.
     """
-    kanzlei_id = (user or {}).get("kanzlei_id", "default")
+    kanzlei_id = (user or {}).get("tenant_id") or (user or {}).get("kanzlei_id", "default")
     if kanzlei_id == "default":
         return ds
     return DatenSpeicher(kanzlei_id=kanzlei_id)
+
+
+def _tenant_features_merged(user: dict) -> Dict[str, Any]:
+    """Tenant-Feature-Flags (Defaults + Mandanten-Overrides in ``DatenSpeicher``)."""
+    from core.tenant_features import FEATURE_SETTINGS_KEY, merged_features
+
+    store = get_ds(user)
+    raw = store.setting_holen(FEATURE_SETTINGS_KEY, {})
+    return merged_features(raw)
+
+
+def _require_tenant_feature(user: dict, feature_key: str) -> None:
+    if not _tenant_features_merged(user).get(feature_key):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            f"Feature nicht freigeschaltet: {feature_key}",
+        )
+
+
+def _billing_enabled() -> bool:
+    return bool(global_setting_holen("billing_aktiv"))
+
 
 # ── Rate-Limiting (In-Memory) ─────────────────────────────────
 _rate_store: Dict[str, List[float]] = {}
 RATE_LIMIT   = int(os.getenv("API_RATE_LIMIT", "60"))   # Requests/Minute
 RATE_WINDOW  = 60  # Sekunden
+_tenant_rate_store: Dict[str, List[float]] = {}
 
 def _get_client_ip(request: Request) -> str:
     forwarded = request.headers.get("X-Forwarded-For")
@@ -140,10 +164,24 @@ def _get_client_ip(request: Request) -> str:
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
     # Auth-Endpoints strenger limitieren
-    is_auth = request.url.path.startswith("/auth/login")
+    path = request.url.path or "/"
+    is_auth = path in frozenset(
+        {
+            "/auth/login",
+            "/login",
+            "/api/login",
+            "/register",
+            "/api/register",
+            "/api/auth/login",
+            "/auth/password/forgot",
+            "/api/auth/password/forgot",
+            "/auth/password/reset",
+            "/api/auth/password/reset",
+        }
+    )
     limit   = 10 if is_auth else RATE_LIMIT
     ip      = _get_client_ip(request)
-    key     = f"{ip}:{request.url.path if is_auth else ip}"
+    key     = f"{ip}:{path if is_auth else ip}"
 
     now = time.time()
     _rate_store[key] = [t for t in _rate_store.get(key, []) if now - t < RATE_WINDOW]
@@ -162,10 +200,81 @@ async def rate_limit_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+_env_for_logs = (os.getenv("ENVIRONMENT") or os.getenv("APP_ENV") or "development").lower()
+_sal = (os.getenv("STRUCTURED_ACCESS_LOG") or "").strip().lower()
+if _sal in ("1", "true", "yes"):
+    _STRUCTURED_ACCESS = True
+elif _sal in ("0", "false", "no", "off"):
+    _STRUCTURED_ACCESS = False
+else:
+    _STRUCTURED_ACCESS = _env_for_logs == "production"
+
+
+@app.middleware("http")
+async def structured_access_log(request: Request, call_next):
+    """Eine JSON-Zeile pro Request (stdout → Docker-Logs), in Production standardmäßig an."""
+    if not _STRUCTURED_ACCESS:
+        return await call_next(request)
+    t0 = time.perf_counter()
+    status_code = 500
+    response = None
+    try:
+        response = await call_next(request)
+        status_code = getattr(response, "status_code", 200)
+        return response
+    except Exception:
+        status_code = 500
+        raise
+    finally:
+        dur_ms = int((time.perf_counter() - t0) * 1000)
+        log.info(
+            json.dumps(
+                {
+                    "access": True,
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status": status_code,
+                    "duration_ms": dur_ms,
+                    "client": _get_client_ip(request),
+                },
+                ensure_ascii=False,
+            )
+        )
+
+
 PLAN_USAGE_LIMITS = {
-    "starter": {"ai_requests_day": 200, "exports_day": 30},
-    "professional": {"ai_requests_day": 2000, "exports_day": 300},
-    "enterprise": {"ai_requests_day": 100000, "exports_day": 10000},
+    "starter": {"ai_requests_day": 200, "exports_day": 30, "settings_changes_day": 80},
+    "professional": {"ai_requests_day": 2000, "exports_day": 300, "settings_changes_day": 400},
+    "enterprise": {"ai_requests_day": 100000, "exports_day": 10000, "settings_changes_day": 20000},
+}
+
+
+def _next_plan(plan: str) -> str:
+    p = (plan or "starter").strip().lower()
+    if p == "starter":
+        return "professional"
+    if p == "professional":
+        return "enterprise"
+    return "enterprise"
+
+
+def _upgrade_offer_payload(plan: str, metric: str, used: int, limit: int) -> Dict[str, Any]:
+    next_plan = _next_plan(plan)
+    upgrade_url = (os.getenv("BILLING_UPGRADE_URL") or os.getenv("SALES_CONTACT_URL") or "").strip()
+    # Default: 20% Rabatt bei jährlicher Zahlweise als Conversion-Hebel.
+    annual_discount_pct = int((os.getenv("ANNUAL_DISCOUNT_PERCENT") or "20").strip() or "20")
+    return {
+        "current_plan": plan,
+        "recommended_plan": next_plan,
+        "metric": metric,
+        "used": int(used),
+        "limit": int(limit),
+        "annual_discount_percent": max(0, min(60, annual_discount_pct)),
+        "upgrade_url": upgrade_url or None,
+        "message": (
+            f"{metric} Limit erreicht ({used}/{limit}). "
+            f"Upgrade auf {next_plan} verhindert Ausfälle in umsatzkritischen Automationen."
+        ),
 }
 
 
@@ -187,13 +296,76 @@ def _usage_metric_for_path(path: str) -> Optional[str]:
 
 def _plan_for_user(user: dict) -> str:
     try:
-        from core.auth import hole_kanzlei
+        from backend.auth import hole_kanzlei
 
-        kid = user.get("kanzlei_id", "default")
+        kid = user.get("tenant_id") or user.get("kanzlei_id") or "default"
         row = hole_kanzlei(kid) or {}
         return (row.get("plan") or "starter").strip().lower()
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        log.debug("plan_for_user fallback starter: %s", exc)
         return "starter"
+
+
+def _usage_auth_context_from_bearer(raw_token: str) -> Optional[dict]:
+    """
+    Session-Token (core.auth) oder JWT (gleiche Limits wie Session).
+    Ohne gültigen Kontext: None — Request läuft ohne Quota-Check (z. B. öffentliche Routen).
+    """
+    token = (raw_token or "").strip()
+    if not token:
+        return None
+    from backend.auth import verifiziere_session
+    from backend.auth import jwt_secret, verify_access_token
+
+    session = verifiziere_session(token)
+    if session:
+        return session
+    if jwt_secret():
+        claims = verify_access_token(token)
+        if claims and (claims.get("typ") or "access") == "access":
+            kid = claims.get("tenant_id") or claims.get("kanzlei_id") or "default"
+            sub = (claims.get("sub") or "").strip()
+            if sub:
+                return {
+                    "benutzername": sub,
+                    "kanzlei_id": kid,
+                    "tenant_id": kid,
+                    "rolle": claims.get("rolle") or claims.get("role") or "assistent",
+                }
+    return None
+
+
+def _usage_quota_breakdown(kanzlei_id: str, plan: str) -> Dict[str, Any]:
+    """Kunden- und Umsatz-relevant: klare Auslastung + Ampel pro Metrik."""
+    limits = PLAN_USAGE_LIMITS.get(plan, PLAN_USAGE_LIMITS["starter"])
+    by_metric: Dict[str, Any] = {}
+    overall = "ok"
+    for mkey, lim in limits.items():
+        if not lim:
+            continue
+        used = int(usage_get(kanzlei_id, mkey))
+        pct = min(100, int(100 * used / max(1, int(lim))))
+        remaining = max(0, int(lim) - used)
+        if used >= int(lim):
+            st = "limit"
+            overall = "limit"
+        elif pct >= 90:
+            st = "critical"
+            overall = "critical" if overall == "ok" else overall
+        elif pct >= 75:
+            st = "warning"
+            if overall == "ok":
+                overall = "warning"
+        else:
+            st = "ok"
+        by_metric[mkey] = {
+            "used": used,
+            "limit": int(lim),
+            "remaining": remaining,
+            "percent_used": pct,
+            "status": st,
+        }
+    return {"overall": overall, "by_metric": by_metric}
 
 
 @app.middleware("http")
@@ -205,31 +377,57 @@ async def usage_quota_middleware(request: Request, call_next):
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         return await call_next(request)
-    from core.auth import verifiziere_session
-
-    session = verifiziere_session(auth.removeprefix("Bearer ").strip())
-    if not session:
+    ctx = _usage_auth_context_from_bearer(auth.removeprefix("Bearer ").strip())
+    if not ctx:
         return await call_next(request)
 
-    plan = _plan_for_user(session)
+    plan = _plan_for_user(ctx)
     limit = PLAN_USAGE_LIMITS.get(plan, PLAN_USAGE_LIMITS["starter"]).get(metric, 0)
-    kid = session.get("kanzlei_id", "default")
+    kid = str(ctx.get("tenant_id") or ctx.get("kanzlei_id") or "default").strip() or "default"
     current = usage_get(kid, metric)
     if limit and current >= limit:
-        return JSONResponse(
-            status_code=402,
-            content={
+        offer = _upgrade_offer_payload(plan, metric, int(current), int(limit))
+        payload = {
                 "ok": False,
                 "error": f"Plan-Limit erreicht ({metric}: {current}/{limit})",
                 "code": 402,
                 "metric": metric,
                 "plan": plan,
-            },
-        )
+            "hint": "Upgrade erhöht Limits und stabilisiert Umsatz-relevante Automatisierung.",
+            "upgrade_offer": offer,
+        }
+        if offer.get("upgrade_url"):
+            payload["upgrade_url"] = offer["upgrade_url"]
+        return JSONResponse(status_code=402, content=payload)
 
     response = await call_next(request)
     if response.status_code < 400:
-        usage_increment(kid, metric, 1)
+        try:
+            usage_increment(kid, metric, 1)
+            used_after = int(current) + 1
+            pct = int(100 * used_after / max(1, int(limit))) if limit else 0
+            if limit:
+                if used_after >= int(limit):
+                    qstatus = "limit"
+                elif pct >= 90:
+                    qstatus = "critical"
+                elif pct >= 75:
+                    qstatus = "warning"
+                else:
+                    qstatus = "ok"
+                response.headers["X-Quota-Metric"] = metric
+                response.headers["X-Quota-Used"] = str(used_after)
+                response.headers["X-Quota-Limit"] = str(limit)
+                response.headers["X-Quota-Percent"] = str(min(100, pct))
+                response.headers["X-Quota-Status"] = qstatus
+                response.headers["X-Quota-Plan"] = plan
+                if qstatus in {"warning", "critical"}:
+                    offer = _upgrade_offer_payload(plan, metric, used_after, int(limit))
+                    response.headers["X-Quota-Recommend-Plan"] = str(offer["recommended_plan"])
+                    if offer.get("upgrade_url"):
+                        response.headers["X-Quota-Upgrade-Url"] = str(offer["upgrade_url"])
+        except Exception as exc:  # noqa: BLE001
+            log.warning("usage_increment failed kanzlei=%s metric=%s: %s", kid, metric, exc)
     return response
 
 
@@ -356,9 +554,20 @@ class MandantUpdate(BaseModel):
 class AufgabeCreate(BaseModel):
     beschreibung: str          = Field(..., min_length=1, max_length=500)
     frist:        str          = Field(..., example="2026-06-30")
+    frist_uhrzeit: Optional[str] = Field(None, example="14:00")
     prioritaet:   Optional[str] = Field("normal")
     kategorie:    Optional[str] = None
     notiz:        Optional[str] = None
+
+
+class AufgabeUpdate(BaseModel):
+    beschreibung: Optional[str] = Field(None, min_length=1, max_length=500)
+    mandant: Optional[str] = Field(None, description="Aufgabe anderem Mandanten zuordnen (Name wie in Mandantenliste)")
+    frist: Optional[str] = None
+    frist_uhrzeit: Optional[str] = None
+    prioritaet: Optional[str] = None
+    kategorie: Optional[str] = None
+    notiz: Optional[str] = None
 
 class DokumentAnforderung(BaseModel):
     dokument_name: str          = Field(..., min_length=2)
@@ -426,6 +635,30 @@ def _kv_get(store: DatenSpeicher, key: str, default):
 def _kv_set(store: DatenSpeicher, key: str, value) -> None:
     store.setting_setzen(key, value)
 
+
+def _billing_obs_inc(kanzlei_id: str, key: str, delta: int = 1) -> None:
+    try:
+        kid = str(kanzlei_id or "default").strip() or "default"
+        store = DatenSpeicher(kanzlei_id=kid)
+        raw = store.setting_holen("__billing_observability_v1", {}) or {}
+        obs = raw if isinstance(raw, dict) else {}
+        obs[str(key)] = int(obs.get(str(key), 0)) + int(delta)
+        obs["last_updated_at"] = datetime.utcnow().isoformat()
+        store.setting_setzen("__billing_observability_v1", obs)
+    except Exception:
+        pass
+
+
+def _billing_obs_get(kanzlei_id: str) -> Dict[str, Any]:
+    try:
+        kid = str(kanzlei_id or "default").strip() or "default"
+        store = DatenSpeicher(kanzlei_id=kid)
+        raw = store.setting_holen("__billing_observability_v1", {}) or {}
+        return raw if isinstance(raw, dict) else {}
+    except Exception:
+        return {}
+
+
 def darf_email_senden(name: str, mindest_abstand_stunden: int = 24, store: Optional[DatenSpeicher] = None) -> bool:
     st = store or ds
     m = st.hole_mandant(name) if hasattr(st, "hole_mandant") else st.hole_mandanten().get(name, {})
@@ -487,6 +720,15 @@ def send_email_smtp(to_email: str, subject: str, body: str, html_body: str = Non
     except Exception as e:
         log.error(f"Email-Fehler: {e}")
         return False
+
+
+def _invite_registration_url(invite_token: str) -> str:
+    """Öffentlicher Link zur SPA-Registrierung inkl. ``invite_token``."""
+    base = (os.getenv("PORTAL_BASE_URL") or os.getenv("PUBLIC_APP_URL") or "").strip().rstrip("/")
+    if not base:
+        port = int(os.getenv("PORTAL_PORT") or os.getenv("API_PORT") or os.getenv("API_PUBLIC_PORT") or "8000")
+        base = f"http://127.0.0.1:{port}"
+    return f"{base}/register-email?invite_token={quote(invite_token, safe='')}"
 
 
 def _email_fuer_mandant_senden(name: str, store: Optional[DatenSpeicher] = None) -> bool:
@@ -561,6 +803,17 @@ def _process_email_outbox_once(limit: int = 10) -> Dict[str, int]:
                 raise RuntimeError("SMTP send fehlgeschlagen")
             email_outbox_mark_sent(int(oid))
             sent += 1
+            idk = str(row.get("idempotency_key") or "").strip()
+            if idk.startswith("team_invite|"):
+                parts = idk.split("|")
+                if len(parts) >= 3:
+                    inv_kid, inv_jti = parts[1], parts[2]
+                    try:
+                        from core.tenant_invite_records import invite_record_mark_email_smtp_sent
+
+                        invite_record_mark_email_smtp_sent(jti=inv_jti, kanzlei_id=inv_kid)
+                    except Exception:
+                        pass
             kid = row.get("kanzlei_id", "default")
             name = row.get("mandant", "")
             if name:
@@ -829,35 +1082,94 @@ async def startup_event():
         log.error("⚠ System startet mit eingeschränkter Funktion — Keys in .env prüfen!")
 
     environment = (os.getenv("ENVIRONMENT") or os.getenv("APP_ENV") or "development").lower()
+    prod_errs: list[str] = []
+
     if environment == "production":
         database_url = (os.getenv("DATABASE_URL") or "").strip()
         if not database_url:
-            raise RuntimeError("DATABASE_URL fehlt: Production benötigt Postgres-Verbindung.")
-        if not database_url.lower().startswith("postgresql://"):
-            raise RuntimeError("Production verlangt PostgreSQL: DATABASE_URL muss mit postgresql:// beginnen.")
-        json_runtime = [
-            str(p) for p in Path("data").rglob("*.json")
-            if p.is_file()
-        ] if Path("data").exists() else []
-        if json_runtime:
-            raise RuntimeError(f"Production blockiert: JSON-Runtime-Dateien gefunden: {json_runtime}")
+            prod_errs.append(
+                "DATABASE_URL fehlt: Production benötigt Postgres-Verbindung (Compose setzt sie beim Service api)."
+            )
+        elif not database_url.lower().startswith("postgresql://"):
+            prod_errs.append(
+                "Production verlangt PostgreSQL: DATABASE_URL muss mit postgresql:// beginnen."
+            )
+        if Path("data").exists():
+            json_runtime = [
+                str(p) for p in Path("data").rglob("*.json")
+                if p.is_file()
+            ]
+            if json_runtime:
+                prod_errs.append(
+                    f"Production blockiert: JSON-Runtime-Dateien in data/: {json_runtime}"
+                )
 
     # ── Daten-Verzeichnisse anlegen ───────────────────────────
     for d in ["data/uploads"]:
         os.makedirs(d, exist_ok=True)
 
     if environment == "production":
-        sqlite_files = [str(p) for p in Path("data").glob("*.db")]
-        if sqlite_files:
-            raise RuntimeError(f"Production blockiert: SQLite-Dateien gefunden: {sqlite_files}")
+        allow_sqlite_fallback = (os.getenv("ALLOW_SQLITE_FALLBACK") or "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        sqlite_files = [str(p) for p in Path("data").glob("*.db") if p.is_file()]
+        if sqlite_files and not allow_sqlite_fallback:
+            prod_errs.append(
+                "Production blockiert: SQLite-Dateien in data/ gefunden: "
+                f"{sqlite_files}. Nur temporär: ALLOW_SQLITE_FALLBACK=1 für Hybrid."
+            )
+
+        gw = (os.getenv("API_GATEWAY_KEY") or "").strip()
+        if len(gw) < 32:
+            prod_errs.append(
+                "API_GATEWAY_KEY muss mindestens 32 Zeichen haben (öffentlicher API-Zugriff)."
+            )
+        raw_jwt = (os.getenv("JWT_SECRET") or "").strip()
+        jsecret = raw_jwt.lower()
+        if len(raw_jwt) < 48 or any(
+            x in jsecret for x in ("placeholder", "dev-jwt", "change-in-prod", "minimum-64")
+        ):
+            prod_errs.append(
+                "JWT_SECRET muss mindestens 48 Zeichen haben und keine Dev-Platzhalter-Muster enthalten."
+            )
+        du = (os.getenv("DATABASE_URL") or "").strip()
+        if "KzDevOnly_" in du or "DevOnlyChangeBeforeProd2026X" in du:
+            prod_errs.append(
+                "DATABASE_URL enthält noch ein Compose-Dev-Passwort (Substring KzDevOnly_ / …). "
+                "In .env POSTGRES_PASSWORD (und ggf. POSTGRES_USER) setzen — ohne dieses Muster im URL."
+            )
+        ru = (os.getenv("REDIS_URL") or "").strip()
+        if ru and ("KzDevOnly_" in ru or "DevOnlyChangeBeforeProd2026X" in ru):
+            prod_errs.append(
+                "REDIS_URL enthält noch ein Compose-Dev-Passwort — REDIS_PASSWORD in .env anpassen."
+            )
+
+    if prod_errs:
+        prod_errs.append(
+            "Docker-Schnellstart: in .env ENVIRONMENT=development, bis alle Punkte oben erfüllt sind."
+        )
+        raise RuntimeError("Production-Konfiguration ungültig:\n• " + "\n• ".join(prod_errs))
+
+    else:
+        _du = (os.getenv("DATABASE_URL") or "").strip().lower()
+        if _du.startswith("postgresql://"):
+            log.warning(
+                "Dev-Modus: DATABASE_URL ist PostgreSQL, Kern-Daten (Mandanten/Belege) nutzen "
+                "DatenSpeicher weiter SQLite unter data/kanzlei.db. Für Testkunden-Production: "
+                "ENVIRONMENT=production + nur Postgres (keine *.db in data/)."
+            )
 
     # ── Auto-Agent starten ────────────────────────────────────
     asyncio.create_task(auto_agent_worker())
     asyncio.create_task(email_outbox_worker())
     asyncio.create_task(webhook_delivery_worker())
+    asyncio.create_task(billing_weekly_digest_worker())
     log.info("✓ Auto-Agent gestartet")
     log.info("✓ Email-Outbox Worker gestartet")
     log.info("✓ Webhook Delivery Worker gestartet")
+    log.info("✓ Weekly Digest Worker gestartet")
     log.info("=" * 60)
 
 
@@ -884,12 +1196,20 @@ def root():
 
 
 @app.get("/health", tags=["System"])
+@app.get("/api/health", tags=["System"])
 def health():
     try:
         ds.hole_mandanten()
         return {"status": "healthy", "timestamp": datetime.now().isoformat()}
     except Exception as e:
         raise HTTPException(503, f"Datenspeicher nicht erreichbar: {e}")
+
+
+@app.get("/ready", tags=["System"])
+@app.get("/api/ready", tags=["System"])
+def ready():
+    """Readiness für Load-Balancer / go_live_check (ohne DB-Schreiblast)."""
+    return {"status": "ready", "timestamp": datetime.now().isoformat()}
 
 
 @app.get("/api/v1/meta", tags=["System"])
@@ -907,39 +1227,6 @@ def api_v1_meta():
 @app.get("/api/v1/health", tags=["System"])
 def api_v1_health():
     return ok({"status": "healthy", "timestamp": datetime.now().isoformat()})
-
-
-# Early auth helper so dependencies below resolve at import time.
-def get_current_user(
-    authorization: Optional[str] = Header(None),
-    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
-    request: Request = None,
-) -> dict:
-    if x_api_key:
-        api_key = api_key_verify(x_api_key.strip())
-        if not api_key:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Ungültiger API-Key")
-        return {
-            "benutzername": f"api_key:{api_key['name']}",
-            "rolle": "admin",
-            "kanzlei_id": api_key["kanzlei_id"],
-            "api_key_id": api_key["id"],
-            "api_permissions": api_key.get("permissions", []),
-        }
-    from core.auth import verifiziere_session
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(
-            status.HTTP_401_UNAUTHORIZED, "Login erforderlich",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    token = authorization.removeprefix("Bearer ").strip()
-    session = verifiziere_session(token)
-    if not session:
-        raise HTTPException(
-            status.HTTP_401_UNAUTHORIZED, "Session abgelaufen — bitte neu anmelden",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    return session
 
 
 @app.get("/api/v1/dashboard", tags=["System"])
@@ -989,7 +1276,7 @@ def api_v1_webhook_verify_example():
 
 
 @app.get("/api/v1/endpoints", tags=["System"])
-def api_v1_endpoints_catalog():
+def api_v1_endpoints_catalog(_user: dict = Depends(get_current_user)):
     return ok({
         "core": [
             "/api/v1/health",
@@ -1046,64 +1333,14 @@ def api_v1_ai_usecases(_user: dict = Depends(get_current_user)):
     })
 
 
-# ============================================================
-# AUTH — Login, Sessions, Team-Management (moved before usage)
-# ============================================================
-
-def get_current_user(
-    authorization: Optional[str] = Header(None),
-    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
-    request: Request = None,
-) -> dict:
-    """
-    Auth-Dependency. Gibt Session-Dict mit kanzlei_id zurück.
-    kanzlei_id bestimmt welche Daten der User sieht — Kern des Multi-Kanzlei-Systems.
-    """
-    if x_api_key:
-        api_key = api_key_verify(x_api_key.strip())
-        if not api_key:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Ungültiger API-Key")
-        return {
-            "benutzername": f"api_key:{api_key['name']}",
-            "rolle": "admin",
-            "kanzlei_id": api_key["kanzlei_id"],
-            "api_key_id": api_key["id"],
-            "api_permissions": api_key.get("permissions", []),
-        }
-    from core.auth import verifiziere_session
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(
-            status.HTTP_401_UNAUTHORIZED, "Login erforderlich",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    token   = authorization.removeprefix("Bearer ").strip()
-    session = verifiziere_session(token)
-    if not session:
-        raise HTTPException(
-            status.HTTP_401_UNAUTHORIZED, "Session abgelaufen — bitte neu anmelden",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    return session
-
-
 def require_permission(permission: str):
-    def _dep(current_user: dict = Depends(get_current_user)) -> dict:
-        if current_user.get("api_key_id"):
-            perms = current_user.get("api_permissions") or []
-            if "*" in perms or permission in perms:
-                return current_user
-            raise HTTPException(
-                status.HTTP_403_FORBIDDEN,
-                f"API-Key ohne Berechtigung: {permission}",
-            )
-        role = current_user.get("rolle", "")
-        if not has_permission(role, permission):
-            raise HTTPException(
-                status.HTTP_403_FORBIDDEN,
-                f"Fehlende Berechtigung: {permission}",
-            )
-        return current_user
-    return _dep
+    """
+    Backward-kompatible Fassade.
+
+    Historisch wurde ``require_permission`` direkt in ``api.py`` gehalten.
+    Die kanonische Implementierung lebt jetzt in ``backend.permissions``.
+    """
+    return _require_permission(permission)
 
 
 def require_saas_master(
@@ -1121,6 +1358,20 @@ def require_saas_master(
     return True
 
 
+# Jede Route außerhalb dieser Präfixe / exakten Pfade: Session (Bearer) oder X-API-Key Pflicht.
+# Admin vs. User: pro Route über require_permission / RBAC (core/rbac.py).
+_AUTH_EXEMPT_EXACT_PATHS = frozenset(
+    {
+        "/login",
+        "/api/login",
+        "/register",
+        "/api/register",
+        "/api/auth/login",
+        "/api/auth/registrieren",
+        "/api/auth/setup-status",
+        "/billing/stripe/config",
+    }
+)
 _AUTH_EXEMPT_PREFIXES = (
     "/health",
     "/ready",
@@ -1130,22 +1381,74 @@ _AUTH_EXEMPT_PREFIXES = (
     "/auth/login",
     "/auth/registrieren",
     "/auth/setup-status",
+    "/auth/password/forgot",
+    "/auth/password/reset",
+    "/auth/email/verify",
+    "/auth/email/resend",
+    "/auth/oauth/",
+    "/api/auth/password/forgot",
+    "/api/auth/password/reset",
+    "/api/auth/email/verify",
+    "/api/auth/email/resend",
+    "/api/auth/oauth/",
     "/billing/stripe/webhook",
     "/api/v1/health",
     "/api/v1/meta",
     "/api/v1/introduction",
     "/api/v1/webhooks/verify-example",
+    "/portal",
 )
+
+
+def _required_permission_for_path(path: str, method: str) -> Optional[str]:
+    p = str(path or "/")
+    m = (method or "GET").upper()
+
+    if p.startswith("/settings"):
+        return "settings:write" if m in {"POST", "PUT", "PATCH", "DELETE"} else "settings:read"
+    if p.startswith("/admin/") or p.startswith("/api/admin/") or p.startswith("/users"):
+        return "settings:write"
+    if p.startswith("/workflow/"):
+        return "engine:run"
+    if p.startswith("/engine/run"):
+        return "engine:run"
+    if p.startswith("/engine/"):
+        return "engine:read"
+    if p.startswith("/export/"):
+        return "export:read"
+    if p.startswith("/mandanten/") or p == "/mandanten":
+        return "mandanten:write" if m in {"POST", "PUT", "PATCH", "DELETE"} else "mandanten:read"
+    if p.startswith("/aufgaben/"):
+        return "aufgaben:write" if m in {"POST", "PUT", "PATCH", "DELETE"} else "aufgaben:read"
+    if "/aufgaben" in p:
+        return "aufgaben:write" if m in {"POST", "PUT", "PATCH", "DELETE"} else "aufgaben:read"
+    if p.startswith("/email/"):
+        return "email:send" if m in {"POST", "PUT", "PATCH", "DELETE"} else "kommunikation:read"
+    return None
 
 
 @app.middleware("http")
 async def auth_guard_middleware(request: Request, call_next):
+    """Jede HTTP-Route außerhalb der Whitelist: gültige Session (Bearer) oder X-API-Key."""
     path = request.url.path or "/"
     if path.startswith("/api/auth/"):
         return await call_next(request)
     if request.method == "OPTIONS":
         return await call_next(request)
-    if path == "/" or path.startswith(_AUTH_EXEMPT_PREFIXES):
+    block_advanced, reason = should_block_advanced_path(path)
+    if block_advanced:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "ok": False,
+                "error": (
+                    "Advanced feature set is locked until security baseline is proven "
+                    f"and activation is explicit ({reason})."
+                ),
+                "code": 503,
+            },
+        )
+    if path == "/" or path in _AUTH_EXEMPT_EXACT_PATHS or path.startswith(_AUTH_EXEMPT_PREFIXES):
         return await call_next(request)
 
     try:
@@ -1160,7 +1463,45 @@ async def auth_guard_middleware(request: Request, call_next):
             content={"ok": False, "error": exc.detail, "code": exc.status_code},
         )
 
-    current_kid = str(current_user.get("kanzlei_id", ""))
+    current_kid = str(current_user.get("tenant_id") or current_user.get("kanzlei_id") or "")
+    # Tenant-individuelles API-Limit aus Settings (pro Minute, pro Kanzlei).
+    try:
+        tenant_limit = int(global_setting_holen("api_rate_limit_pro_minute") or 60)
+    except Exception:
+        tenant_limit = 60
+    if tenant_limit > 0:
+        now = time.time()
+        bucket = _tenant_rate_store.get(current_kid, [])
+        bucket = [t for t in bucket if now - t < RATE_WINDOW]
+        if len(bucket) >= tenant_limit:
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "ok": False,
+                    "error": f"Tenant Rate-Limit erreicht ({tenant_limit}/min)",
+                    "code": 429,
+                },
+            )
+        bucket.append(now)
+        _tenant_rate_store[current_kid] = bucket
+
+    required_permission = _required_permission_for_path(path, request.method)
+    if required_permission:
+        if current_user.get("api_key_id"):
+            perms = current_user.get("api_permissions") or []
+            if "*" not in perms and required_permission not in perms:
+                return JSONResponse(
+                    status_code=403,
+                    content={"ok": False, "error": f"API-Key ohne Berechtigung: {required_permission}", "code": 403},
+                )
+        else:
+            role = str(current_user.get("rolle") or current_user.get("role") or "").strip().lower()
+            _merged = merged_settings_for_user(current_user)
+            if not has_permission(role, required_permission, _merged):
+                return JSONResponse(
+                    status_code=403,
+                    content={"ok": False, "error": f"Fehlende Berechtigung: {required_permission}", "code": 403},
+                )
 
     # Header tenant guard (strong, explicit)
     header_org = request.headers.get("X-Organization-Id") or request.headers.get("X-Kanzlei-Id")
@@ -1270,8 +1611,8 @@ def get_mandant(name: str, _user: dict = Depends(get_current_user)):
         "score_details":     sd.get("score_details", []),
         "aufgaben":          aufgaben,
         "aufgaben_gesamt":   len(aufgaben),
-        "aufgaben_offen":    sum(1 for a in aufgaben if not a.get("erledigt")),
-        "aufgaben_erledigt": sum(1 for a in aufgaben if a.get("erledigt")),
+        "aufgaben_offen":    sum(1 for a in aufgaben if aufgabe_ist_offen(a)),
+        "aufgaben_erledigt": sum(1 for a in aufgaben if aufgabe_ist_erledigt(a)),
     })
 
 
@@ -1282,6 +1623,8 @@ def create_mandant(data: MandantCreate, _user: dict = Depends(get_current_user))
         payload = svc.create_mandant(data)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
     log.info(f"Mandant erstellt: {data.name}")
     return ok_compat(payload, "Mandant erstellt")
 
@@ -1294,6 +1637,8 @@ def update_mandant(name: str, data: MandantUpdate, _user: dict = Depends(get_cur
         payload = svc.update_mandant(name, update_felder)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
     return ok_compat(
         payload,
         "Mandant aktualisiert",
@@ -1307,6 +1652,8 @@ def delete_mandant(name: str, _user: dict = Depends(get_current_user)):
         payload = svc.delete_mandant(name)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
     return ok_compat(payload, "Mandant gelöscht")
 
 
@@ -1317,6 +1664,8 @@ def mandant_antwort_empfangen(name: str, _user: dict = Depends(get_current_user)
         payload = svc.mark_antwort(name)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
     return ok_compat(payload, "Antwort gespeichert")
 
 
@@ -1329,12 +1678,20 @@ def get_aufgaben(
     name: str,
     nur_offen: bool = Query(False),
     prioritaet: Optional[str] = Query(None),
+    bereich: str = Query(
+        "alle",
+        description="alle | aktiv (nur offene) | historie (erledigt, mit TTL)",
+    ),
     _user: dict = Depends(get_current_user),
 ):
     store = get_ds(_user)
     get_mandant_or_404(name, store)
     svc = AufgabenService(store)
-    return ok_compat(svc.list_for_mandant(name, nur_offen=nur_offen, prioritaet=prioritaet))
+    b_raw = bereich if isinstance(bereich, str) else "alle"
+    b = (b_raw or "alle").strip().lower()
+    if b not in ("alle", "aktiv", "offen", "historie"):
+        b = "alle"
+    return ok_compat(svc.list_for_mandant(name, nur_offen=nur_offen, prioritaet=prioritaet, bereich=b))
 
 
 @app.post("/mandanten/{name}/aufgaben", tags=["Aufgaben"], status_code=status.HTTP_201_CREATED)
@@ -1365,6 +1722,20 @@ def toggle_aufgabe(aufgabe_id: str,
     svc = AufgabenService(get_ds(_user))
     try:
         payload = svc.toggle(aufgabe_id)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc))
+    return ok_compat(payload, "Aufgabe aktualisiert")
+
+
+@app.put("/aufgaben/{aufgabe_id}", tags=["Aufgaben"])
+def update_aufgabe(
+    aufgabe_id: str,
+    data: AufgabeUpdate,
+    _user: dict = Depends(get_current_user),
+):
+    svc = AufgabenService(get_ds(_user))
+    try:
+        payload = svc.update(aufgabe_id, data)
     except ValueError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc))
     return ok_compat(payload, "Aufgabe aktualisiert")
@@ -1549,30 +1920,700 @@ def email_outbox_status(
 
 @app.get("/billing/usage", tags=["Billing"], summary="Aktuelle Nutzung vs Plan-Limits")
 def billing_usage(_user: dict = Depends(get_current_user)):
-    kid = _user.get("kanzlei_id", "default")
+    if not _billing_enabled():
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Billing-Modul ist deaktiviert")
+    kid = str(_user.get("tenant_id") or _user.get("kanzlei_id") or "default").strip() or "default"
     plan = _plan_for_user(_user)
     limits = PLAN_USAGE_LIMITS.get(plan, PLAN_USAGE_LIMITS["starter"])
-    ai = usage_get(kid, "ai_requests_day")
-    ex = usage_get(kid, "exports_day")
+    usage_today = {m: usage_get(kid, m) for m in limits}
+    quota = _usage_quota_breakdown(kid, plan)
+    upgrade_url = (os.getenv("BILLING_UPGRADE_URL") or os.getenv("SALES_CONTACT_URL") or "").strip()
+    support_email = (os.getenv("SUPPORT_EMAIL") or "").strip()
     return ok({
         "kanzlei_id": kid,
+        "tenant_id": kid,
         "plan": plan,
         "limits": limits,
-        "usage_today": {
-            "ai_requests_day": ai,
-            "exports_day": ex,
+        "usage_today": usage_today,
+        "quota": quota,
+        "customer_success": {
+            "satisfaction_hint": (
+                "Bei Ampel „warning“ oder „critical“: Plan prüfen — vermeidet KI-Ausfälle im Mandantenverkehr."
+            ),
+            "upgrade_url": upgrade_url or None,
+            "support_email": support_email or None,
         },
     })
 
 
+@app.get("/billing/metrics", tags=["Billing"], summary="Revenue-/Retention-Metriken (Tenant)")
+def billing_metrics(_user: dict = Depends(get_current_user)):
+    if not _billing_enabled():
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Billing-Modul ist deaktiviert")
+    kid = str(_user.get("tenant_id") or _user.get("kanzlei_id") or "default").strip() or "default"
+    plan = _plan_for_user(_user)
+    limits = PLAN_USAGE_LIMITS.get(plan, PLAN_USAGE_LIMITS["starter"])
+    quota = _usage_quota_breakdown(kid, plan)
+
+    usage_today = {m: int(usage_get(kid, m)) for m in limits}
+    # Preise bewusst serverseitig zentral, später durch Stripe-Planpreise ersetzbar.
+    billing_model = str(global_setting_holen("billing_modell") or "pauschal").strip().lower()
+    if billing_model == "pauschal":
+        mrr_estimate = int(float(global_setting_holen("billing_pauschal_euro") or 299))
+    elif billing_model == "pro_buchung":
+        per_item = float(global_setting_holen("billing_pro_buchung_euro") or 0.2)
+        mrr_estimate = int(round(per_item * max(1, usage_today.get("ai_requests_day", 0))))
+    elif billing_model == "pro_mitarbeiter":
+        per_user = float(global_setting_holen("billing_pro_mitarbeiter_euro") or 15.0)
+        mrr_estimate = int(round(per_user * 5))  # conservative default cohort size
+    else:
+        mrr_estimate = int(float(global_setting_holen("billing_value_tier_1_euro") or 199))
+    arr_estimate = int(mrr_estimate * 12)
+
+    # "Woche" als einfache Hochrechnung aus Tagesnutzung (v1, robust ohne neues Schema).
+    usage_week_projection = {k: int(v * 7) for k, v in usage_today.items()}
+
+    quota_status = str((quota.get("overall") or "ok")).lower()
+    churn_risk = "low"
+    if quota_status == "warning":
+        churn_risk = "medium"
+    elif quota_status in {"critical", "limit"}:
+        churn_risk = "high"
+
+    recommended_offer = None
+    ranked = sorted(
+        quota.get("by_metric", {}).items(),
+        key=lambda kv: ({"limit": 4, "critical": 3, "warning": 2, "ok": 1}.get(kv[1].get("status"), 0), kv[1].get("percent_used", 0)),
+        reverse=True,
+    )
+    if ranked:
+        m, row = ranked[0]
+        recommended_offer = _upgrade_offer_payload(plan, m, int(row.get("used") or 0), int(row.get("limit") or 0))
+
+    return ok(
+        {
+            "kanzlei_id": kid,
+            "tenant_id": kid,
+            "plan": plan,
+            "billing_modell": billing_model,
+            "mrr_estimate": mrr_estimate,
+            "arr_estimate": arr_estimate,
+            "quota_status": quota_status,
+            "churn_risk": churn_risk,
+            "usage_today": usage_today,
+            "usage_week_projection": usage_week_projection,
+            "quota": quota,
+            "recommended_offer": recommended_offer,
+            "funnel_24h": _billing_funnel_summary(kid, lookback_hours=24),
+        }
+    )
+
+
+@app.get("/billing/observability", tags=["Billing"], summary="Billing-Observability Counter (Owner/Admin)")
+def billing_observability(_user: dict = Depends(get_current_user)):
+    from core.rbac import canonical_role
+    role = canonical_role(_user.get("role") or _user.get("rolle"))
+    if role not in {"owner", "admin"}:
+        raise HTTPException(status_code=403, detail="Nur Owner/Admin dürfen Billing-Observability sehen.")
+    kid = str(_user.get("tenant_id") or _user.get("kanzlei_id") or "default").strip() or "default"
+    obs = _billing_obs_get(kid)
+    return ok(
+        {
+            "kanzlei_id": kid,
+            "digest_enqueue_calls": int(obs.get("digest_enqueue_calls", 0) or 0),
+            "digest_sent": int(obs.get("digest_sent", 0) or 0),
+            "digest_skipped_no_recipients": int(obs.get("digest_skipped_no_recipients", 0) or 0),
+            "digest_enqueue_noop": int(obs.get("digest_enqueue_noop", 0) or 0),
+            "channel_shift_detected": int(obs.get("channel_shift_detected", 0) or 0),
+            "last_updated_at": obs.get("last_updated_at"),
+        }
+    )
+
+
+@app.get("/billing/report/weekly", tags=["Billing"], summary="Weekly Revenue Digest mit Handlungsempfehlungen")
+def billing_report_weekly(_user: dict = Depends(get_current_user)):
+    if not _billing_enabled():
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Billing-Modul ist deaktiviert")
+    kid = str(_user.get("tenant_id") or _user.get("kanzlei_id") or "default").strip() or "default"
+    return ok(_billing_report_weekly_for_tenant(kid))
+
+
+@app.post("/billing/report/weekly/send", tags=["Billing"], summary="Weekly Revenue Digest per E-Mail an Owner/Admin senden")
+def billing_report_weekly_send(
+    background_tasks: BackgroundTasks,
+    _user: dict = Depends(get_current_user),
+):
+    if not _billing_enabled():
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Billing-Modul ist deaktiviert")
+    from core.rbac import canonical_role
+    role = canonical_role(_user.get("role") or _user.get("rolle"))
+    if role not in {"owner", "admin"}:
+        raise HTTPException(status_code=403, detail="Nur Owner/Admin dürfen den Digest versenden.")
+    kid = str(_user.get("tenant_id") or _user.get("kanzlei_id") or "default").strip() or "default"
+    result = _enqueue_weekly_digest_for_tenant(kid)
+    background_tasks.add_task(_process_email_outbox_once, 12)
+    return ok(result)
+
+
+@app.get("/billing/upgrade-offer", tags=["Billing"], summary="Upgrade-Empfehlung aus Nutzung und Plan")
+def billing_upgrade_offer(_user: dict = Depends(get_current_user)):
+    if not _billing_enabled():
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Billing-Modul ist deaktiviert")
+    kid = str(_user.get("tenant_id") or _user.get("kanzlei_id") or "default").strip() or "default"
+    plan = _plan_for_user(_user)
+    quota = _usage_quota_breakdown(kid, plan)
+    limits = PLAN_USAGE_LIMITS.get(plan, PLAN_USAGE_LIMITS["starter"])
+    usage_today = {m: int(usage_get(kid, m)) for m in limits}
+
+    # Priorisiere kritischste Metrik als Upgrade-Trigger.
+    ranked = sorted(
+        quota.get("by_metric", {}).items(),
+        key=lambda kv: ({"limit": 4, "critical": 3, "warning": 2, "ok": 1}.get(kv[1].get("status"), 0), kv[1].get("percent_used", 0)),
+        reverse=True,
+    )
+    if ranked:
+        metric, row = ranked[0]
+        offer = _upgrade_offer_payload(plan, metric, int(row.get("used") or 0), int(row.get("limit") or 0))
+    else:
+        offer = _upgrade_offer_payload(plan, "ai_requests_day", 0, int(limits.get("ai_requests_day") or 0))
+    return ok(
+        {
+            "kanzlei_id": kid,
+            "tenant_id": kid,
+            "plan": plan,
+            "quota": quota,
+            "usage_today": usage_today,
+            "offer": offer,
+        }
+    )
+
+
+@app.get("/billing/funnel", tags=["Billing"], summary="Billing-Funnel-Analytics")
+def billing_funnel(_user: dict = Depends(get_current_user), lookback_hours: int = Query(24, ge=1, le=168)):
+    if not _billing_enabled():
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Billing-Modul ist deaktiviert")
+    kid = str(_user.get("tenant_id") or _user.get("kanzlei_id") or "default").strip() or "default"
+    return ok(
+        {
+            "kanzlei_id": kid,
+            "tenant_id": kid,
+            "funnel": _billing_funnel_summary(kid, lookback_hours=lookback_hours),
+        }
+    )
+
+
+@app.post("/billing/funnel/event", tags=["Billing"], summary="Billing-Funnel Event erfassen")
+def billing_funnel_event(
+    body: Dict[str, Any] = Body(...),
+    _user: dict = Depends(get_current_user),
+    request: Request = None,
+):
+    if not _billing_enabled():
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Billing-Modul ist deaktiviert")
+    kid = str(_user.get("tenant_id") or _user.get("kanzlei_id") or "default").strip() or "default"
+    stage = str(body.get("stage") or "").strip().lower()
+    meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+    meta = {**meta, **_attribution_from_request(request)}
+    _billing_funnel_record(kid, stage, meta)
+    return ok({"accepted": True, "stage": stage})
+
+
+class StripeCheckoutRequest(BaseModel):
+    """Stripe Checkout Session (Subscription) für Plan-Upgrade."""
+    success_url: str = Field(..., min_length=12, max_length=500)
+    cancel_url: str = Field(..., min_length=12, max_length=500)
+    target_plan: str = Field("professional", description="professional | enterprise")
+
+
+class StripePortalRequest(BaseModel):
+    return_url: str = Field(..., min_length=12, max_length=500)
+
+
+class BillingFunnelEventRequest(BaseModel):
+    stage: str = Field(..., min_length=3, max_length=64, description="cta_view|cta_click|checkout_start|checkout_success|checkout_cancel")
+    meta: Optional[Dict[str, Any]] = None
+
+
+def _billing_funnel_record(kanzlei_id: str, stage: str, meta: Optional[Dict[str, Any]] = None) -> None:
+    """Persistiert Funnel-Events tenant-scoped in Rolling-Window-Form."""
+    kid = str(kanzlei_id or "default").strip() or "default"
+    st = str(stage or "").strip().lower()
+    if st not in {"cta_view", "cta_click", "checkout_start", "checkout_success", "checkout_cancel", "paywall_402"}:
+        return
+    try:
+        store = DatenSpeicher(kanzlei_id=kid)
+        raw = store.setting_holen("__billing_funnel_events_v1", []) or []
+        events = raw if isinstance(raw, list) else []
+        events.append({"ts": datetime.utcnow().isoformat(), "stage": st, "meta": meta or {}})
+        store.setting_setzen("__billing_funnel_events_v1", events[-400:])
+    except Exception as exc:  # noqa: BLE001
+        log.debug("billing_funnel_record skipped: %s", exc)
+
+
+def _billing_funnel_summary(kanzlei_id: str, *, lookback_hours: int = 24) -> Dict[str, Any]:
+    kid = str(kanzlei_id or "default").strip() or "default"
+    try:
+        store = DatenSpeicher(kanzlei_id=kid)
+        raw = store.setting_holen("__billing_funnel_events_v1", []) or []
+        events = raw if isinstance(raw, list) else []
+    except Exception:
+        events = []
+
+    threshold = datetime.utcnow() - timedelta(hours=max(1, int(lookback_hours)))
+    stages = {"cta_view": 0, "cta_click": 0, "checkout_start": 0, "checkout_success": 0, "checkout_cancel": 0, "paywall_402": 0}
+    source_totals: Dict[str, int] = {}
+    source_views: Dict[str, int] = {}
+    source_paid: Dict[str, int] = {}
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        stage = str(ev.get("stage") or "").strip().lower()
+        if stage not in stages:
+            continue
+        try:
+            dt = datetime.fromisoformat(str(ev.get("ts") or "").replace("Z", ""))
+            if dt < threshold:
+                continue
+        except Exception:
+            continue
+        stages[stage] += 1
+        meta = ev.get("meta") if isinstance(ev.get("meta"), dict) else {}
+        src = str(meta.get("utm_source") or "direct").strip().lower() or "direct"
+        source_totals[src] = source_totals.get(src, 0) + 1
+        if stage == "cta_view":
+            source_views[src] = source_views.get(src, 0) + 1
+        if stage == "checkout_success":
+            source_paid[src] = source_paid.get(src, 0) + 1
+    views = max(1, stages["cta_view"])
+    starts = max(1, stages["checkout_start"])
+    paid = stages["checkout_success"]
+    top_sources = sorted(source_totals.items(), key=lambda kv: kv[1], reverse=True)[:8]
+    source_breakdown = [
+        {
+            "utm_source": src,
+            "events": int(total),
+            "views": int(source_views.get(src, 0)),
+            "paid": int(source_paid.get(src, 0)),
+            "view_to_paid_percent": round(100 * int(source_paid.get(src, 0)) / max(1, int(source_views.get(src, 0))), 2),
+        }
+        for src, total in top_sources
+    ]
+    return {
+        "lookback_hours": int(lookback_hours),
+        "stages": stages,
+        "rates": {
+            "ctr_percent": round(100 * stages["cta_click"] / views, 2),
+            "checkout_to_paid_percent": round(100 * paid / starts, 2),
+            "view_to_paid_percent": round(100 * paid / views, 2),
+        },
+        "source_breakdown": source_breakdown,
+    }
+
+
+def _billing_report_email_subject(plan: str) -> str:
+    return f"Weekly Revenue Digest ({str(plan or 'starter').upper()})"
+
+
+def _billing_digest_recipients(kanzlei_id: str) -> List[str]:
+    try:
+        from backend.auth import liste_benutzer
+        from core.rbac import canonical_role
+        users = liste_benutzer(kanzlei_id) or []
+    except Exception:
+        users = []
+    seen = set()
+    recipients: List[str] = []
+    for u in users:
+        role = canonical_role((u or {}).get("rolle") or (u or {}).get("role"))
+        if role not in {"owner", "admin"}:
+            continue
+        email = str((u or {}).get("email") or "").strip().lower()
+        if not email or email in seen:
+            continue
+        seen.add(email)
+        recipients.append(email)
+    return recipients[:20]
+
+
+def _billing_report_email_body(report: Dict[str, Any]) -> str:
+    funnel = report.get("funnel_7d") or {}
+    rates = funnel.get("rates") or {}
+    actions = report.get("recommended_actions") or []
+    utm = report.get("utm_ranking") or {}
+    top = utm.get("top_source") or {}
+    flop = utm.get("flop_source") or {}
+    lines = [
+        "Weekly Revenue Digest",
+        "",
+        f"Plan: {report.get('plan')}",
+        f"MRR (est.): €{report.get('mrr_estimate', 0)}",
+        f"ARR (est.): €{report.get('arr_estimate', 0)}",
+        f"Quota-Status: {report.get('quota_status')}",
+        "",
+        "Funnel (7d):",
+        f"- CTR: {rates.get('ctr_percent', 0)}%",
+        f"- Checkout->Paid: {rates.get('checkout_to_paid_percent', 0)}%",
+        f"- View->Paid: {rates.get('view_to_paid_percent', 0)}%",
+    ]
+    if top:
+        lines.append(f"- Top UTM: {top.get('utm_source')} ({top.get('view_to_paid_percent', 0)}% View->Paid)")
+    if flop:
+        lines.append(f"- Flop UTM: {flop.get('utm_source')} ({flop.get('view_to_paid_percent', 0)}% View->Paid)")
+    lines.extend(["", "Top Actions:"])
+    for idx, a in enumerate(actions[:5], start=1):
+        lines.append(f"{idx}. {a}")
+    return "\n".join(lines)
+
+
+def _billing_report_weekly_for_tenant(kanzlei_id: str) -> Dict[str, Any]:
+    from backend.auth import hole_kanzlei
+    kid = str(kanzlei_id or "default").strip() or "default"
+    krow = hole_kanzlei(kid) or {}
+    plan = str(krow.get("plan") or "starter").strip().lower()
+    metrics = billing_metrics({"tenant_id": kid, "kanzlei_id": kid})
+    mdata = metrics.get("data") if isinstance(metrics, dict) and isinstance(metrics.get("data"), dict) else metrics
+    funnel_7d = _billing_funnel_summary(kid, lookback_hours=168)
+    actions: List[str] = []
+    rates = funnel_7d.get("rates") or {}
+    ctr = float(rates.get("ctr_percent") or 0.0)
+    checkout_to_paid = float(rates.get("checkout_to_paid_percent") or 0.0)
+    quota_status = str(mdata.get("quota_status") or "ok").lower() if isinstance(mdata, dict) else "ok"
+    if ctr < 8:
+        actions.append("CTA-Headline in Banner/Modal testen (A/B), Ziel CTR > 8%.")
+    if checkout_to_paid < 20:
+        actions.append("Checkout-Friktion reduzieren: Stripe-Konfig + klarere Planbenefits im Modal.")
+    if quota_status in {"warning", "critical", "limit"}:
+        actions.append("Proaktive Upgrade-Kampagne starten (In-App + E-Mail) für betroffene Tenants.")
+    src_rows = funnel_7d.get("source_breakdown") or []
+    top_source = None
+    flop_source = None
+    if src_rows:
+        ranked = [r for r in src_rows if int(r.get("views") or 0) >= 1]
+        if not ranked:
+            ranked = [r for r in src_rows if int(r.get("events") or 0) >= 2]
+        if not ranked:
+            ranked = src_rows
+        ranked = sorted(
+            ranked,
+            key=lambda r: (
+                float(r.get("view_to_paid_percent") or 0.0),
+                int(r.get("paid") or 0),
+                int(r.get("events") or 0),
+            ),
+            reverse=True,
+        )
+        top_source = ranked[0] if ranked else None
+        flop_source = ranked[-1] if len(ranked) > 1 else None
+    prev_top_map = _kv_get(ds, "__billing_top_source_last_week__", {})
+    if not isinstance(prev_top_map, dict):
+        prev_top_map = {}
+    prev_top_source = str(prev_top_map.get(kid) or "").strip().lower()
+    current_top_source = str((top_source or {}).get("utm_source") or "").strip().lower()
+    channel_shift_alert = None
+    if prev_top_source and current_top_source and prev_top_source != current_top_source:
+        channel_shift_alert = {
+            "type": "top_channel_shift",
+            "previous_top_source": prev_top_source,
+            "current_top_source": current_top_source,
+            "message": (
+                f"Top-Kanal hat gewechselt: '{prev_top_source}' -> '{current_top_source}'. "
+                "Budget- und Landing-Strategie sofort prüfen."
+            ),
+        }
+    if src_rows:
+        top = top_source or src_rows[0]
+        if float(top.get("view_to_paid_percent") or 0.0) < 5:
+            actions.append(f"UTM-Quelle '{top.get('utm_source')}' optimieren (Landing/Offer), da View->Paid aktuell niedrig ist.")
+    if top_source and flop_source and str(top_source.get("utm_source")) != str(flop_source.get("utm_source")):
+        actions.insert(
+            0,
+            (
+                "Budget priorisieren: mehr Traffic auf "
+                f"'{top_source.get('utm_source')}' ({top_source.get('view_to_paid_percent', 0)}%), "
+                f"weniger auf '{flop_source.get('utm_source')}' ({flop_source.get('view_to_paid_percent', 0)}%)."
+            ),
+        )
+    if not actions:
+        actions.append("Funnel stabil — Fokus auf Traffic/Lead-Generierung zur Volumensteigerung.")
+    return {
+        "kanzlei_id": kid,
+        "tenant_id": kid,
+        "plan": plan,
+        "mrr_estimate": int((mdata or {}).get("mrr_estimate") or 0),
+        "arr_estimate": int((mdata or {}).get("arr_estimate") or 0),
+        "quota_status": quota_status,
+        "funnel_7d": funnel_7d,
+        "utm_ranking": {
+            "top_source": top_source,
+            "flop_source": flop_source,
+        },
+        "channel_shift_alert": channel_shift_alert,
+        "recommended_actions": actions,
+        "generated_at": datetime.utcnow().isoformat(),
+    }
+
+
+def _enqueue_weekly_digest_for_tenant(kanzlei_id: str) -> Dict[str, Any]:
+    kid = str(kanzlei_id or "default").strip() or "default"
+    _billing_obs_inc(kid, "digest_enqueue_calls", 1)
+    report_data = _billing_report_weekly_for_tenant(kid)
+    recipients = _billing_digest_recipients(kid)
+    if not recipients:
+        _billing_obs_inc(kid, "digest_skipped_no_recipients", 1)
+        return {"kanzlei_id": kid, "sent": 0, "recipients": []}
+    subject = _billing_report_email_subject(str(report_data.get("plan") or "starter"))
+    body = _billing_report_email_body(report_data)
+    sent = 0
+    for email in recipients:
+        idem_src = f"{kid}|weekly-digest|{datetime.utcnow().strftime('%G-%V')}|{email}"
+        idem = hashlib.sha256(idem_src.encode("utf-8")).hexdigest()
+        enq = email_outbox_enqueue(
+            kanzlei_id=kid,
+            mandant="weekly_digest",
+            to_email=email,
+            subject=subject,
+            body_text=body,
+            body_html="",
+            idempotency_key=idem,
+            max_attempts=5,
+        )
+        if enq and (enq.get("created") or enq.get("id")):
+            sent += 1
+    if sent > 0:
+        _billing_obs_inc(kid, "digest_sent", int(sent))
+    else:
+        _billing_obs_inc(kid, "digest_enqueue_noop", 1)
+    if (report_data.get("channel_shift_alert") or {}).get("type") == "top_channel_shift":
+        _billing_obs_inc(kid, "channel_shift_detected", 1)
+    try:
+        current_top = str((((report_data.get("utm_ranking") or {}).get("top_source") or {}).get("utm_source") or "")).strip().lower()
+        if current_top:
+            mp = _kv_get(ds, "__billing_top_source_last_week__", {})
+            if not isinstance(mp, dict):
+                mp = {}
+            mp[kid] = current_top
+            _kv_set(ds, "__billing_top_source_last_week__", mp)
+    except Exception:
+        pass
+    return {"kanzlei_id": kid, "sent": sent, "recipients": recipients}
+
+
+async def billing_weekly_digest_worker():
+    enabled = (os.getenv("BILLING_WEEKLY_DIGEST_AUTO", "1").strip().lower() in {"1", "true", "yes"})
+    if not enabled:
+        log.info("Weekly Digest Worker deaktiviert (BILLING_WEEKLY_DIGEST_AUTO=0)")
+        return
+    if not (os.getenv("EMAIL_USER") or "").strip() or not (os.getenv("EMAIL_PASS") or "").strip():
+        log.warning("Weekly Digest Worker übersprungen: EMAIL_USER/EMAIL_PASS fehlen.")
+        return
+    try:
+        target_day = int(os.getenv("BILLING_WEEKLY_DIGEST_DAY_ISO", "1") or "1")
+    except Exception:
+        target_day = 1
+    try:
+        target_hour = int(os.getenv("BILLING_WEEKLY_DIGEST_HOUR_UTC", "8") or "8")
+    except Exception:
+        target_hour = 8
+    target_day = max(1, min(7, int(target_day)))   # 1=Montag
+    target_hour = max(0, min(23, int(target_hour))) # UTC hour
+    while True:
+        try:
+            now = datetime.utcnow()
+            if now.isoweekday() == target_day and now.hour >= target_hour:
+                week_key = now.strftime("%G-%V")
+                sent_map = _kv_get(ds, "__billing_weekly_digest_sent__", {})
+                if not isinstance(sent_map, dict):
+                    sent_map = {}
+                from backend.auth import liste_kanzleien
+                ten = liste_kanzleien() or []
+                attempted = 0
+                sent_total = 0
+                skipped_week = 0
+                for row in ten:
+                    kid = str((row or {}).get("id") or "").strip()
+                    if not kid:
+                        continue
+                    if str(sent_map.get(kid) or "") == week_key:
+                        skipped_week += 1
+                        continue
+                    attempted += 1
+                    res = _enqueue_weekly_digest_for_tenant(kid)
+                    sent_total += int(res.get("sent") or 0)
+                    if int(res.get("sent") or 0) > 0:
+                        sent_map[kid] = week_key
+                _kv_set(ds, "__billing_weekly_digest_sent__", sent_map)
+                _process_email_outbox_once(limit=40)
+                log.info(
+                    "billing_weekly_digest_worker run: attempted=%s sent_total=%s skipped_week=%s week=%s",
+                    attempted,
+                    sent_total,
+                    skipped_week,
+                    week_key,
+                )
+        except Exception as exc:
+            log.warning("billing_weekly_digest_worker Fehler: %s", exc)
+        await asyncio.sleep(60 * 30)
+
+
+def _attribution_from_request(request: Optional[Request]) -> Dict[str, Any]:
+    if request is None:
+        return {}
+    q = request.query_params
+    out = {
+        "utm_source": (q.get("utm_source") or "").strip(),
+        "utm_medium": (q.get("utm_medium") or "").strip(),
+        "utm_campaign": (q.get("utm_campaign") or "").strip(),
+        "referrer": (request.headers.get("referer") or request.headers.get("referrer") or "").strip(),
+        "user_agent": (request.headers.get("user-agent") or "").strip()[:180],
+    }
+    return {k: v for k, v in out.items() if v}
+
+
+@app.get("/billing/stripe/config", tags=["Billing"], summary="Öffentliche Stripe-Konfiguration (Publishable Key)")
+def stripe_public_config():
+    """Nur Publishable Key — kein Secret. Für SPA vor Checkout."""
+    from core.stripe_integration import (
+        stripe_publishable_key,
+        stripe_checkout_ready,
+        stripe_enterprise_price_configured,
+    )
+
+    pk = stripe_publishable_key()
+    return ok(
+        {
+            "publishable_key": pk or None,
+            "checkout_ready": stripe_checkout_ready(),
+            "enterprise_price_configured": stripe_enterprise_price_configured(),
+        }
+    )
+
+
+@app.post("/billing/stripe/checkout-session", tags=["Billing"], summary="Stripe Checkout Session (Upgrade)")
+def stripe_create_checkout(
+    body: StripeCheckoutRequest,
+    user: dict = Depends(get_current_user),
+    request: Request = None,
+):
+    if not _billing_enabled():
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Billing-Modul ist deaktiviert")
+    from core.stripe_integration import create_checkout_session, stripe_secret_configured
+
+    if user.get("api_key_id"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Nicht mit API-Key erlaubt")
+    if not stripe_secret_configured():
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Stripe ist nicht konfiguriert (STRIPE_SECRET_KEY)")
+    kid = str(user.get("tenant_id") or user.get("kanzlei_id") or "default").strip() or "default"
+    email = (user.get("email") or "").strip() or None
+    try:
+        meta = {"target_plan": body.target_plan.strip().lower(), **_attribution_from_request(request)}
+        _billing_funnel_record(kid, "checkout_start", meta)
+        sess = create_checkout_session(
+            kanzlei_id=kid,
+            success_url=body.success_url.strip(),
+            cancel_url=body.cancel_url.strip(),
+            target_plan=body.target_plan.strip().lower(),
+            customer_email=email,
+        )
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+    return ok(sess, "checkout_session_created")
+
+
+@app.post("/billing/stripe/portal-session", tags=["Billing"], summary="Stripe Customer Portal (Abo verwalten)")
+def stripe_billing_portal(
+    body: StripePortalRequest,
+    user: dict = Depends(get_current_user),
+):
+    if not _billing_enabled():
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Billing-Modul ist deaktiviert")
+    from core.stripe_integration import create_billing_portal_session, stripe_secret_configured
+    from core.daten_speicher import DatenSpeicher
+
+    if user.get("api_key_id"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Nicht mit API-Key erlaubt")
+    if not stripe_secret_configured():
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Stripe ist nicht konfiguriert")
+    kid = str(user.get("tenant_id") or user.get("kanzlei_id") or "default").strip() or "default"
+    store = DatenSpeicher(kanzlei_id=kid)
+    prof = store.setting_holen("__tenant_profile__", {}) or {}
+    cid = (prof.get("stripe_customer_id") or "").strip() if isinstance(prof, dict) else ""
+    if not cid.startswith("cus_"):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Kein Stripe-Kunde hinterlegt — zuerst per Checkout abonnieren.",
+        )
+    try:
+        ps = create_billing_portal_session(customer_id=cid, return_url=body.return_url.strip())
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+    return ok(ps, "portal_session_created")
+
+
+@app.post("/billing/stripe/webhook", tags=["Billing"], summary="Stripe Webhook (Signaturpflicht)")
+async def stripe_webhook(request: Request):
+    """
+    Roh-Body für Signaturprüfung. Kein Bearer — nur ``Stripe-Signature`` + ``STRIPE_WEBHOOK_SECRET``.
+    """
+    from core.stripe_integration import handle_stripe_event, verify_webhook_event
+
+    import stripe as stripe_sdk
+
+    payload = await request.body()
+    sig = request.headers.get("stripe-signature") or request.headers.get("Stripe-Signature") or ""
+    try:
+        event = verify_webhook_event(payload, sig)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+    except stripe_sdk.error.SignatureVerificationError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Ungültige Stripe-Signatur") from exc
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Stripe webhook verify: %s", exc)
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Webhook-Verarbeitung fehlgeschlagen") from exc
+
+    try:
+        result = handle_stripe_event(event)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Stripe webhook handler: %s", exc)
+        result = {"action": "handler_error", "error": str(exc)}
+    try:
+        action = str(result.get("action") or "")
+        kid = str(result.get("kanzlei_id") or "").strip()
+        if kid and action == "plan_activated":
+            _billing_funnel_record(kid, "checkout_success", {"plan": result.get("plan")})
+    except Exception:
+        pass
+    return ok({"received": True, **result})
+
+
+class ApiKeyCreateRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=120)
+    permissions: Optional[List[str]] = None
+
+
+class WebhookCreateRequest(BaseModel):
+    url: str = Field(..., min_length=8, max_length=500)
+    events: List[str] = Field(default_factory=lambda: ["email.sent", "settings.changed"])
+    secret: Optional[str] = Field(None, min_length=8, max_length=120)
+
+
+class ApiKeyRotateRequest(BaseModel):
+    new_name: Optional[str] = Field(None, min_length=2, max_length=120)
+
+
 @app.post("/saas/apikeys", tags=["SaaS"], summary="API-Key erzeugen (einmal anzeigen)")
 def saas_api_key_create(
-    data: ApiKeyCreateRequest,
     _user: dict = Depends(require_permission("settings:write")),
+    payload: ApiKeyCreateRequest = Body(...),
 ):
-    kid = _user.get("kanzlei_id", "default")
-    created = api_key_create(kid, data.name, permissions=data.permissions or [])
-    _emit_webhook_event(kid, "apikey.created", {"id": created["id"], "name": data.name})
+    kid = _user.get("tenant_id") or _user.get("kanzlei_id", "default")
+    created = api_key_create(kid, payload.name, permissions=payload.permissions or [])
+    _emit_webhook_event(kid, "apikey.created", {"id": created["id"], "name": payload.name})
     return ok({
         "id": created["id"],
         "api_key": created["key"],
@@ -1582,7 +2623,7 @@ def saas_api_key_create(
 
 @app.get("/saas/apikeys", tags=["SaaS"], summary="API-Keys der Kanzlei")
 def saas_api_keys(_user: dict = Depends(require_permission("settings:read"))):
-    kid = _user.get("kanzlei_id", "default")
+    kid = _user.get("tenant_id") or _user.get("kanzlei_id", "default")
     return ok({"eintraege": api_key_list(kid)})
 
 
@@ -1591,16 +2632,12 @@ def saas_api_key_delete(
     key_id: str,
     _user: dict = Depends(require_permission("settings:write")),
 ):
-    kid = _user.get("kanzlei_id", "default")
+    kid = _user.get("tenant_id") or _user.get("kanzlei_id", "default")
     ok_del = api_key_deactivate(kid, key_id)
     if not ok_del:
         raise HTTPException(404, "API-Key nicht gefunden")
     _emit_webhook_event(kid, "apikey.revoked", {"id": key_id})
     return ok({"status": "deactivated", "id": key_id})
-
-
-class ApiKeyRotateRequest(BaseModel):
-    new_name: Optional[str] = Field(None, min_length=2, max_length=120)
 
 
 @app.post("/saas/apikeys/{key_id}/rotate", tags=["SaaS"], summary="API-Key rotieren")
@@ -1609,7 +2646,7 @@ def saas_api_key_rotate(
     data: ApiKeyRotateRequest = Body(default=ApiKeyRotateRequest()),
     _user: dict = Depends(require_permission("settings:write")),
 ):
-    kid = _user.get("kanzlei_id", "default")
+    kid = _user.get("tenant_id") or _user.get("kanzlei_id", "default")
     rotated = api_key_rotate(kid, key_id, new_name=data.new_name)
     if not rotated:
         raise HTTPException(404, "API-Key nicht gefunden oder bereits deaktiviert")
@@ -1624,19 +2661,23 @@ def saas_api_key_rotate(
 
 @app.post("/saas/webhooks", tags=["SaaS"], summary="Webhook Endpoint registrieren")
 def saas_webhook_create(
-    data: WebhookCreateRequest,
     _user: dict = Depends(require_permission("settings:write")),
+    payload: WebhookCreateRequest = Body(...),
 ):
-    kid = _user.get("kanzlei_id", "default")
-    if not (data.url.startswith("http://") or data.url.startswith("https://")):
+    _require_tenant_feature(_user, "api_webhooks_write")
+    kid = _user.get("tenant_id") or _user.get("kanzlei_id", "default")
+    if not (payload.url.startswith("http://") or payload.url.startswith("https://")):
         raise HTTPException(400, "Webhook URL muss mit http:// oder https:// starten")
-    w = webhook_endpoint_create(kid, data.url, data.events, data.secret)
-    return ok({"id": w["id"], "secret": w["secret"], "events": data.events, "url": data.url})
+    configured = str(global_setting_holen("webhook_url") or "").strip()
+    if configured and payload.url.strip() != configured:
+        raise HTTPException(400, "Webhook URL muss dem Wert aus Einstellungen entsprechen")
+    w = webhook_endpoint_create(kid, payload.url, payload.events, payload.secret)
+    return ok({"id": w["id"], "secret": w["secret"], "events": payload.events, "url": payload.url})
 
 
 @app.get("/saas/webhooks", tags=["SaaS"], summary="Webhook Endpoints listen")
 def saas_webhook_list(_user: dict = Depends(require_permission("settings:read"))):
-    kid = _user.get("kanzlei_id", "default")
+    kid = _user.get("tenant_id") or _user.get("kanzlei_id", "default")
     return ok({"eintraege": webhook_endpoint_list(kid)})
 
 
@@ -1645,7 +2686,8 @@ def saas_webhook_delete(
     webhook_id: str,
     _user: dict = Depends(require_permission("settings:write")),
 ):
-    kid = _user.get("kanzlei_id", "default")
+    _require_tenant_feature(_user, "api_webhooks_write")
+    kid = _user.get("tenant_id") or _user.get("kanzlei_id", "default")
     ok_del = webhook_endpoint_delete(kid, webhook_id)
     if not ok_del:
         raise HTTPException(404, "Webhook nicht gefunden")
@@ -1657,7 +2699,8 @@ def saas_webhook_test(
     webhook_id: str,
     _user: dict = Depends(require_permission("settings:write")),
 ):
-    kid = _user.get("kanzlei_id", "default")
+    _require_tenant_feature(_user, "api_webhooks_write")
+    kid = _user.get("tenant_id") or _user.get("kanzlei_id", "default")
     exists = any(w["id"] == webhook_id for w in webhook_endpoint_list(kid))
     if not exists:
         raise HTTPException(404, "Webhook nicht gefunden")
@@ -1671,17 +2714,7 @@ def agent_actions_status(
     _user: dict = Depends(require_permission("engine:read")),
 ):
     store = get_ds(_user)
-    rows = store._conn().execute(
-        """
-        SELECT action_key, mandant, aktion, status, details, created_at
-        FROM agent_actions
-        WHERE kanzlei_id = ?
-        ORDER BY id DESC
-        LIMIT ?
-        """,
-        (store.kanzlei_id, limit),
-    ).fetchall()
-    data = [dict(r) for r in rows]
+    data = agent_actions_list(store.kanzlei_id, limit)
     return {
         "kanzlei_id": store.kanzlei_id,
         "eintraege": data,
@@ -1702,14 +2735,14 @@ def get_dashboard(_user: dict = Depends(get_current_user)):
 
     total_umsatz = sum(m.get("umsatz", 0) for m in mandanten.values())
     total_aufgaben = len(aufgaben)
-    offene_aufgaben = sum(1 for a in aufgaben.values() if not a.get("erledigt"))
+    offene_aufgaben = sum(1 for a in aufgaben.values() if aufgabe_ist_offen(a))
 
     ueberfaellig = []
     faellig_heute = []
     faellig_diese_woche = []
 
     for a in aufgaben.values():
-        if a.get("erledigt"):
+        if aufgabe_ist_erledigt(a):
             continue
         try:
             frist = datetime.strptime(a["frist"], "%Y-%m-%d")
@@ -1752,7 +2785,7 @@ def get_heute(_user: dict = Depends(get_current_user)):
     store = get_ds(_user)
 
     for a in store.hole_fristen().values():
-        if a.get("erledigt"):
+        if aufgabe_ist_erledigt(a):
             continue
         try:
             frist = datetime.strptime(a["frist"], "%Y-%m-%d")
@@ -1774,12 +2807,16 @@ def get_heute(_user: dict = Depends(get_current_user)):
                 continue
 
             result.append({
+                "id": a.get("id"),
+                "mandant": a.get("mandant"),
+                "beschreibung": a.get("beschreibung"),
                 "text": f"{a.get('mandant', '?')} -> {a.get('beschreibung', '?')}",
                 "label": label,
                 "prioritaet": a.get("prioritaet", "normal"),
                 "frist": a["frist"],
+                "frist_uhrzeit": a.get("frist_uhrzeit") or "",
                 "tage": tage,
-                "sort_score": prio
+                "sort_score": prio,
             })
 
         except Exception:
@@ -1980,43 +3017,43 @@ def get_audit(
 
 @app.get("/audit/policies", tags=["System"], summary="Audit-Policy Alerts (regelbasiert)")
 def audit_policies(_user: dict = Depends(require_permission("reports:read"))):
+    """
+    Outbox/Webhook-Zähler laufen über ``daten_speicher`` (SQLite + PostgreSQL korrekt).
+    Kein rohes ``datetime('now',…)`` mehr hier — das bricht unter PG.
+    """
     store = get_ds(_user)
-    kid = store.kanzlei_id
+    kid = str(store.kanzlei_id or "default").strip() or "default"
     alerts: List[Dict[str, Any]] = []
-    conn = store._conn()
+    try:
+        dead_mail = int(email_outbox_dead_24h_count(kid))
+        if dead_mail >= 3:
+            alerts.append({
+                "severity": "high",
+                "policy": "email_delivery",
+                "title": "Mehrere Emails endgültig fehlgeschlagen",
+                "details": f"{dead_mail} Dead-Letter in den letzten 24h",
+            })
 
-    dead_mail = conn.execute(
-        "SELECT COUNT(*) AS n FROM email_outbox WHERE kanzlei_id = ? AND status = 'dead' AND created_at >= datetime('now','-24 hours')",
-        (kid,),
-    ).fetchone()["n"]
-    if dead_mail >= 3:
-        alerts.append({
-            "severity": "high",
-            "policy": "email_delivery",
-            "title": "Mehrere Emails endgültig fehlgeschlagen",
-            "details": f"{dead_mail} Dead-Letter in den letzten 24h",
-        })
+        failed_webhooks = int(webhook_queue_failed_24h_count(kid))
+        if failed_webhooks >= 5:
+            alerts.append({
+                "severity": "medium",
+                "policy": "webhook_delivery",
+                "title": "Webhook Zustellungen instabil",
+                "details": f"{failed_webhooks} fehlgeschlagene Webhook-Events in 24h",
+            })
 
-    failed_webhooks = conn.execute(
-        "SELECT COUNT(*) AS n FROM webhook_queue WHERE kanzlei_id = ? AND status IN ('failed','dead') AND created_at >= datetime('now','-24 hours')",
-        (kid,),
-    ).fetchone()["n"]
-    if failed_webhooks >= 5:
-        alerts.append({
-            "severity": "medium",
-            "policy": "webhook_delivery",
-            "title": "Webhook Zustellungen instabil",
-            "details": f"{failed_webhooks} fehlgeschlagene Webhook-Events in 24h",
-        })
-
-    settings_changes = usage_get(kid, "settings_changes_day")
-    if settings_changes >= 20:
-        alerts.append({
-            "severity": "low",
-            "policy": "settings_churn",
-            "title": "Viele Settings-Änderungen heute",
-            "details": f"{settings_changes} Änderungen — mögliche Fehlkonfiguration prüfen",
-        })
+        settings_changes = int(usage_get(kid, "settings_changes_day"))
+        if settings_changes >= 20:
+            alerts.append({
+                "severity": "low",
+                "policy": "settings_churn",
+                "title": "Viele Settings-Änderungen heute",
+                "details": f"{settings_changes} Änderungen — mögliche Fehlkonfiguration prüfen",
+            })
+    except Exception as exc:  # noqa: BLE001
+        log.warning("audit_policies degraded for kanzlei_id=%s: %s", kid, exc)
+        return ok({"alerts": [], "count": 0, "degraded": True, "error": "policy_check_unavailable"})
 
     return ok({"alerts": alerts, "count": len(alerts)})
 
@@ -2049,19 +3086,13 @@ def saas_readiness(_user: dict = Depends(require_permission("reports:read"))):
         "exports_day": usage_get(kid, "exports_day"),
         "settings_changes_day": usage_get(kid, "settings_changes_day"),
     }
-    db = store._conn()
-    outbox_dead = db.execute(
-        "SELECT COUNT(*) AS n FROM email_outbox WHERE kanzlei_id = ? AND status = 'dead' AND created_at >= datetime('now','-24 hours')",
-        (kid,),
-    ).fetchone()["n"]
-    webhooks_failed = db.execute(
-        "SELECT COUNT(*) AS n FROM webhook_queue WHERE kanzlei_id = ? AND status IN ('failed','dead') AND created_at >= datetime('now','-24 hours')",
-        (kid,),
-    ).fetchone()["n"]
+    outbox_dead = email_outbox_dead_24h_count(kid)
+    webhooks_failed = webhook_queue_failed_24h_count(kid)
     api_keys = api_key_list(kid)
     webhooks = webhook_endpoint_list(kid)
     alerts = audit_policies(_user).get("data", {}).get("alerts", [])
     compliance = _compliance_status()
+    billing_obs = _billing_obs_get(kid)
 
     score = 100
     if outbox_dead >= 3:
@@ -2089,6 +3120,12 @@ def saas_readiness(_user: dict = Depends(require_permission("reports:read"))):
             "webhook_failures_24h": webhooks_failed,
             "api_keys_aktiv": len([k for k in api_keys if k.get("aktiv")]),
             "webhooks_aktiv": len([w for w in webhooks if w.get("aktiv")]),
+            "billing_observability": {
+                "digest_sent": int(billing_obs.get("digest_sent", 0) or 0),
+                "digest_skipped_no_recipients": int(billing_obs.get("digest_skipped_no_recipients", 0) or 0),
+                "channel_shift_detected": int(billing_obs.get("channel_shift_detected", 0) or 0),
+                "last_updated_at": billing_obs.get("last_updated_at"),
+            },
         },
         "usage_today": usage,
         "limits": limits,
@@ -2108,44 +3145,14 @@ _agent_owner = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
 
 def _try_acquire_agent_lock(ttl_seconds: int = 290) -> bool:
     """
-    Prozessübergreifender Lock (SQLite), damit bei mehreren Workern
+    Prozessübergreifender Lock (SQLite oder PostgreSQL), damit bei mehreren Workern
     nicht mehrere Auto-Agents parallel laufen.
     """
-    from core.daten_speicher import get_connection
-
-    now = int(time.time())
-    exp = now + ttl_seconds
-    conn = get_connection()
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS agent_locks (
-            name TEXT PRIMARY KEY,
-            owner TEXT NOT NULL,
-            expires_at INTEGER NOT NULL
-        )
-    """)
-    conn.execute("""
-        INSERT INTO agent_locks (name, owner, expires_at)
-        VALUES ('auto_agent', ?, ?)
-        ON CONFLICT(name) DO UPDATE SET
-            owner = excluded.owner,
-            expires_at = excluded.expires_at
-        WHERE agent_locks.expires_at < ? OR agent_locks.owner = ?
-    """, (_agent_owner, exp, now, _agent_owner))
-    row = conn.execute(
-        "SELECT owner, expires_at FROM agent_locks WHERE name = 'auto_agent'"
-    ).fetchone()
-    return bool(row and row["owner"] == _agent_owner and int(row["expires_at"]) >= now)
+    return agent_lock_try_acquire(_agent_owner, ttl_seconds, "auto_agent")
 
 
 def _release_agent_lock() -> None:
-    from core.daten_speicher import get_connection
-
-    conn = get_connection()
-    conn.execute(
-        "UPDATE agent_locks SET expires_at = 0 WHERE name = 'auto_agent' AND owner = ?",
-        (_agent_owner,),
-    )
-    conn.commit()
+    agent_lock_release(_agent_owner, "auto_agent")
 
 async def auto_agent_worker():
     """
@@ -2770,12 +3777,169 @@ def plausibilitaetspruefung(_user: dict = Depends(get_current_user)):
 # ============================================================
 
 class LoginRequest(BaseModel):
-    benutzername: str = Field(..., min_length=2)
-    passwort:     str = Field(..., min_length=4)
+    """Legacy + modern Login-Body: Benutzername/Passwort oder E-Mail/Password."""
+    benutzername: Optional[str] = Field(None, min_length=2)
+    passwort: Optional[str] = Field(None, min_length=4)
+    email: Optional[str] = Field(None, min_length=5, max_length=254)
+    password: Optional[str] = Field(None, min_length=8, max_length=500)
+
+    @model_validator(mode="after")
+    def _validate_login_payload(self):
+        has_user = bool((self.benutzername or "").strip())
+        has_passwort = bool((self.passwort or "").strip())
+        has_email = bool((self.email or "").strip())
+        has_password = bool((self.password or "").strip())
+        if (has_user and has_passwort) or (has_email and has_password):
+            return self
+        raise ValueError("Provide benutzername+passwort or email+password")
+
+
+_EMAIL_LOGIN_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", re.IGNORECASE)
+
+
+class EmailPasswordLoginRequest(BaseModel):
+    """OAuth-ähnlicher Login per E-Mail (Tabellenfeld ``benutzer.email``)."""
+    email: str = Field(..., min_length=5, max_length=254)
+    password: str = Field(..., min_length=8, max_length=500)
+
+    @field_validator("email")
+    @classmethod
+    def _norm_login_email(cls, v: str) -> str:
+        s = (v or "").strip().lower()
+        if not _EMAIL_LOGIN_RE.match(s):
+            raise ValueError("invalid email")
+        return s
+
+
+class EmailPasswordRegisterRequest(BaseModel):
+    """Registrierung per E-Mail — Passwort min. 12 Zeichen (bcrypt in ``benutzer``)."""
+    email: str = Field(..., min_length=5, max_length=254)
+    password: str = Field(..., min_length=12, max_length=500)
+    admin_key: Optional[str] = Field(
+        None,
+        description="Ab dem zweiten Benutzer: gleicher Wert wie PORTAL_ADMIN_KEY in .env",
+    )
+    rolle: Optional[str] = Field(None, description="Optional; Standard steuerberater")
+    invite_token: Optional[str] = Field(
+        None,
+        description="Einladung: Token von POST /api/tenant/invites (Beitritt zur Kanzlei, Rolle aus Token)",
+    )
+
+    @field_validator("email")
+    @classmethod
+    def _norm_register_email(cls, v: str) -> str:
+        s = (v or "").strip().lower()
+        if not _EMAIL_LOGIN_RE.match(s):
+            raise ValueError("invalid email")
+        return s
+
+    @field_validator("password")
+    @classmethod
+    def _validate_password_strength(cls, v: str) -> str:
+        pw = str(v or "")
+        if not re.search(r"[A-Z]", pw):
+            raise ValueError("password needs uppercase")
+        if not re.search(r"[a-z]", pw):
+            raise ValueError("password needs lowercase")
+        if not re.search(r"\d", pw):
+            raise ValueError("password needs digit")
+        if not re.search(r"[^A-Za-z0-9]", pw):
+            raise ValueError("password needs special char")
+        if " " in pw:
+            raise ValueError("password must not contain spaces")
+        return pw
+
+
+class TenantInviteCreateRequest(BaseModel):
+    """Einladungslink erzeugen (nur Mandanten-Admin)."""
+    rolle: str = Field("assistent", description="assistent oder steuerberater")
+    email_lock: Optional[str] = Field(
+        None,
+        description="Optional: nur diese E-Mail darf sich mit dem Token registrieren",
+    )
+    ttl_hours: int = Field(168, ge=1, le=720)
+
+    @field_validator("email_lock")
+    @classmethod
+    def _norm_invite_lock(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or not str(v).strip():
+            return None
+        s = str(v).strip().lower()
+        if not _EMAIL_LOGIN_RE.match(s):
+            raise ValueError("invalid locked email")
+        return s
+
+    @field_validator("rolle")
+    @classmethod
+    def _invite_role_only(cls, v: str) -> str:
+        r = (v or "assistent").strip().lower()
+        if r not in {"assistent", "steuerberater"}:
+            raise ValueError("invite role must be assistent or steuerberater")
+        return r
+
+
+class TenantUserCreateRequest(BaseModel):
+    email: str = Field(..., min_length=5, max_length=254)
+    password: str = Field(..., min_length=12, max_length=500)
+    rolle: str = Field("assistent", description="admin, steuerberater, assistent, user, mitarbeiter, worker")
+
+    @field_validator("email")
+    @classmethod
+    def _norm_tenant_user_email(cls, v: str) -> str:
+        s = (v or "").strip().lower()
+        if not _EMAIL_LOGIN_RE.match(s):
+            raise ValueError("invalid email")
+        return s
+
+
+class TenantUserRoleRequest(BaseModel):
+    rolle: str = Field(..., min_length=3, max_length=40)
+
+
+class ApiUsersRolePatchRequest(BaseModel):
+    role: str = Field(..., min_length=3, max_length=40)
+
+
+class ApiUsersInviteRequest(BaseModel):
+    """REST: Einladungslink für Team-User erzeugen (Admin)."""
+    role: str = Field("assistent", description="assistent | steuerberater")
+    email: Optional[str] = Field(
+        None,
+        description="Empfänger-E-Mail (bei send_email) und optional gleichzeitig Lock für den Token",
+    )
+    ttl_hours: int = Field(168, ge=1, le=720)
+    send_email: bool = Field(False, description="Einladungs-E-Mail über die Outbox versenden")
+
+    @model_validator(mode="after")
+    def _email_required_if_send(self):
+        if self.send_email and not (self.email and str(self.email).strip()):
+            raise ValueError("email is required when send_email is true")
+        return self
+
+    @field_validator("email")
+    @classmethod
+    def _norm_invite_email(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or not str(v).strip():
+            return None
+        s = str(v).strip().lower()
+        if not _EMAIL_LOGIN_RE.match(s):
+            raise ValueError("invalid email")
+        return s
+
+    @field_validator("role")
+    @classmethod
+    def _invite_role_only(cls, v: str) -> str:
+        r = (v or "assistent").strip().lower()
+        if r == "user":
+            return "assistent"
+        if r not in {"assistent", "steuerberater"}:
+            raise ValueError("role must be assistent or steuerberater")
+        return r
+
 
 class RegistrierRequest(BaseModel):
     benutzername: str  = Field(..., min_length=2, max_length=50)
-    passwort:     str  = Field(..., min_length=8)
+    passwort:     str  = Field(..., min_length=12)
     anzeigename:  Optional[str] = None
     email:        Optional[str] = None
     rolle:        Optional[str] = Field("steuerberater")
@@ -2783,46 +3947,1104 @@ class RegistrierRequest(BaseModel):
 
 class PasswortRequest(BaseModel):
     altes_passwort: str = Field(..., min_length=4)
-    neues_passwort: str = Field(..., min_length=8)
+    neues_passwort: str = Field(..., min_length=12)
 
 
-class ApiKeyCreateRequest(BaseModel):
-    name: str = Field(..., min_length=2, max_length=120)
-    permissions: Optional[List[str]] = None
+class MeUpdateRequest(BaseModel):
+    vorname: Optional[str] = Field(None, max_length=120)
+    nachname: Optional[str] = Field(None, max_length=120)
+    telefon: Optional[str] = Field(None, max_length=80)
+    sprache: Optional[str] = Field(None, max_length=8)
+    dark_mode: Optional[bool] = None
+    notify_email: Optional[bool] = None
+    notify_updates: Optional[bool] = None
+    notify_deadlines: Optional[bool] = None
 
 
-class WebhookCreateRequest(BaseModel):
-    url: str = Field(..., min_length=8, max_length=500)
-    events: List[str] = Field(default_factory=lambda: ["email.sent", "settings.changed"])
-    secret: Optional[str] = Field(None, min_length=8, max_length=120)
+class MePasswordRequest(BaseModel):
+    aktuelles_passwort: str = Field(..., min_length=4)
+    neues_passwort: str = Field(..., min_length=12)
+    bestaetigen: str = Field(..., min_length=12)
 
 
-class ApiKeyRotateRequest(BaseModel):
-    new_name: Optional[str] = Field(None, min_length=2, max_length=120)
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str = Field(..., min_length=20)
+
+
+class PasswortForgotRequest(BaseModel):
+    email: str = Field(..., min_length=5, max_length=254)
+
+    @field_validator("email")
+    @classmethod
+    def _norm_email(cls, v: str) -> str:
+        s = (v or "").strip().lower()
+        if not _EMAIL_LOGIN_RE.match(s):
+            raise ValueError("invalid email")
+        return s
+
+
+class PasswortResetRequest(BaseModel):
+    token: str = Field(..., min_length=20, max_length=512)
+    neues_passwort: str = Field(..., min_length=12)
+    bestaetigen: str = Field(..., min_length=12)
+
+
+class EmailVerifyRequest(BaseModel):
+    token: str = Field(..., min_length=20, max_length=512)
+
+
+class OAuthExchangeRequest(BaseModel):
+    code: str = Field(..., min_length=20, max_length=200)
+
+
+def _pwreset_store() -> DatenSpeicher:
+    # Passwort-Reset ist mandantenübergreifend nutzerbasiert -> zentraler Store.
+    return ds
+
+
+_pwreset_rate_store: Dict[str, List[float]] = {}
+PWRESET_FORGOT_LIMIT_IP = int(os.getenv("PWRESET_FORGOT_LIMIT_IP", "6"))
+PWRESET_FORGOT_LIMIT_EMAIL = int(os.getenv("PWRESET_FORGOT_LIMIT_EMAIL", "3"))
+PWRESET_RESET_LIMIT_IP = int(os.getenv("PWRESET_RESET_LIMIT_IP", "20"))
+PWRESET_RATE_WINDOW_SECONDS = int(os.getenv("PWRESET_RATE_WINDOW_SECONDS", "3600"))
+
+
+def _pwreset_rate_allow(bucket: str, limit: int, window_seconds: int) -> bool:
+    now_ts = time.time()
+    valid = [t for t in _pwreset_rate_store.get(bucket, []) if now_ts - t < window_seconds]
+    if len(valid) >= max(1, int(limit)):
+        _pwreset_rate_store[bucket] = valid
+        return False
+    valid.append(now_ts)
+    _pwreset_rate_store[bucket] = valid
+    return True
+
+
+def _pwreset_tokens() -> List[Dict[str, Any]]:
+    store = _pwreset_store()
+    rows = _kv_get(store, "__password_reset_tokens__", [])
+    if not isinstance(rows, list):
+        return []
+
+    now = datetime.now()
+    cleaned: List[Dict[str, Any]] = []
+    changed = False
+    for r in rows:
+        if not isinstance(r, dict):
+            changed = True
+            continue
+        exp_raw = str(r.get("expires_at") or "").strip()
+        used_raw = str(r.get("used_at") or "").strip()
+        try:
+            exp_dt = datetime.fromisoformat(exp_raw) if exp_raw else now - timedelta(days=3650)
+        except Exception:
+            changed = True
+            continue
+        # Expired Tokens verwerfen
+        if now > exp_dt:
+            changed = True
+            continue
+        # Bereits verwendete Tokens nur sehr kurz behalten
+        if used_raw:
+            try:
+                used_dt = datetime.fromisoformat(used_raw)
+            except Exception:
+                changed = True
+                continue
+            if now - used_dt > timedelta(hours=24):
+                changed = True
+                continue
+        cleaned.append(r)
+
+    # harte Obergrenze, falls ein Bot den Store floodet
+    if len(cleaned) > 5000:
+        cleaned = cleaned[-5000:]
+        changed = True
+
+    if changed:
+        _pwreset_tokens_save(cleaned)
+    return cleaned
+
+
+def _pwreset_tokens_save(rows: List[Dict[str, Any]]) -> None:
+    _kv_set(_pwreset_store(), "__password_reset_tokens__", rows)
+
+
+def _pwreset_hash(token_plain: str) -> str:
+    return hashlib.sha256((token_plain or "").encode("utf-8")).hexdigest()
+
+
+def _email_verify_store() -> DatenSpeicher:
+    return ds
+
+
+def _email_verified_map() -> Dict[str, bool]:
+    raw = _kv_get(_email_verify_store(), "__email_verified__", {})
+    return raw if isinstance(raw, dict) else {}
+
+
+def _email_verified_set(email: str, verified: bool) -> None:
+    e = (email or "").strip().lower()
+    if not e:
+        return
+    rows = _email_verified_map()
+    rows[e] = bool(verified)
+    _kv_set(_email_verify_store(), "__email_verified__", rows)
+
+
+def _email_is_verified(email: str) -> bool:
+    e = (email or "").strip().lower()
+    if not e:
+        return False
+    return bool(_email_verified_map().get(e, False))
+
+
+def _email_verify_tokens() -> List[Dict[str, Any]]:
+    rows = _kv_get(_email_verify_store(), "__email_verify_tokens__", [])
+    if not isinstance(rows, list):
+        return []
+    now = datetime.now()
+    cleaned: List[Dict[str, Any]] = []
+    changed = False
+    for r in rows:
+        if not isinstance(r, dict):
+            changed = True
+            continue
+        exp_raw = str(r.get("expires_at") or "").strip()
+        used_raw = str(r.get("used_at") or "").strip()
+        try:
+            exp_dt = datetime.fromisoformat(exp_raw) if exp_raw else now - timedelta(days=3650)
+        except Exception:
+            changed = True
+            continue
+        if now > exp_dt:
+            changed = True
+            continue
+        if used_raw:
+            changed = True
+            continue
+        cleaned.append(r)
+    if len(cleaned) > 5000:
+        cleaned = cleaned[-5000:]
+        changed = True
+    if changed:
+        _kv_set(_email_verify_store(), "__email_verify_tokens__", cleaned)
+    return cleaned
+
+
+def _email_verify_tokens_save(rows: List[Dict[str, Any]]) -> None:
+    _kv_set(_email_verify_store(), "__email_verify_tokens__", rows)
+
+
+def _email_verify_send(email: str) -> None:
+    e = (email or "").strip().lower()
+    if not e:
+        return
+    token_plain = secrets.token_urlsafe(40)
+    token_hash = hashlib.sha256(token_plain.encode("utf-8")).hexdigest()
+    rows = [r for r in _email_verify_tokens() if (r.get("email") or "").strip().lower() != e]
+    now = datetime.now()
+    rows.append(
+        {
+            "token_hash": token_hash,
+            "email": e,
+            "created_at": now.isoformat(),
+            "expires_at": (now + timedelta(hours=24)).isoformat(),
+            "used_at": "",
+        }
+    )
+    _email_verify_tokens_save(rows)
+    base = (os.getenv("PUBLIC_APP_URL") or os.getenv("PORTAL_BASE_URL") or "").strip().rstrip("/")
+    if not base:
+        base = "https://kanzlei-automation.com"
+    verify_url = f"{base}/verify-email?token={quote(token_plain, safe='')}"
+    subject = "E-Mail bestätigen — Kanzlei AI"
+    plain = (
+        "Bitte bestätigen Sie Ihre E-Mail-Adresse.\n\n"
+        f"Bestätigungslink (24h gültig): {verify_url}\n\n"
+        "Wenn Sie diese Registrierung nicht gestartet haben, ignorieren Sie diese E-Mail."
+    )
+    html = (
+        "<p>Bitte bestätigen Sie Ihre E-Mail-Adresse.</p>"
+        f'<p><a href="{html_module.escape(verify_url)}">E-Mail jetzt bestätigen</a></p>'
+        "<p>Der Link ist 24 Stunden gültig.</p>"
+    )
+    send_email_smtp(e, subject, plain, html)
+
+
+OAUTH_PROVIDERS: Dict[str, Dict[str, str]] = {
+    "google": {
+        "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
+        "token_url": "https://oauth2.googleapis.com/token",
+        "userinfo_url": "https://openidconnect.googleapis.com/v1/userinfo",
+        "scope": "openid email profile",
+    },
+    "microsoft": {
+        "auth_url": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+        "token_url": "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+        "userinfo_url": "https://graph.microsoft.com/oidc/userinfo",
+        "scope": "openid email profile",
+    },
+}
+
+
+def _oauth_env(provider: str, key: str) -> str:
+    p = (provider or "").strip().upper()
+    return (os.getenv(f"OAUTH_{p}_{key}") or "").strip()
+
+
+def _oauth_redirect_uri(provider: str) -> str:
+    explicit = _oauth_env(provider, "REDIRECT_URI")
+    if explicit:
+        return explicit
+    base = (os.getenv("PUBLIC_APP_URL") or os.getenv("PORTAL_BASE_URL") or "").strip().rstrip("/")
+    if not base:
+        base = "https://kanzlei-automation.com"
+    return f"{base}/api/auth/oauth/{provider}/callback"
+
+
+def _oauth_state_rows() -> List[Dict[str, Any]]:
+    rows = _kv_get(ds, "__oauth_state__", [])
+    if not isinstance(rows, list):
+        return []
+    now = datetime.now()
+    cleaned: List[Dict[str, Any]] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        try:
+            exp = datetime.fromisoformat(str(r.get("expires_at") or ""))
+        except Exception:
+            continue
+        if now <= exp:
+            cleaned.append(r)
+    _kv_set(ds, "__oauth_state__", cleaned[-2000:])
+    return cleaned[-2000:]
+
+
+def _oauth_state_save(rows: List[Dict[str, Any]]) -> None:
+    _kv_set(ds, "__oauth_state__", rows[-2000:])
+
+
+def _oauth_parse_jwt_payload(jwt_token: str) -> Dict[str, Any]:
+    token = (jwt_token or "").strip()
+    parts = token.split(".")
+    if len(parts) < 2:
+        return {}
+    payload = parts[1]
+    payload += "=" * (-len(payload) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(payload.encode("utf-8")).decode("utf-8")
+        data = json.loads(decoded)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _oauth_validate_id_token_claims(provider: str, claims: Dict[str, Any], *, expected_client_id: str, expected_nonce: str) -> bool:
+    if not claims:
+        return False
+    now = int(time.time())
+    try:
+        exp = int(claims.get("exp") or 0)
+    except Exception:
+        return False
+    if exp and now > exp:
+        return False
+    nonce = str(claims.get("nonce") or "")
+    if expected_nonce and nonce != expected_nonce:
+        return False
+    aud = claims.get("aud")
+    aud_ok = False
+    if isinstance(aud, str):
+        aud_ok = aud == expected_client_id
+    elif isinstance(aud, list):
+        aud_ok = expected_client_id in [str(x) for x in aud]
+    if not aud_ok:
+        return False
+    iss = str(claims.get("iss") or "")
+    issuer_map = {
+        "google": {"https://accounts.google.com", "accounts.google.com"},
+        "microsoft": {
+            "https://login.microsoftonline.com/common/v2.0",
+            "https://login.microsoftonline.com/organizations/v2.0",
+            "https://sts.windows.net/",
+        },
+    }
+    expected_issuers = issuer_map.get((provider or "").strip().lower())
+    if expected_issuers and iss not in expected_issuers:
+        return False
+    return True
+
+
+def _oauth_normalize_redirect_target(redirect_to: Optional[str]) -> str:
+    """
+    Open-Redirect Schutz: nur relative Pfade innerhalb SPA erlauben.
+    """
+    raw = (redirect_to or "").strip()
+    if not raw:
+        return "/login"
+    if not raw.startswith("/"):
+        return "/login"
+    parts = urlsplit(raw)
+    if parts.scheme or parts.netloc:
+        return "/login"
+    path = parts.path or "/login"
+    allowed_prefixes = ("/login", "/profile", "/settings", "/")
+    if not any(path == p or path.startswith(p.rstrip("/") + "/") for p in allowed_prefixes):
+        return "/login"
+    # Query behalten, Fragment verwerfen
+    return path + (f"?{parts.query}" if parts.query else "")
+
+
+def _issue_auth_tokens(
+    *,
+    sub: str,
+    kanzlei_id: str,
+    rolle: str,
+    email: str,
+    benutzername: str,
+    uid: Optional[int] = None,
+) -> Dict[str, Any]:
+    from backend.auth import (
+        access_token_ttl_minutes,
+        create_access_token,
+        create_refresh_token,
+        refresh_token_expire_days,
+    )
+
+    e = (email or "").strip().lower()
+    pwv = _auth_pw_version_get(e) if e else 1
+    jti = secrets.token_urlsafe(20)
+    extra: Dict[str, Any] = {
+        "kanzlei_id": kanzlei_id,
+        "tenant_id": kanzlei_id,
+        "rolle": rolle,
+        "role": rolle,
+        "email": e,
+        "benutzername": benutzername,
+        "pv": pwv,
+        "jti": jti,
+    }
+    if uid is not None:
+        extra["uid"] = int(uid)
+    access = create_access_token({"sub": sub, **extra})
+    refresh = create_refresh_token(sub, extra_claims=extra)
+    return {
+        "access_token": access,
+        "refresh_token": refresh,
+        "token_type": "bearer",
+        "expires_in": access_token_ttl_minutes() * 60,
+        "refresh_expires_in": refresh_token_expire_days() * 24 * 60 * 60,
+        "pv": pwv,
+        "jti": jti,
+    }
+
+
+def _auth_state_store() -> DatenSpeicher:
+    return ds
+
+
+def _auth_pw_version_get(email: str) -> int:
+    e = (email or "").strip().lower()
+    if not e:
+        return 1
+    raw = _kv_get(_auth_state_store(), "__auth_pw_version__", {})
+    mp = raw if isinstance(raw, dict) else {}
+    v = mp.get(e, 1)
+    try:
+        return max(1, int(v))
+    except Exception:
+        return 1
+
+
+def _auth_pw_version_bump(email: str) -> int:
+    e = (email or "").strip().lower()
+    if not e:
+        return 1
+    raw = _kv_get(_auth_state_store(), "__auth_pw_version__", {})
+    mp = raw if isinstance(raw, dict) else {}
+    cur = _auth_pw_version_get(e)
+    nxt = cur + 1
+    mp[e] = nxt
+    _kv_set(_auth_state_store(), "__auth_pw_version__", mp)
+    return nxt
+
+
+def _refresh_jti_is_used(jti: str) -> bool:
+    key = (jti or "").strip()
+    if not key:
+        return True
+    raw = _kv_get(_auth_state_store(), "__used_refresh_jti__", {})
+    mp = raw if isinstance(raw, dict) else {}
+    return key in mp
+
+
+def _refresh_jti_mark_used(jti: str) -> None:
+    key = (jti or "").strip()
+    if not key:
+        return
+    raw = _kv_get(_auth_state_store(), "__used_refresh_jti__", {})
+    mp = raw if isinstance(raw, dict) else {}
+    mp[key] = int(time.time())
+    # Speicherbegrenzung
+    if len(mp) > 10000:
+        keep = sorted(mp.items(), key=lambda kv: kv[1], reverse=True)[:8000]
+        mp = {k: v for k, v in keep}
+    _kv_set(_auth_state_store(), "__used_refresh_jti__", mp)
+
+
+def _oauth_login_codes() -> Dict[str, Dict[str, Any]]:
+    raw = _kv_get(ds, "__oauth_login_codes__", {})
+    return raw if isinstance(raw, dict) else {}
+
+
+def _oauth_login_codes_save(mp: Dict[str, Dict[str, Any]]) -> None:
+    _kv_set(ds, "__oauth_login_codes__", mp)
+
+
+def _oauth_login_code_store(payload: Dict[str, Any], ttl_seconds: int = 120) -> str:
+    code = secrets.token_urlsafe(32)
+    now = int(time.time())
+    mp = _oauth_login_codes()
+    mp[code] = {"expires": now + max(30, int(ttl_seconds)), "payload": payload}
+    if len(mp) > 4000:
+        # prune oldest by expiry
+        keep = sorted(mp.items(), key=lambda kv: int((kv[1] or {}).get("expires", 0)), reverse=True)[:3000]
+        mp = {k: v for k, v in keep}
+    _oauth_login_codes_save(mp)
+    return code
+
+
+def _oauth_login_code_consume(code: str) -> Optional[Dict[str, Any]]:
+    key = (code or "").strip()
+    if not key:
+        return None
+    now = int(time.time())
+    mp = _oauth_login_codes()
+    row = mp.pop(key, None)
+    # purge expired on every consume
+    for k in list(mp.keys()):
+        try:
+            if now > int((mp[k] or {}).get("expires", 0)):
+                mp.pop(k, None)
+        except Exception:
+            mp.pop(k, None)
+    _oauth_login_codes_save(mp)
+    if not row:
+        return None
+    try:
+        if now > int((row or {}).get("expires", 0)):
+            return None
+    except Exception:
+        return None
+    payload = (row or {}).get("payload")
+    return payload if isinstance(payload, dict) else None
+
+
+@app.post("/auth/password/forgot", tags=["Auth"], summary="Passwort vergessen — Reset-Link senden")
+@app.post("/api/auth/password/forgot", tags=["Auth"], summary="Passwort vergessen — Reset-Link senden (/api Alias)")
+def auth_password_forgot(data: PasswortForgotRequest, request: Request):
+    """
+    Gibt immer eine generische Erfolgsantwort zurück (keine User-Enumeration).
+    """
+    from backend.auth import finde_benutzer_nach_email
+
+    email = data.email.strip().lower()
+    ip = _get_client_ip(request)
+    allow_ip = _pwreset_rate_allow(f"forgot:ip:{ip}", PWRESET_FORGOT_LIMIT_IP, PWRESET_RATE_WINDOW_SECONDS)
+    allow_email = _pwreset_rate_allow(
+        f"forgot:email:{hashlib.sha256(email.encode('utf-8')).hexdigest()}",
+        PWRESET_FORGOT_LIMIT_EMAIL,
+        PWRESET_RATE_WINDOW_SECONDS,
+    )
+    if not allow_ip or not allow_email:
+        _pwreset_store().log_eintrag(f"PASSWORT_RESET_RATE_LIMIT | forgot | ip={ip} | email={email}")
+        raise HTTPException(429, "Zu viele Passwort-Reset-Anfragen. Bitte später erneut versuchen.")
+
+    row = finde_benutzer_nach_email(email)
+    _pwreset_store().log_eintrag(f"PASSWORT_RESET_FORGOT | email={email} | ip={ip} | exists={1 if row else 0}")
+    if row:
+        token_plain = secrets.token_urlsafe(48)
+        now = datetime.now()
+        expires = now + timedelta(minutes=45)
+        entry = {
+            "token_hash": _pwreset_hash(token_plain),
+            "email": email,
+            "benutzername": row.get("benutzername"),
+            "kanzlei_id": row.get("kanzlei_id") or "default",
+            "created_at": now.isoformat(),
+            "expires_at": expires.isoformat(),
+            "used_at": "",
+            "ip": ip,
+        }
+        rows = [r for r in _pwreset_tokens() if (r.get("used_at") or "") == ""]
+        # alte Tokens für dieselbe Mail ungültig machen
+        rows = [r for r in rows if (r.get("email") or "").lower() != email]
+        rows.append(entry)
+        _pwreset_tokens_save(rows)
+
+        base = (os.getenv("PUBLIC_APP_URL") or os.getenv("PORTAL_BASE_URL") or "").strip().rstrip("/")
+        if not base:
+            base = "https://kanzlei-automation.com"
+        reset_url = f"{base}/reset-password?token={quote(token_plain, safe='')}"
+        subject = "Passwort zurücksetzen — Kanzlei AI"
+        plain = (
+            "Sie haben eine Passwort-Zurücksetzung angefordert.\n\n"
+            f"Link (45 Minuten gültig): {reset_url}\n\n"
+            "Wenn Sie das nicht waren, ignorieren Sie diese E-Mail."
+        )
+        html = (
+            "<p>Sie haben eine Passwort-Zurücksetzung angefordert.</p>"
+            f'<p><a href="{html_module.escape(reset_url)}">Passwort jetzt zurücksetzen</a></p>'
+            "<p>Der Link ist 45 Minuten gültig. Wenn Sie das nicht waren, ignorieren Sie diese E-Mail.</p>"
+        )
+        send_email_smtp(email, subject, plain, html)
+        _pwreset_store().log_eintrag(f"PASSWORT_RESET_LINK_GESENDET | {row.get('benutzername')} | {row.get('kanzlei_id')}")
+
+    return {"status": "ok", "message": "Falls die E-Mail existiert, wurde ein Reset-Link versendet."}
+
+
+@app.post("/auth/password/reset", tags=["Auth"], summary="Passwort mit Reset-Token setzen")
+@app.post("/api/auth/password/reset", tags=["Auth"], summary="Passwort mit Reset-Token setzen (/api Alias)")
+def auth_password_reset(data: PasswortResetRequest, request: Request):
+    from backend.auth import logout_all_user_sessions, setze_passwort_ohne_altes
+
+    if data.neues_passwort != data.bestaetigen:
+        raise HTTPException(400, "Neues Passwort und Bestätigung stimmen nicht überein")
+
+    ip = _get_client_ip(request)
+    if not _pwreset_rate_allow(f"reset:ip:{ip}", PWRESET_RESET_LIMIT_IP, PWRESET_RATE_WINDOW_SECONDS):
+        _pwreset_store().log_eintrag(f"PASSWORT_RESET_RATE_LIMIT | reset | ip={ip}")
+        raise HTTPException(429, "Zu viele Reset-Versuche. Bitte später erneut versuchen.")
+
+    token_hash = _pwreset_hash(data.token)
+    rows = _pwreset_tokens()
+    now = datetime.now()
+    match = None
+    for r in rows:
+        if (r.get("token_hash") or "") != token_hash:
+            continue
+        if (r.get("used_at") or "").strip():
+            continue
+        try:
+            exp = datetime.fromisoformat(r.get("expires_at") or "")
+        except Exception:
+            continue
+        if now > exp:
+            continue
+        match = r
+        break
+
+    if not match:
+        _pwreset_store().log_eintrag(f"PASSWORT_RESET_INVALID_TOKEN | ip={ip}")
+        raise HTTPException(400, "Reset-Token ungültig oder abgelaufen")
+
+    benutzername = str(match.get("benutzername") or "").strip()
+    kanzlei_id = str(match.get("kanzlei_id") or "default").strip() or "default"
+    if not benutzername:
+        raise HTTPException(400, "Reset-Token enthält keinen Benutzer")
+
+    ok = setze_passwort_ohne_altes(benutzername, kanzlei_id, data.neues_passwort)
+    if not ok:
+        raise HTTPException(500, "Passwort konnte nicht gesetzt werden")
+
+    match["used_at"] = now.isoformat()
+    _pwreset_tokens_save(rows)
+    try:
+        logout_all_user_sessions(benutzername, kanzlei_id)
+    except Exception:
+        pass
+    # Alle bestehenden Refresh-Tokens über Passwort-Version invalidieren.
+    email = str(match.get("email") or "").strip().lower()
+    if email:
+        _auth_pw_version_bump(email)
+    _pwreset_store().log_eintrag(f"PASSWORT_RESET | {benutzername} | {kanzlei_id} | ip={ip}")
+    return {"status": "ok", "message": "Passwort wurde erfolgreich zurückgesetzt."}
+
+
+@app.post("/auth/email/verify", tags=["Auth"], summary="E-Mail-Adresse bestätigen")
+@app.post("/api/auth/email/verify", tags=["Auth"], summary="E-Mail-Adresse bestätigen (/api Alias)")
+def auth_email_verify(data: EmailVerifyRequest):
+    token_hash = hashlib.sha256((data.token or "").encode("utf-8")).hexdigest()
+    rows = _email_verify_tokens()
+    match = None
+    for r in rows:
+        if (r.get("token_hash") or "") == token_hash and not str(r.get("used_at") or "").strip():
+            match = r
+            break
+    if not match:
+        raise HTTPException(400, "Verifizierungs-Token ungültig oder abgelaufen")
+    email = str(match.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(400, "Ungültiger Verifizierungs-Token")
+    match["used_at"] = datetime.now().isoformat()
+    _email_verify_tokens_save(rows)
+    _email_verified_set(email, True)
+    ds.log_eintrag(f"EMAIL_VERIFIED | {email}")
+    return {"status": "ok", "message": "E-Mail erfolgreich bestätigt."}
+
+
+@app.post("/auth/email/resend", tags=["Auth"], summary="Verifizierungs-E-Mail erneut senden")
+@app.post("/api/auth/email/resend", tags=["Auth"], summary="Verifizierungs-E-Mail erneut senden (/api Alias)")
+def auth_email_resend(data: PasswortForgotRequest):
+    email = (data.email or "").strip().lower()
+    if not email:
+        raise HTTPException(400, "Ungültige E-Mail")
+    if _email_is_verified(email):
+        return {"status": "ok", "message": "E-Mail ist bereits verifiziert."}
+    _email_verify_send(email)
+    ds.log_eintrag(f"EMAIL_VERIFY_RESEND | {email}")
+    return {"status": "ok", "message": "Falls die E-Mail existiert, wurde ein Bestätigungslink gesendet."}
+
+
+@app.get("/auth/oauth/{provider}/start", tags=["Auth"], summary="OAuth/OIDC Login starten")
+@app.get("/api/auth/oauth/{provider}/start", tags=["Auth"], summary="OAuth/OIDC Login starten (/api Alias)")
+def auth_oauth_start(provider: str, redirect_to: Optional[str] = Query(None)):
+    p = (provider or "").strip().lower()
+    cfg = OAUTH_PROVIDERS.get(p)
+    if not cfg:
+        raise HTTPException(404, "OAuth-Provider nicht unterstützt")
+    client_id = _oauth_env(p, "CLIENT_ID")
+    client_secret = _oauth_env(p, "CLIENT_SECRET")
+    if not client_id or not client_secret:
+        raise HTTPException(503, f"OAuth für {p} ist nicht konfiguriert")
+    state = secrets.token_urlsafe(24)
+    nonce = secrets.token_urlsafe(24)
+    rows = _oauth_state_rows()
+    rows.append(
+        {
+            "state": state,
+            "nonce": nonce,
+            "provider": p,
+            "redirect_to": _oauth_normalize_redirect_target(redirect_to),
+            "expires_at": (datetime.now() + timedelta(minutes=10)).isoformat(),
+        }
+    )
+    _oauth_state_save(rows)
+    params = {
+        "client_id": client_id,
+        "redirect_uri": _oauth_redirect_uri(p),
+        "response_type": "code",
+        "scope": cfg["scope"],
+        "state": state,
+    }
+    if p in {"google", "microsoft"}:
+        params["nonce"] = nonce
+    if p == "google":
+        params["access_type"] = "offline"
+        params["prompt"] = "select_account"
+    auth_url = f"{cfg['auth_url']}?{urlencode(params)}"
+    return RedirectResponse(auth_url, status_code=302)
+
+
+@app.get("/auth/oauth/{provider}/callback", tags=["Auth"], summary="OAuth/OIDC Callback")
+@app.get("/api/auth/oauth/{provider}/callback", tags=["Auth"], summary="OAuth/OIDC Callback (/api Alias)")
+async def auth_oauth_callback(provider: str, code: str = Query(...), state: str = Query(...)):
+    p = (provider or "").strip().lower()
+    cfg = OAUTH_PROVIDERS.get(p)
+    if not cfg:
+        raise HTTPException(404, "OAuth-Provider nicht unterstützt")
+    rows = _oauth_state_rows()
+    st = next((r for r in rows if r.get("state") == state and r.get("provider") == p), None)
+    if not st:
+        raise HTTPException(400, "Ungültiger OAuth-Status")
+    rows = [r for r in rows if r.get("state") != state]
+    _oauth_state_save(rows)
+
+    client_id = _oauth_env(p, "CLIENT_ID")
+    client_secret = _oauth_env(p, "CLIENT_SECRET")
+    redirect_uri = _oauth_redirect_uri(p)
+    token_payload = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": redirect_uri,
+    }
+    async with httpx.AsyncClient(timeout=20) as cli:
+        token_res = await cli.post(cfg["token_url"], data=token_payload, headers={"Content-Type": "application/x-www-form-urlencoded"})
+        if token_res.status_code >= 400:
+            detail = (token_res.text or "")[:1200]
+            log.warning("OAuth token endpoint error (%s): status=%s body=%s", p, token_res.status_code, detail)
+            raise HTTPException(400, f"OAuth Token-Fehler ({p})")
+        try:
+            token_data = token_res.json() if token_res.content else {}
+        except Exception:
+            raise HTTPException(400, f"OAuth Token-Antwort ungültig ({p})") from None
+
+        email = ""
+        if cfg.get("userinfo_url"):
+            at = str(token_data.get("access_token") or "")
+            ures = await cli.get(cfg["userinfo_url"], headers={"Authorization": f"Bearer {at}"})
+            if ures.status_code < 400:
+                try:
+                    ujson = ures.json() if ures.content else {}
+                except Exception:
+                    ujson = {}
+                email = str(ujson.get("email") or "").strip().lower()
+        if not email:
+            claims = _oauth_parse_jwt_payload(str(token_data.get("id_token") or ""))
+            expected_nonce = str(st.get("nonce") or "")
+            if not _oauth_validate_id_token_claims(
+                p,
+                claims,
+                expected_client_id=client_id,
+                expected_nonce=expected_nonce,
+            ):
+                raise HTTPException(400, "OIDC Token-Claims ungültig")
+            email = str(claims.get("email") or "").strip().lower()
+        if not email:
+            raise HTTPException(400, "OAuth lieferte keine E-Mail-Adresse")
+
+    try:
+        from backend.auth import finde_benutzer_nach_email, registriere_per_email
+        row = finde_benutzer_nach_email(email)
+        if not row:
+            # Neue Registrierung über Social Login (eigene Kanzlei)
+            random_pw = secrets.token_urlsafe(24) + "Aa1!"
+            registriere_per_email(email, random_pw)
+            row = finde_benutzer_nach_email(email)
+    except HTTPException:
+        raise
+    except Exception:
+        log.exception("oauth user create/find failed (%s)", p)
+        raise HTTPException(500, "OAuth Anmeldung fehlgeschlagen") from None
+    if not row:
+        raise HTTPException(500, "Social Login konnte Benutzer nicht erzeugen")
+
+    _email_verified_set(email, True)
+    kid = str(row.get("kanzlei_id") or "default")
+    bname = str(row.get("benutzername") or "")
+    rolle = str(row.get("rolle") or "assistent")
+    uid = row.get("id")
+    sub = str(int(uid)) if uid is not None and str(uid).isdigit() else bname
+    tokens = _issue_auth_tokens(
+        sub=sub,
+        kanzlei_id=kid,
+        rolle=rolle,
+        email=email,
+        benutzername=bname,
+        uid=int(uid) if uid is not None and str(uid).isdigit() else None,
+    )
+    target = _oauth_normalize_redirect_target(st.get("redirect_to"))
+    sep = "&" if "?" in target else "?"
+    oauth_code = _oauth_login_code_store(
+        {
+            "access_token": tokens["access_token"],
+            "refresh_token": tokens["refresh_token"],
+            "token_type": tokens["token_type"],
+            "expires_in": tokens["expires_in"],
+            "refresh_expires_in": tokens["refresh_expires_in"],
+            "role": rolle,
+            "email": email,
+        }
+    )
+    redirect_url = f"{target}{sep}oauth=ok&code={quote(oauth_code, safe='')}"
+    try:
+        ds.log_eintrag(f"OAUTH_LOGIN | {p} | {email}")
+    except Exception:
+        # OAuth Login darf nicht an optionalem Audit-Log scheitern.
+        log.exception("oauth log_eintrag failed (%s)", p)
+    html = (
+        "<!doctype html><html><body>"
+        "<script>window.location.href="
+        + json.dumps(redirect_url)
+        + ";</script>"
+        "</body></html>"
+    )
+    return HTMLResponse(content=html, status_code=200)
+
+
+@app.post("/auth/oauth/exchange", tags=["Auth"], summary="OAuth Login-Code gegen Tokens tauschen")
+@app.post("/api/auth/oauth/exchange", tags=["Auth"], summary="OAuth Login-Code gegen Tokens tauschen (/api Alias)")
+def auth_oauth_exchange(data: OAuthExchangeRequest):
+    payload = _oauth_login_code_consume(data.code)
+    if not payload:
+        raise HTTPException(400, "OAuth-Code ungültig oder abgelaufen")
+    return payload
+
 
 @app.post("/auth/login", tags=["Auth"], summary="Login — Session-Token erhalten")
 async def auth_login(data: LoginRequest, request: Request):
-    """Login mit Rate-Limiting (max 10 Versuche/5min pro IP). Ohne vorherigen Bearer-Token."""
+    """Login mit Rate-Limiting; akzeptiert benutzername/passwort oder email/password."""
 
-    from core.auth import login, setup_erstbenutzer, hat_irgendein_benutzer
+    from backend.auth import login, login_by_email, hat_irgendein_benutzer
     if not hat_irgendein_benutzer():
-        setup_erstbenutzer()
+        raise HTTPException(503, "System nicht initialisiert: bitte zuerst einen Admin registrieren")
     ip = _get_client_ip(request)
     try:
-        result = login(data.benutzername, data.passwort, ip=ip)
+        if (data.email or "").strip():
+            result = login_by_email(str(data.email), str(data.password or ""), ip=ip)
+        else:
+            result = login(str(data.benutzername or ""), str(data.passwort or ""), ip=ip)
         if not result:
+            try:
+                from backend.audit import audit_event as _audit
+                _audit(
+                    {"benutzername": (data.benutzername or data.email or "")},
+                    "LOGIN_FAIL",
+                    status="deny",
+                    ip=ip,
+                    details={"reason": "invalid_credentials"},
+                )
+            except Exception:
+                pass
             raise HTTPException(401, "Benutzername oder Passwort falsch")
+        require_verified = (os.getenv("AUTH_REQUIRE_EMAIL_VERIFIED") or "1").strip().lower() in {"1", "true", "yes", "on"}
+        mail = str(result.get("email") or "").strip().lower()
+        if require_verified and mail and not _email_is_verified(mail):
+            try:
+                from backend.audit import audit_event as _audit
+                _audit(result, "LOGIN_FAIL", status="deny", ip=ip,
+                       details={"reason": "email_not_verified"})
+            except Exception:
+                pass
+            raise HTTPException(403, "E-Mail noch nicht bestätigt")
         kid = result.get("kanzlei_id", "default")
         log_store = DatenSpeicher(kanzlei_id=kid)
         log_store.log_eintrag(f"LOGIN | {data.benutzername}", benutzer=data.benutzername, ip=ip)
+        try:
+            from backend.audit import audit_event as _audit
+            _audit(result, "LOGIN_OK", status="ok", ip=ip)
+        except Exception:
+            pass
+        try:
+            from backend.auth import (
+                jwt_secret,
+            )
+
+            if jwt_secret():
+                uid = result.get("user_id")
+                kid_jwt = result.get("kanzlei_id", "default")
+                rol = result.get("rolle", "assistent")
+                jwt_sub = str(int(uid)) if uid is not None else result["benutzername"]
+                issued = _issue_auth_tokens(
+                    sub=jwt_sub,
+                    kanzlei_id=kid_jwt,
+                    rolle=rol,
+                    email=result.get("email") or "",
+                    benutzername=result["benutzername"],
+                    uid=int(uid) if uid is not None else None,
+                )
+                result["access_token"] = issued["access_token"]
+                result["refresh_token"] = issued["refresh_token"]
+                result["token_type"] = issued["token_type"]
+                result["expires_in"] = issued["expires_in"]
+                result["refresh_expires_in"] = issued["refresh_expires_in"]
+        except (ValueError, ImportError):
+            pass
+        # Konsistenz für Frontends: role + rolle
+        result["role"] = result.get("rolle", "user")
         return ok(result, "Login erfolgreich")
     except ValueError as e:
         raise HTTPException(429, str(e))
 
+
+@app.post("/auth/refresh", tags=["Auth"], summary="Neues Access-Token aus Refresh-Token")
+def auth_refresh(data: RefreshTokenRequest):
+    from backend.auth import (
+        verify_refresh_token,
+    )
+
+    claims = verify_refresh_token(data.refresh_token)
+    if not claims:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid refresh token")
+    if (claims.get("typ") or "") != "refresh":
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid refresh token type")
+    sub = str(claims.get("sub") or "").strip()
+    if not sub:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid refresh token payload")
+    old_jti = str(claims.get("jti") or "").strip()
+    if not old_jti or _refresh_jti_is_used(old_jti):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Refresh token was already used")
+    email = str(claims.get("email") or "").strip().lower()
+    token_pv = int(claims.get("pv") or 1)
+    current_pv = _auth_pw_version_get(email) if email else token_pv
+    if token_pv != current_pv:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Refresh token invalidated by password change")
+    _refresh_jti_mark_used(old_jti)
+    extra = {
+        "kanzlei_id": claims.get("kanzlei_id") or claims.get("tenant_id") or "default",
+        "tenant_id": claims.get("tenant_id") or claims.get("kanzlei_id") or "default",
+        "rolle": claims.get("rolle") or claims.get("role") or "assistent",
+        "role": claims.get("role") or claims.get("rolle") or "assistent",
+        "email": email,
+        "benutzername": claims.get("benutzername") or "",
+    }
+    if claims.get("uid") is not None:
+        extra["uid"] = claims.get("uid")
+    issued = _issue_auth_tokens(
+        sub=sub,
+        kanzlei_id=str(extra["kanzlei_id"]),
+        rolle=str(extra["rolle"]),
+        email=email,
+        benutzername=str(extra["benutzername"] or ""),
+        uid=int(extra["uid"]) if extra.get("uid") is not None and str(extra.get("uid")).isdigit() else None,
+    )
+    return {
+        "access_token": issued["access_token"],
+        "refresh_token": issued["refresh_token"],
+        "token_type": issued["token_type"],
+        "expires_in": issued["expires_in"],
+        "refresh_expires_in": issued["refresh_expires_in"],
+    }
+
+
+@app.post("/login", tags=["Auth"], summary="Login per E-Mail — JWT + Session (Nginx: /api/login → /login)")
+@app.post("/api/login", tags=["Auth"], summary="Login per E-Mail — JWT + Session (direkt auf Uvicorn)")
+async def api_login_email_jwt(data: EmailPasswordLoginRequest, request: Request):
+    """
+    Flache JSON-Antwort (``access_token``, ``token_type``) für SPA/curl.
+    ``access_token`` ist bei gesetztem ``JWT_SECRET`` ein HS256-JWT; sonst dasselbe Session-Token wie ``token``.
+    """
+    from backend.auth import hat_irgendein_benutzer, login_by_email
+    from backend.auth import access_token_ttl_minutes, jwt_secret as jwt_secret_fn
+
+    if not hat_irgendein_benutzer():
+        raise HTTPException(503, "System nicht initialisiert: bitte zuerst einen Admin registrieren")
+    ip = _get_client_ip(request)
+    try:
+        result = login_by_email(data.email, data.password, ip=ip)
+    except ValueError as e:
+        raise HTTPException(429, str(e))
+    if not result:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid credentials")
+    require_verified = (os.getenv("AUTH_REQUIRE_EMAIL_VERIFIED") or "1").strip().lower() in {"1", "true", "yes", "on"}
+    if require_verified:
+        mail = str(result.get("email") or "").strip().lower()
+        if mail and not _email_is_verified(mail):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "E-Mail noch nicht bestätigt")
+
+    kid = result.get("kanzlei_id", "default")
+    log_store = DatenSpeicher(kanzlei_id=kid)
+    log_store.log_eintrag(
+        f"LOGIN_EMAIL | {result['benutzername']}", benutzer=result["benutzername"], ip=ip
+    )
+
+    from backend.auth import refresh_token_expire_days
+
+    if jwt_secret_fn():
+        rol = result.get("rolle", "assistent")
+        uid = result.get("user_id")
+        sub = str(int(uid)) if uid is not None else result["benutzername"]
+        try:
+            issued = _issue_auth_tokens(
+                sub=sub,
+                kanzlei_id=kid,
+                rolle=rol,
+                email=result.get("email") or "",
+                benutzername=result["benutzername"],
+                uid=int(uid) if uid is not None else None,
+            )
+            access = issued["access_token"]
+            refresh = issued["refresh_token"]
+            refresh_expires_in = issued["refresh_expires_in"]
+        except (ValueError, ImportError):
+            access = result["token"]
+            refresh = ""
+            refresh_expires_in = 0
+    else:
+        access = result["token"]
+        refresh = ""
+        refresh_expires_in = 0
+
+    body = {
+        "access_token": access,
+        "token_type": "bearer",
+        "token": result["token"],
+        "benutzername": result["benutzername"],
+        "kanzlei_id": kid,
+        "tenant_id": kid,
+        "role": result.get("rolle", "user"),
+        "rolle": result.get("rolle", "user"),
+        "expires_in": access_token_ttl_minutes() * 60,
+    }
+    if refresh:
+        body["refresh_token"] = refresh
+        body["refresh_expires_in"] = refresh_expires_in or (refresh_token_expire_days() * 24 * 60 * 60)
+    return body
+
+
+@app.get("/api/me", tags=["Auth"], summary="Kurzprofil — Alias für Nginx /api/")
+def api_me_minimal(current_user: dict = Depends(get_current_user)):
+    # Legacy endpoint now returns the richer MVP profile payload.
+    return auth_me(current_user)
+
+
+@app.get("/api/protected", tags=["Auth"], summary="Geschützter Endpoint-Check")
+def api_protected_probe(current_user: dict = Depends(get_current_user)):
+    """Minimaler Probe-Endpoint für Deploy/Frontend-Guards."""
+    return {
+        "ok": True,
+        "user": {
+            "benutzername": current_user.get("benutzername"),
+            "tenant_id": current_user.get("tenant_id") or current_user.get("kanzlei_id"),
+            "role": current_user.get("role") or current_user.get("rolle"),
+        },
+    }
+
+
+@app.post(
+    "/register",
+    tags=["Auth"],
+    summary="Registrierung per E-Mail (Nginx: /api/register → /register)",
+    status_code=status.HTTP_201_CREATED,
+)
+@app.post(
+    "/api/register",
+    tags=["Auth"],
+    summary="Registrierung per E-Mail (direkt auf Uvicorn)",
+    status_code=status.HTTP_201_CREATED,
+)
+def api_register_email(data: EmailPasswordRegisterRequest, request: Request):
+    """
+    Legt einen Benutzer mit internem Login-Namen an; Login erfolgt weiter per E-Mail (``/login``).
+    Fehlerdetails bewusst generisch (Enumeration).
+    """
+    from backend.auth import registriere_per_email
+
+    _fail = HTTPException(status.HTTP_400_BAD_REQUEST, "Registration could not be completed")
+    ip = _get_client_ip(request)
+    try:
+        created = registriere_per_email(
+            str(data.email),
+            data.password,
+            admin_key=data.admin_key,
+            rolle=data.rolle,
+            invite_token=data.invite_token,
+        )
+        kid_reg = (created or {}).get("kanzlei_id") or "default"
+        try:
+            log_store = DatenSpeicher(kanzlei_id=kid_reg)
+            log_store.log_eintrag(f"REGISTER_EMAIL | {data.email}", benutzer=str(data.email), ip=ip)
+        except Exception:
+            pass
+    except ValueError:
+        raise _fail from None
+    except Exception:
+        log.exception("api_register_email")
+        raise _fail from None
+    _email_verified_set(data.email, False)
+    try:
+        _email_verify_send(data.email)
+    except Exception:
+        log.exception("email verify send failed")
+    return {
+        "message": "User created",
+        "kanzlei_id": kid_reg,
+        "tenant_id": kid_reg,
+        "email_verification_required": True,
+    }
+
+
 @app.post("/auth/logout", tags=["Auth"], summary="Logout — Session beenden")
-def auth_logout(authorization: Optional[str] = Header(None)):
+def auth_logout(
+    authorization: Optional[str] = Header(None),
+    _user: dict = Depends(get_current_user),
+):
     """Session-Token invalidieren."""
-    from core.auth import logout
+    from backend.auth import logout
     if authorization and authorization.startswith("Bearer "):
         token = authorization.replace("Bearer ", "")
         logout(token)
@@ -2837,9 +5059,12 @@ def auth_registrieren(data: RegistrierRequest):
     Weitere Benutzer: Admin-Key aus .env (PORTAL_ADMIN_KEY) erforderlich.
     """
 
-    from core.auth import erstelle_benutzer, hat_irgendein_benutzer
+    from backend.auth import erstelle_benutzer, hat_irgendein_benutzer
     import os
-    if hat_irgendein_benutzer():
+    # Legacy-Endpoint bleibt kompatibel, aber der harte Admin-Key-Gate ist optional,
+    # damit Self-Service Registrierung nicht durch "Admin-Key erforderlich" blockiert.
+    legacy_gate = (os.getenv("AUTH_REQUIRE_ADMIN_KEY_FOR_LEGACY_REGISTER") or "0").strip().lower() in {"1", "true", "yes", "on"}
+    if legacy_gate and hat_irgendein_benutzer():
         expected = os.getenv("PORTAL_ADMIN_KEY", "kanzlei-admin-2024")
         import secrets as sc
         if not data.admin_key or not sc.compare_digest(data.admin_key, expected):
@@ -2861,22 +5086,103 @@ def auth_registrieren(data: RegistrierRequest):
 @app.get("/auth/me", tags=["Auth"], summary="Eigene Benutzer-Info")
 def auth_me(current_user: dict = Depends(get_current_user)):
     """Gibt Info zum aktuell eingeloggten Benutzer zurück."""
-    return current_user
+    kid = str(current_user.get("tenant_id") or current_user.get("kanzlei_id") or "default").strip() or "default"
+    bname = str(current_user.get("benutzername") or "").strip()
+    store = DatenSpeicher(kanzlei_id=kid)
+    user_profiles = store.setting_holen("__user_profiles__", {}) or {}
+    profile = user_profiles.get(bname, {}) if isinstance(user_profiles, dict) else {}
+    tenant_profile = store.setting_holen("__tenant_profile__", {}) or {}
+    return {
+        **current_user,
+        "vorname": profile.get("vorname") or "",
+        "nachname": profile.get("nachname") or "",
+        "telefon": profile.get("telefon") or "",
+        "sprache": profile.get("sprache") or "de",
+        "dark_mode": bool(profile.get("dark_mode", True)),
+        "notify_email": bool(profile.get("notify_email", True)),
+        "notify_updates": bool(profile.get("notify_updates", True)),
+        "notify_deadlines": bool(profile.get("notify_deadlines", True)),
+        "password_last_changed_at": profile.get("password_last_changed_at"),
+        "last_login": current_user.get("letzter_login") or profile.get("last_login"),
+        "kanzlei_profil": {
+            "name": tenant_profile.get("kanzlei_name") or "",
+            "adresse": tenant_profile.get("kanzlei_adresse") or "",
+            "telefon": tenant_profile.get("kanzlei_telefon") or "",
+            "logo_url": tenant_profile.get("kanzlei_logo_url") or "",
+        },
+    }
+
+
+@app.get("/me", tags=["Auth"], summary="Basis-Profil (MVP)")
+def me_get_alias(current_user: dict = Depends(get_current_user)):
+    return auth_me(current_user)
+
+
+@app.put("/me", tags=["Auth"], summary="Basis-Profil aktualisieren (MVP)")
+@app.put("/api/me", tags=["Auth"], summary="Basis-Profil aktualisieren (MVP, /api Alias)")
+def me_update(data: MeUpdateRequest, current_user: dict = Depends(get_current_user)):
+    kid = str(current_user.get("tenant_id") or current_user.get("kanzlei_id") or "default").strip() or "default"
+    bname = str(current_user.get("benutzername") or "").strip()
+    if not bname:
+        raise HTTPException(400, "Ungültiger Benutzerkontext")
+    store = DatenSpeicher(kanzlei_id=kid)
+    user_profiles = store.setting_holen("__user_profiles__", {}) or {}
+    if not isinstance(user_profiles, dict):
+        user_profiles = {}
+    profile = user_profiles.get(bname, {}) if isinstance(user_profiles.get(bname), dict) else {}
+    payload = data.model_dump(exclude_none=True)
+    for key, value in payload.items():
+        profile[key] = value
+    user_profiles[bname] = profile
+    if not store.setting_setzen("__user_profiles__", user_profiles):
+        raise HTTPException(500, "Profil konnte nicht gespeichert werden")
+    return {"status": "ok", "message": "Profil aktualisiert"}
 
 @app.get("/auth/benutzer", tags=["Auth"], summary="Alle Benutzer (nur Admin)")
 def auth_benutzer_liste(current_user: dict = Depends(require_permission("settings:write"))):
     """Alle Kanzlei-Mitarbeiter auflisten."""
-    from core.auth import liste_benutzer
+    from backend.auth import liste_benutzer
     if current_user.get("rolle") not in ["admin"]:
         raise HTTPException(403, "Nur für Admins")
     return liste_benutzer(current_user.get("kanzlei_id", "default"))
+
+
+@app.get("/admin/users", tags=["Auth"], summary="Alle Benutzer (Admin)")
+@app.get("/api/admin/users", tags=["Auth"], summary="Alle Benutzer (Admin, /api Alias)")
+def api_admin_users(admin: dict = Depends(require_admin)):
+    """
+    RBAC-kritischer Endpunkt: Nur ``rolle=admin``.
+    """
+    from backend.auth import liste_benutzer
+
+    kid = admin.get("kanzlei_id", "default")
+    users = liste_benutzer(kid)
+    # Niemals Hash/Salt zurückgeben; nur Safe-View.
+    return [
+        {
+            "benutzername": u.get("benutzername"),
+            "email": u.get("email"),
+            "rolle": u.get("rolle"),
+            "aktiv": u.get("aktiv"),
+            "erstellt_am": u.get("erstellt_am"),
+            "letzter_login": u.get("letzter_login"),
+        }
+        for u in users
+    ]
+
+
+@app.get("/api/admin/test", tags=["Auth"], summary="Admin-Gate (Smoke-Test)")
+def api_admin_test(admin: dict = Depends(require_admin)):
+    """Nur Admins (Session/JWT mit ``role``/``rolle`` = admin). API-Key: 403."""
+    return {"message": "Admin access works"}
+
 
 @app.put("/auth/passwort", tags=["Auth"], summary="Passwort ändern")
 def auth_passwort(data: PasswortRequest, current_user: dict = Depends(get_current_user)):
     """Eigenes Passwort ändern."""
 
     store = get_ds(current_user)
-    from core.auth import aendere_passwort
+    from backend.auth import aendere_passwort
     kid = current_user.get("kanzlei_id", "default")
     try:
         ok = aendere_passwort(
@@ -2890,11 +5196,582 @@ def auth_passwort(data: PasswortRequest, current_user: dict = Depends(get_curren
     except ValueError as e:
         raise HTTPException(400, str(e))
 
+
+@app.put("/me/password", tags=["Auth"], summary="Passwort ändern (MVP)")
+@app.put("/api/me/password", tags=["Auth"], summary="Passwort ändern (MVP, /api Alias)")
+def me_password(data: MePasswordRequest, current_user: dict = Depends(get_current_user)):
+    if data.neues_passwort != data.bestaetigen:
+        raise HTTPException(400, "Neues Passwort und Bestätigung stimmen nicht überein")
+    auth_passwort(
+        PasswortRequest(
+            altes_passwort=data.aktuelles_passwort,
+            neues_passwort=data.neues_passwort,
+        ),
+        current_user,
+    )
+    kid = str(current_user.get("tenant_id") or current_user.get("kanzlei_id") or "default").strip() or "default"
+    bname = str(current_user.get("benutzername") or "").strip()
+    email = str(current_user.get("email") or "").strip().lower()
+    store = DatenSpeicher(kanzlei_id=kid)
+    user_profiles = store.setting_holen("__user_profiles__", {}) or {}
+    if isinstance(user_profiles, dict) and bname:
+        profile = user_profiles.get(bname, {}) if isinstance(user_profiles.get(bname), dict) else {}
+        profile["password_last_changed_at"] = datetime.now().isoformat()
+        user_profiles[bname] = profile
+        store.setting_setzen("__user_profiles__", user_profiles)
+    if email:
+        _auth_pw_version_bump(email)
+    return {"status": "ok", "message": "Passwort geändert"}
+
+
+@app.post("/me/logout-all", tags=["Auth"], summary="Alle Sessions abmelden")
+@app.post("/api/me/logout-all", tags=["Auth"], summary="Alle Sessions abmelden (/api Alias)")
+def me_logout_all(
+    authorization: Optional[str] = Header(None),
+    current_user: dict = Depends(get_current_user),
+):
+    from backend.auth import logout, logout_all_user_sessions
+
+    kid = str(current_user.get("tenant_id") or current_user.get("kanzlei_id") or "default").strip() or "default"
+    bname = str(current_user.get("benutzername") or "").strip()
+    invalidated = logout_all_user_sessions(bname, kid)
+    if authorization and authorization.startswith("Bearer "):
+        logout(authorization.replace("Bearer ", ""))
+    return {"status": "ok", "invalidated_sessions": max(1, int(invalidated))}
+
 @app.get("/auth/setup-status", tags=["Auth"], summary="Prüft ob System eingerichtet")
 def auth_setup_status():
     """Prüft ob bereits Benutzer angelegt sind (für Ersteinrichtung)."""
-    from core.auth import hat_irgendein_benutzer
+    from backend.auth import hat_irgendein_benutzer
     return {"eingerichtet": hat_irgendein_benutzer()}
+
+
+# ── Strukturierte Auth-Pfade: /api/auth/* (Aliase zu /auth/*) ─
+from fastapi import APIRouter as _APIRouterAuthAlias
+
+_api_auth_alias = _APIRouterAuthAlias(prefix="/api/auth", tags=["Auth"])
+
+
+@_api_auth_alias.post("/login")
+async def api_auth_login_alias(data: LoginRequest, request: Request):
+    return await auth_login(data, request)
+
+
+@_api_auth_alias.post("/logout")
+def api_auth_logout_alias(
+    authorization: Optional[str] = Header(None),
+    _user: dict = Depends(get_current_user),
+):
+    return auth_logout(authorization, _user)
+
+
+@_api_auth_alias.post("/registrieren", status_code=status.HTTP_201_CREATED)
+def api_auth_registrieren_alias(data: RegistrierRequest):
+    return auth_registrieren(data)
+
+
+@_api_auth_alias.get("/me")
+def api_auth_me_alias(current_user: dict = Depends(get_current_user)):
+    return auth_me(current_user)
+
+
+@_api_auth_alias.get("/benutzer")
+def api_auth_benutzer_alias(current_user: dict = Depends(require_permission("settings:write"))):
+    return auth_benutzer_liste(current_user)
+
+
+@_api_auth_alias.put("/passwort")
+def api_auth_passwort_alias(data: PasswortRequest, current_user: dict = Depends(get_current_user)):
+    return auth_passwort(data, current_user)
+
+
+@_api_auth_alias.get("/setup-status")
+def api_auth_setup_status_alias():
+    return auth_setup_status()
+
+
+app.include_router(_api_auth_alias)
+
+
+# ── Strukturierte Pfade: /api/users/*, /api/data/* (parallel zu /auth/*) ─
+from fastapi import APIRouter as _APIRouterUsersData
+
+_api_users_struct = _APIRouterUsersData(prefix="/api/users", tags=["Users"])
+
+
+def _public_user_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Einheitliche API-Antwort ohne sensible Felder."""
+    r = dict(row)
+    rid = r.get("id")
+    rl = r.get("rolle") or "assistent"
+    active = bool(int(r.get("aktiv", 1) or 0))
+    return {
+        "id": int(rid) if rid is not None and str(rid).isdigit() else rid,
+        "email": (r.get("email") or "").strip(),
+        "benutzername": r.get("benutzername"),
+        "rolle": rl,
+        "role": rl,
+        "aktiv": active,
+        "is_active": active,
+        "erstellt_am": r.get("erstellt_am"),
+        "letzter_login": r.get("letzter_login"),
+    }
+
+
+@_api_users_struct.get("/me")
+def api_users_me_struct(current_user: dict = Depends(get_current_user)):
+    return auth_me(current_user)
+
+
+@_api_users_struct.get("/benutzer")
+def api_users_benutzer_struct(current_user: dict = Depends(require_permission("settings:write"))):
+    return auth_benutzer_liste(current_user)
+
+
+@_api_users_struct.get("", summary="Benutzer der Kanzlei (nur Admin)")
+def api_users_list(admin: dict = Depends(require_admin)):
+    """
+    Mandanten-Liste: nur Benutzer mit ``benutzer.kanzlei_id ==`` Mandant des Admins.
+
+    Entspricht tutorial-seitig ``User.tenant_id == user['tenant_id']`` — bei uns
+    erzwingt ``backend.auth.liste_benutzer(kanzlei_id)`` die WHERE-Klausel; es gibt
+    **keinen** Query-Parameter zur Mandantenwahl (kein Cross-Tenant-Leak).
+    """
+    from backend.auth import liste_benutzer
+
+    if admin.get("api_key_id"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Not authorized")
+    kid = tenant_id_from_user(admin)
+    rows = liste_benutzer(kid)
+    return ok([_public_user_row(x) for x in rows if isinstance(x, dict)])
+
+
+@_api_users_struct.post("", status_code=status.HTTP_201_CREATED, summary="Benutzer anlegen (nur Admin)")
+def api_users_create(data: CreateUserRequest, admin: dict = Depends(require_admin)):
+    """
+    Mandanten-sicher: ``kanzlei_id`` / ``tenant_id`` ausschließlich aus ``admin`` (niemals aus dem Body).
+
+    Persistenz: ``backend.auth.erstelle_benutzer`` (Tabelle ``benutzer``), Passwort-Hashing dort per bcrypt.
+    """
+    from backend.auth import email_adresse_bereits_registriert, erstelle_benutzer, loginname_aus_email
+
+    if admin.get("api_key_id"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Not authorized")
+    kid = tenant_id_from_user(admin)
+    if email_adresse_bereits_registriert(data.email):
+        raise HTTPException(status.HTTP_409_CONFLICT, "User already exists")
+    bname = loginname_aus_email(data.email)
+    try:
+        row = erstelle_benutzer(
+            bname,
+            data.password,
+            rolle=data.role,
+            email=data.email,
+            kanzlei_id=kid,
+        )
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    return ok(_public_user_row(row), "User created")
+
+
+@_api_users_struct.get("/invites", summary="Einladungen der Kanzlei (Audit, nur Admin)")
+def api_users_invites_list(
+    admin: dict = Depends(require_admin),
+    limit: int = Query(50, ge=1, le=200),
+):
+    from core.tenant_invite_records import invite_records_list
+
+    if admin.get("api_key_id"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Not authorized")
+    kid = tenant_id_from_user(admin)
+    return ok(invite_records_list(kanzlei_id=str(kid), limit=limit))
+
+
+@_api_users_struct.post("/invites", status_code=status.HTTP_201_CREATED, summary="Einladungslink erzeugen (nur Admin)")
+def api_users_create_invite(
+    background_tasks: BackgroundTasks,
+    data: ApiUsersInviteRequest,
+    admin: dict = Depends(require_admin),
+):
+    from core.tenant_invite_records import invite_record_insert, invite_record_mark_email_enqueued
+    from core.tenant_invites import create_tenant_invite_token, invite_secret_configured, verify_tenant_invite_token
+
+    if admin.get("api_key_id"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Not authorized")
+    kid = tenant_id_from_user(admin)
+    if not invite_secret_configured():
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Einladungen benötigen INVITE_TOKEN_SECRET oder JWT_SECRET/PORTAL_SECRET (jeweils ≥32 Zeichen).",
+        )
+    lock = (data.email or "").strip().lower() or None
+    try:
+        tok = create_tenant_invite_token(
+            kanzlei_id=str(kid),
+            invited_by=str(admin.get("benutzername") or ""),
+            rolle=data.role,
+            email_lock=lock,
+            ttl_hours=data.ttl_hours,
+        )
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+    meta = verify_tenant_invite_token(tok)
+    if not meta or not meta.get("jti"):
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "invite_meta_failed")
+
+    invite_record_insert(
+        kanzlei_id=str(kid),
+        jti=str(meta["jti"]),
+        role=str(meta.get("role") or data.role),
+        email_lock=meta.get("email_lock"),
+        target_email=(data.email or "").strip().lower() if data.send_email else None,
+        invited_by=str(admin.get("benutzername") or ""),
+        expires_at=int(meta.get("exp") or 0),
+    )
+
+    invite_url = _invite_registration_url(tok)
+    payload: Dict[str, Any] = {
+        "invite_token": tok,
+        "invite_url": invite_url,
+        "jti": meta.get("jti"),
+        "tenant_id": kid,
+        "kanzlei_id": kid,
+        "ttl_hours": data.ttl_hours,
+        "role": data.role,
+        "rolle": data.role,
+        "email_lock": meta.get("email_lock"),
+        "send_email": data.send_email,
+    }
+
+    if data.send_email:
+        to = (data.email or "").strip().lower()
+        subject = "Einladung: Kanzlei-Zugang"
+        body = (
+            "Sie wurden zu einer Kanzlei eingeladen.\n\n"
+            f"Bitte registrieren Sie sich unter diesem Link (Passwort selbst wählen):\n{invite_url}\n\n"
+            "Der Link ist nur begrenzt gültig.\n"
+        )
+        safe_url = html_module.escape(invite_url, quote=True)
+        html_body = (
+            "<p>Sie wurden zu einer Kanzlei eingeladen.</p>"
+            f'<p><a href="{safe_url}">Jetzt registrieren</a></p>'
+            "<p>Der Link ist nur begrenzt gültig.</p>"
+        )
+        idk = f"team_invite|{kid}|{meta['jti']}|v1"
+        enq = email_outbox_enqueue(
+            kanzlei_id=str(kid),
+            mandant="__team_invite__",
+            to_email=to,
+            subject=subject,
+            body_text=body,
+            body_html=html_body,
+            idempotency_key=idk,
+        )
+        invite_record_mark_email_enqueued(
+            jti=str(meta["jti"]),
+            kanzlei_id=str(kid),
+            outbox_id=enq.get("id"),
+        )
+        payload["email_outbox"] = enq
+
+    background_tasks.add_task(_process_email_outbox_once, 8)
+    return ok(payload, "Invite created")
+
+
+@_api_users_struct.delete("/invites/{jti}", summary="Einladung widerrufen (nur Admin)")
+def api_users_invite_revoke(jti: str, admin: dict = Depends(require_admin)):
+    from core.tenant_invite_records import invite_record_revoke
+
+    if admin.get("api_key_id"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Not authorized")
+    kid = tenant_id_from_user(admin)
+    if not invite_record_revoke(jti=(jti or "").strip(), kanzlei_id=str(kid)):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Invite not found or not revocable")
+    return ok({"jti": jti, "status": "revoked"}, "Invite revoked")
+
+
+@_api_users_struct.patch("/{user_id}/role", summary="Rolle setzen (nur Admin)")
+def api_users_patch_role(
+    user_id: int,
+    data: ApiUsersRolePatchRequest,
+    admin: dict = Depends(require_admin),
+):
+    from backend.auth import benutzer_rolle_setzen_nach_id, hole_benutzer_kurz_nach_id
+
+    if admin.get("api_key_id"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Not authorized")
+    kid = tenant_id_from_user(admin)
+    row = hole_benutzer_kurz_nach_id(int(user_id), kid)
+    if not row:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    if str(row.get("benutzername") or "").strip() == (admin.get("benutzername") or "").strip():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Eigene Rolle hier nicht änderbar")
+    old_role = str(row.get("rolle") or "")
+    # Owner-Schutz: nur Owner darf Owner setzen oder absetzen.
+    from core.rbac import canonical_role as _canon, is_owner as _is_owner
+    new_canonical = _canon(data.role)
+    if _is_owner(old_role) and new_canonical != "owner":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Owner kann nicht herabgestuft werden")
+    if new_canonical == "owner" and not _is_owner(admin.get("rolle")):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Nur ein Owner darf Owner-Rolle vergeben")
+    if not benutzer_rolle_setzen_nach_id(int(user_id), kid, data.role):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    try:
+        from backend.audit import audit_event as _audit
+        _audit(
+            admin,
+            "ROLE_CHANGE",
+            target=f"user:{user_id}",
+            details={"old": old_role, "new": data.role, "username": row.get("benutzername")},
+        )
+    except Exception:
+        pass
+    return ok({"id": user_id, "role": data.role, "rolle": data.role}, "Rolle aktualisiert")
+
+
+@_api_users_struct.delete("/{user_id}", summary="Benutzer deaktivieren / Soft-delete (nur Admin)")
+def api_users_delete(user_id: int, admin: dict = Depends(require_admin)):
+    from backend.auth import benutzer_deaktivieren_nach_id, hole_benutzer_kurz_nach_id
+    from core.rbac import is_owner as _is_owner
+
+    if admin.get("api_key_id"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Not authorized")
+    kid = tenant_id_from_user(admin)
+    row = hole_benutzer_kurz_nach_id(int(user_id), kid)
+    if not row:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    if str(row.get("benutzername") or "").strip() == (admin.get("benutzername") or "").strip():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Eigenes Konto nicht deaktivieren")
+    aid = admin.get("user_id")
+    if aid is not None and int(aid) == int(user_id):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Eigenes Konto nicht deaktivieren")
+    if _is_owner(row.get("rolle")):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Owner kann nicht deaktiviert werden")
+    if not benutzer_deaktivieren_nach_id(int(user_id), kid):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    try:
+        from backend.audit import audit_event as _audit
+
+        _audit(
+            admin,
+            "USER_DEACTIVATE",
+            target=f"user:{user_id}",
+            details={"username": row.get("benutzername"), "role": row.get("rolle")},
+        )
+    except Exception:
+        pass
+    return ok({"id": user_id, "aktiv": False, "message": "deleted"})
+
+
+_api_data_struct = _APIRouterUsersData(prefix="/api/data", tags=["Data"])
+
+
+@_api_data_struct.get("/status")
+def api_data_status(_user: dict = Depends(get_current_user)):
+    du_pg = (os.getenv("DATABASE_URL") or "").strip().lower().startswith("postgresql://")
+    use_pg_m = (os.getenv("USE_POSTGRES_DATA") or "").strip().lower() in ("1", "true", "yes")
+    pg_only = (os.getenv("POSTGRES_ONLY_DATA") or "").strip().lower() in ("1", "true", "yes")
+    kid_status = _user.get("tenant_id") or _user.get("kanzlei_id")
+    return ok(
+        {
+            "kanzlei_id": _user.get("kanzlei_id"),
+            "tenant_id": kid_status,
+            "auth_kanzleien_db": "postgresql" if du_pg else "sqlite",
+            "mandanten_db": "postgresql" if (du_pg and use_pg_m) else "sqlite",
+            "saas_tables_db": "postgresql" if du_pg else "sqlite",
+            "sqlite_get_connection_disabled": pg_only,
+        },
+        "Datenlage-Kurzinfo",
+    )
+
+
+app.include_router(_api_users_struct)
+app.include_router(_api_data_struct)
+
+
+_api_tenant = _APIRouterUsersData(prefix="/api/tenant", tags=["Tenant SaaS"])
+
+
+@_api_tenant.post("/invites", summary="Einladungs-Token erzeugen (Admin)")
+def tenant_create_invite(data: TenantInviteCreateRequest, admin: dict = Depends(require_admin)):
+    from core.tenant_invites import create_tenant_invite_token, invite_secret_configured
+
+    if admin.get("api_key_id"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Not authorized")
+    kid = tenant_id_from_user(admin)
+    if not invite_secret_configured():
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Einladungen benötigen INVITE_TOKEN_SECRET oder JWT_SECRET/PORTAL_SECRET (jeweils ≥32 Zeichen).",
+        )
+    try:
+        tok = create_tenant_invite_token(
+            kanzlei_id=str(kid),
+            invited_by=str(admin.get("benutzername") or ""),
+            rolle=data.rolle,
+            email_lock=data.email_lock,
+            ttl_hours=data.ttl_hours,
+        )
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    try:
+        from core.tenant_invite_records import invite_record_insert
+        from core.tenant_invites import verify_tenant_invite_token
+
+        meta = verify_tenant_invite_token(tok)
+        if meta and meta.get("jti"):
+            el = (data.email_lock or "").strip().lower() or None
+            invite_record_insert(
+                kanzlei_id=str(kid),
+                jti=str(meta["jti"]),
+                role=str(meta.get("role") or data.rolle),
+                email_lock=el,
+                target_email=None,
+                invited_by=str(admin.get("benutzername") or ""),
+                expires_at=int(meta.get("exp") or 0),
+            )
+    except Exception:
+        log.exception("tenant_create_invite: invite_record_insert")
+
+    return ok(
+        {
+            "invite_token": tok,
+            "tenant_id": kid,
+            "kanzlei_id": kid,
+            "ttl_hours": data.ttl_hours,
+            "rolle": data.rolle,
+            "email_lock": data.email_lock,
+        },
+        "Einladung erstellt",
+    )
+
+
+@_api_tenant.get("/users", summary="Benutzer der eigenen Kanzlei (Admin)")
+def tenant_list_users(admin: dict = Depends(require_admin)):
+    from backend.auth import liste_benutzer
+
+    kid = tenant_id_from_user(admin)
+    return ok(liste_benutzer(kid))
+
+
+@_api_tenant.post("/users", status_code=status.HTTP_201_CREATED, summary="Benutzer in der Kanzlei anlegen (Admin)")
+def tenant_create_user(data: TenantUserCreateRequest, admin: dict = Depends(require_admin)):
+    from backend.auth import email_adresse_bereits_registriert, erstelle_benutzer, loginname_aus_email
+    from core.rbac import canonical_role as _canon, is_owner as _is_owner
+
+    kid = tenant_id_from_user(admin)
+    requested_role = _canon(data.rolle)
+    if requested_role in {"owner", "admin"} and not _is_owner(admin.get("rolle")):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Nur ein Owner darf Admin/Owner-Benutzer anlegen")
+    if email_adresse_bereits_registriert(data.email):
+        raise HTTPException(status.HTTP_409_CONFLICT, "E-Mail bereits registriert")
+    bname = loginname_aus_email(data.email)
+    try:
+        row = erstelle_benutzer(
+            bname,
+            data.password,
+            rolle=data.rolle,
+            email=data.email,
+            kanzlei_id=kid,
+        )
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    return ok(row, "Benutzer erstellt")
+
+
+@_api_tenant.patch("/users/{benutzername}/role", summary="Rolle setzen (Admin)")
+def tenant_set_user_role(
+    benutzername: str,
+    data: TenantUserRoleRequest,
+    admin: dict = Depends(require_admin),
+):
+    from backend.auth import benutzer_rolle_setzen, liste_benutzer
+    from core.rbac import canonical_role as _canon, is_owner as _is_owner
+
+    kid = tenant_id_from_user(admin)
+    target_name = benutzername.strip()
+    if target_name == (admin.get("benutzername") or "").strip():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Eigene Rolle hier nicht änderbar")
+    users = [u for u in (liste_benutzer(kid) or []) if str(u.get("benutzername") or "").strip() == target_name]
+    if not users:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Benutzer nicht gefunden")
+    old_role = str(users[0].get("rolle") or "")
+    new_canonical = _canon(data.rolle)
+    if _is_owner(old_role) and new_canonical != "owner":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Owner kann nicht herabgestuft werden")
+    if new_canonical == "owner" and not _is_owner(admin.get("rolle")):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Nur ein Owner darf Owner-Rolle vergeben")
+    if new_canonical == "admin" and not _is_owner(admin.get("rolle")):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Nur ein Owner darf Admin-Rolle vergeben")
+    if not benutzer_rolle_setzen(target_name, kid, data.rolle):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Benutzer nicht gefunden oder nicht aktiv")
+    try:
+        from backend.audit import audit_event as _audit
+
+        _audit(
+            admin,
+            "ROLE_CHANGE",
+            target=f"user:{target_name}",
+            details={"old": old_role, "new": data.rolle, "username": target_name},
+        )
+    except Exception:
+        pass
+    return ok({"benutzername": target_name, "rolle": data.rolle}, "Rolle aktualisiert")
+
+
+@_api_tenant.delete("/users/{benutzername}", summary="Benutzer deaktivieren (Admin)")
+def tenant_deactivate_user(benutzername: str, admin: dict = Depends(require_admin)):
+    from backend.auth import benutzer_deaktivieren, liste_benutzer
+    from core.rbac import is_owner as _is_owner
+
+    kid = tenant_id_from_user(admin)
+    target_name = benutzername.strip()
+    if target_name == (admin.get("benutzername") or "").strip():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Eigenes Konto nicht deaktivieren")
+    users = [u for u in (liste_benutzer(kid) or []) if str(u.get("benutzername") or "").strip() == target_name]
+    if not users:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Benutzer nicht gefunden")
+    if _is_owner(users[0].get("rolle")):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Owner kann nicht deaktiviert werden")
+    if not benutzer_deaktivieren(target_name, kid):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Benutzer nicht gefunden")
+    try:
+        from backend.audit import audit_event as _audit
+
+        _audit(
+            admin,
+            "USER_DEACTIVATE",
+            target=f"user:{target_name}",
+            details={"username": target_name, "role": users[0].get("rolle")},
+        )
+    except Exception:
+        pass
+    return ok({"benutzername": target_name, "aktiv": False}, "Benutzer deaktiviert")
+
+
+@_api_tenant.get("/features", summary="Feature-Flags (Mandant)")
+def tenant_features_get(_user: dict = Depends(get_current_user)):
+    from core.tenant_features import FEATURE_SETTINGS_KEY, merged_features
+
+    store = get_ds(_user)
+    raw = store.setting_holen(FEATURE_SETTINGS_KEY, {})
+    return ok(merged_features(raw))
+
+
+@_api_tenant.put("/features", summary="Feature-Flags mergen (Owner)")
+def tenant_features_put(body: Dict[str, Any], admin: dict = Depends(require_owner)):
+    from core.tenant_features import FEATURE_SETTINGS_KEY, merge_patch, merged_features
+
+    store = get_ds(admin)
+    current = store.setting_holen(FEATURE_SETTINGS_KEY, {})
+    merged = merge_patch(current if isinstance(current, dict) else {}, body or {})
+    if not store.setting_setzen(FEATURE_SETTINGS_KEY, merged):
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Speichern fehlgeschlagen")
+    return ok(merged_features(merged), "Feature-Flags gespeichert")
+
+
+app.include_router(_api_tenant)
 
 
 # ============================================================
@@ -3014,6 +5891,8 @@ def export_datev(
     _user: dict = Depends(get_current_user),
 ):
     """DATEV EXTF v700 Buchungsstapel — direkt in DATEV importierbar."""
+    if not bool(global_setting_holen("datev_export_aktiv")):
+        raise HTTPException(503, "DATEV Export ist deaktiviert")
     from fastapi.responses import StreamingResponse
     from core.export_service import export_datev_buchungsstapel
     import io
@@ -3038,6 +5917,8 @@ def export_datev(
 def export_datev_stammdaten_ep(berater_nr: str = Query("1234"),
     _user: dict = Depends(get_current_user)):
     """Alle Mandanten als DATEV-Debitorenstammdaten exportieren."""
+    if not bool(global_setting_holen("datev_export_aktiv")):
+        raise HTTPException(503, "DATEV Export ist deaktiviert")
 
     store = get_ds(_user)
     from fastapi.responses import StreamingResponse
@@ -3068,6 +5949,8 @@ def export_elster(
     _user: dict = Depends(get_current_user),
 ):
     """ELSTER ERiC Transfer-XML — für UStVA und Gewerbesteuer."""
+    if not bool(global_setting_holen("elster_aktiv")):
+        raise HTTPException(503, "ELSTER Export ist deaktiviert")
     from fastapi.responses import StreamingResponse
     from core.export_service import export_elster_xml
     import io
@@ -3090,6 +5973,7 @@ def export_elster(
          summary="Alle Mandanten als CSV")
 def export_csv_mandanten_ep(_user: dict = Depends(get_current_user)):
     """Alle Mandanten als UTF-8 CSV (Excel-kompatibel)."""
+    _require_tenant_feature(_user, "bulk_export")
     from fastapi.responses import StreamingResponse
     from core.export_service import export_csv_mandanten
     import io
@@ -3106,6 +5990,7 @@ def export_csv_mandanten_ep(_user: dict = Depends(get_current_user)):
          summary="Alle Aufgaben als CSV")
 def export_csv_aufgaben_ep(_user: dict = Depends(get_current_user)):
     """Alle Aufgaben als UTF-8 CSV."""
+    _require_tenant_feature(_user, "bulk_export")
     from fastapi.responses import StreamingResponse
     from core.export_service import export_csv_aufgaben
     import io
@@ -3126,6 +6011,7 @@ def export_komplett(name: str, _user: dict = Depends(get_current_user)):
     Excel-Report, Mandanten-CSV, Aufgaben-CSV + README.
     Ein Klick — alles für DATEV/Finanzamt.
     """
+    _require_tenant_feature(_user, "bulk_export")
     from fastapi.responses import StreamingResponse
     from core.export_service import export_komplettpaket
     import io
@@ -3168,6 +6054,9 @@ def generiere_portal_token(
     Link ist 7 Tage gültig und kann per Email an den Mandanten gesendet werden.
     """
     import os, secrets as sc
+    from modules.settings_manager import setting_holen
+    if not bool(setting_holen("portal_aktiv")):
+        raise HTTPException(503, "Mandantenportal ist deaktiviert")
     expected = os.getenv("PORTAL_ADMIN_KEY", "kanzlei-admin-2024")
     if not sc.compare_digest(admin_key, expected):
         raise HTTPException(403, "Ungültiger Admin-Key")
@@ -3178,7 +6067,7 @@ def generiere_portal_token(
         sys.path.insert(0, ".")
         from portal_api import erstelle_token
         token    = erstelle_token(mandant)
-        port     = os.getenv("PORTAL_PORT", "8001")
+        port     = os.getenv("API_PUBLIC_PORT", os.getenv("PORTAL_PORT", "8000"))
         base_url = os.getenv("PORTAL_BASE_URL", f"http://localhost:{port}")
         link     = f"{base_url}/portal?token={token}"
         store.log_eintrag(f"PORTAL_TOKEN_ERSTELLT | {mandant}")
@@ -3233,8 +6122,8 @@ Analysiere das Dokument und antworte NUR mit JSON:
   "konfidenz": 0.85
 }"""
 
-@app.post("/dokumente/analysieren", tags=["Dokument-Scanner"],
-          summary="Dokument mit KI analysieren — Typ, Ordner, Metadaten")
+@app.post("/legacy/dokumente/analysieren-v1", tags=["Dokument-Scanner"],
+          summary="Legacy v1 Dokumentanalyse (deprecated)")
 async def dokument_analysieren(data: DokumentAnalyseRequest,
     _user: dict = Depends(get_current_user)):
     """
@@ -3246,14 +6135,17 @@ async def dokument_analysieren(data: DokumentAnalyseRequest,
     Alles editierbar bevor es gespeichert wird.
     """
 
+    _require_tenant_feature(_user, "ai_document_scan")
+    _require_tenant_feature(_user, "ai_document_scan")
     store = get_ds(_user)
-    import base64
-    import httpx
-
-    api_key = os.getenv("OPENAI_API_KEY", "")
-    if not api_key:
-        # Fallback ohne KI: intelligente Guess basierend auf Dateinamen
-        name_lower = data.dateiname.lower()
+    try:
+        result = await analyze_document(filename=data.dateiname, b64_content=data.inhalt_b64)
+        payload = result.model_dump()
+        store.log_eintrag(f"DOKUMENT_ANALYSIERT | {data.dateiname} | {payload.get('doktyp','?')}")
+        return payload
+    except Exception as e:
+        log.warning(f"Dokument-Analyse Fehler: {e}")
+        name_lower = (data.dateiname or "").lower()
         doktyp = "sonstiges"
         ordner = "Sonstiges"
         if any(x in name_lower for x in ["rechnung", "invoice", "re-"]):
@@ -3262,83 +6154,24 @@ async def dokument_analysieren(data: DokumentAnalyseRequest,
             doktyp, ordner = "kontoauszug", "Bank/Kontoauszüge"
         elif any(x in name_lower for x in ["bescheid", "finanzamt"]):
             doktyp, ordner = "steuerbescheid", "Steuerbescheide"
-        elif any(x in name_lower for x in ["vertrag", "contract"]):
-            doktyp, ordner = "vertrag", "Verträge"
-        elif any(x in name_lower for x in ["lohn", "gehalt", "payslip"]):
-            doktyp, ordner = "lohnabrechnung", "Lohnbuchhaltung"
-
         return {
-            "doktyp": doktyp, "ordner": ordner,
-            "datum": "", "absender": "", "empfaenger": "", "betrag": 0.0,
-            "mandant": "", "aufgabe": "", "frist": "",
-            "ki_zusammenfassung": f"KI nicht konfiguriert (OPENAI_API_KEY fehlt). Dateiname deutet auf '{doktyp}' hin. Bitte manuell prüfen.",
-            "konfidenz": 0.3,
-        }
-
-    try:
-        import base64 as b64lib
-        bild_bytes = b64lib.b64decode(data.inhalt_b64)
-        bild_b64   = b64lib.standard_b64encode(bild_bytes).decode()
-
-        # Mime-Type bestimmen
-        name_lower = data.dateiname.lower()
-        if name_lower.endswith(".pdf"):
-            media_type = "application/pdf"
-        elif name_lower.endswith(".png"):
-            media_type = "image/png"
-        else:
-            media_type = "image/jpeg"
-
-        payload = {
-            "model":      "gpt-4o",
-            "max_tokens": 800,
-            "messages": [
-            {"role": "system", "content": DOKUMENT_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": f"data:{{media_type}};base64,{{bild_b64}}", "detail": "high"}},
-                    {"type": "text", "text": f"Analysiere dieses Dokument: {data.dateiname}"},
-                ]
-            }]
-        }
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json=payload,
-            )
-
-        if response.status_code != 200:
-            raise RuntimeError(f"OpenAI Fehler {response.status_code}")
-
-        raw_text = response.json().get("content", [{}])[0].get("text", "{}").strip()
-
-        # JSON extrahieren
-        import re as _re
-        match = _re.search(r"\{.*\}", raw_text, _re.DOTALL)
-        if match:
-            raw_text = match.group(0)
-
-        import json as _json
-        result = _json.loads(raw_text)
-        store.log_eintrag(f"DOKUMENT_ANALYSIERT | {data.dateiname} | {result.get('doktyp','?')}")
-        return result
-
-    except Exception as e:
-        log.warning(f"Dokument-Analyse Fehler: {e}")
-        return {
-            "doktyp": "sonstiges", "ordner": "Sonstiges",
-            "datum": "", "absender": "", "empfaenger": "", "betrag": 0.0,
-            "mandant": "", "aufgabe": "", "frist": "",
+            "doktyp": doktyp,
+            "ordner": ordner,
+            "datum": "",
+            "absender": "",
+            "empfaenger": "",
+            "betrag": 0.0,
+            "mandant": "",
+            "aufgabe": "",
+            "frist": "",
             "ki_zusammenfassung": f"Automatische Analyse nicht möglich: {str(e)[:100]}. Bitte manuell zuordnen.",
-            "konfidenz": 0.0,
+            "konfidenz": 0.25,
+            "unsichere_felder": ["doktyp", "ordner", "datum", "betrag"],
         }
 
 
-@app.post("/dokumente/speichern", tags=["Dokument-Scanner"],
-          summary="Analysiertes Dokument in Ordner speichern")
+@app.post("/legacy/dokumente/speichern-v1", tags=["Dokument-Scanner"],
+          summary="Legacy v1 Dokumentspeicherung (deprecated)")
 def dokument_speichern_scanner(data: DokumentSpeichernRequest,
     _user: dict = Depends(get_current_user)):
     """
@@ -3460,25 +6293,29 @@ async def beleg_analysieren(data: BelegAnalyseRequest, _user: dict = Depends(get
     Erkennt automatisch: Betrag, Datum, Kategorie, SKR03-Konto, MwSt-Satz.
     Spart 3-5 Minuten pro Beleg — bei 50 Belegen/Tag = 4h täglich.
     """
-    import base64
-    from core.beleg_service import analysiere_beleg, beleg_speichern
+    _require_tenant_feature(_user, "ai_receipt_scan")
+    from core.beleg_service import beleg_speichern
     store = get_ds(_user)
 
-    api_key = os.getenv("OPENAI_API_KEY", "")
     try:
-        bild_bytes = base64.b64decode(data.inhalt_b64)
-    except Exception:
-        raise HTTPException(400, "Ungültiger Base64-Inhalt")
-
-    try:
-        beleg = await analysiere_beleg(bild_bytes, data.dateiname, data.mandant, api_key)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    except RuntimeError as e:
+        parsed = await analyze_receipt(
+            filename=data.dateiname,
+            b64_content=data.inhalt_b64,
+            mandant=data.mandant or "",
+        )
+        beleg = parsed.model_dump()
+        beleg["beleg_id"] = str(uuid.uuid4())
+        beleg["dateiname"] = data.dateiname
+        beleg["mandant"] = data.mandant or ""
+        beleg["analysiert_am"] = datetime.now().isoformat()
+        beleg["status"] = "vorschlag"
+    except Exception as e:
         # Fallback: Manuelles Template
         log.warning(f"KI-Analyse fehlgeschlagen, Fallback: {e}")
         from core.beleg_service import beleg_ohne_ki_parsen
         beleg = beleg_ohne_ki_parsen(data.dateiname, {"mandant": data.mandant})
+        beleg["notiz"] = f"{beleg.get('notiz','')} KI-Fallback aktiv.".strip()
+        beleg["unsichere_felder"] = ["betrag_brutto", "datum", "kategorie"]
 
     beleg_id = beleg_speichern(store, beleg)
     store.log_eintrag(f"BELEG_ANALYSIERT | {data.mandant} | {data.dateiname}")
@@ -3521,6 +6358,8 @@ def beleg_ablehnen(beleg_id: str,
         return beleg_ablehnen_core(store, beleg_id)
     except ValueError as e:
         raise HTTPException(404, str(e))
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
 
 @app.get("/belege/statistiken", tags=["Belege"],
          summary="Beleg-Statistiken (Kategorien, Vorsteuer)")
@@ -3530,6 +6369,43 @@ def beleg_statistiken_ep(mandant: Optional[str] = Query(None),
     from core.beleg_service import belege_statistiken
     store = get_ds(_user)
     return belege_statistiken(store, mandant)
+
+
+@app.post("/belege/{beleg_id}/wiederherstellen", tags=["Belege"],
+          summary="Abgelehnten Beleg wieder aktivieren")
+def beleg_wiederherstellen_ep(beleg_id: str, _user: dict = Depends(get_current_user)):
+    from core.beleg_service import beleg_wiederherstellen as beleg_wiederherstellen_core
+    store = get_ds(_user)
+    try:
+        return beleg_wiederherstellen_core(store, beleg_id)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
+
+
+@app.delete("/belege/{beleg_id}", tags=["Belege"],
+            summary="Archiv-Beleg endgültig löschen")
+def beleg_delete_ep(beleg_id: str, _user: dict = Depends(get_current_user)):
+    from core.beleg_service import beleg_endgueltig_loeschen
+    store = get_ds(_user)
+    try:
+        return beleg_endgueltig_loeschen(store, beleg_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
+
+
+@app.post("/belege/archiv/leeren", tags=["Belege"],
+          summary="Gesamtes Beleg-Archiv leeren")
+def beleg_archiv_leeren_ep(mandant: Optional[str] = Query(None),
+    _user: dict = Depends(get_current_user)):
+    from core.beleg_service import belege_archiv_alle_loeschen
+    store = get_ds(_user)
+    m = (mandant or "").strip()
+    payload = belege_archiv_alle_loeschen(store, m or None)
+    return ok_compat(payload)
 
 
 # ============================================================
@@ -3789,16 +6665,12 @@ async def ki_chat(data: KIChatRequest, _user: dict = Depends(get_current_user)):
     CORS-Problem gelöst: Browser → Backend → OpenAI (nicht direkt)
     Mandanten-Kontext wird automatisch angereichert.
     """
-    import httpx
-
+    _require_tenant_feature(_user, "ai_assistant")
     api_key = os.getenv("OPENAI_API_KEY", "")
     if not api_key:
-        raise HTTPException(500,
-            "OPENAI_API_KEY fehlt in .env — "
-            "Key unter platform.openai.com/api-keys erstellen und in .env eintragen")
+        raise HTTPException(500, "OPENAI_API_KEY fehlt in .env")
 
-    # System-Prompt aufbauen
-    system_text = data.system or ""
+    system_text = guard_input_text(data.system or "")
 
     # Mandanten-Kontext anreichern
     store = get_ds(_user)
@@ -3823,63 +6695,40 @@ async def ki_chat(data: KIChatRequest, _user: dict = Depends(get_current_user)):
         except Exception:
             pass
 
-    # OpenAI Format: system als erstes Element in messages
-    openai_messages = []
-    if system_text:
-        openai_messages.append({"role": "system", "content": system_text})
-    openai_messages.extend(data.messages)
-
-    payload = {
-        "model":      "gpt-4o-mini",
-        "max_tokens": data.max_tokens,
-        "messages":   openai_messages,
-        "temperature": 0.3,   # Niedrig = präzise, sachlich (ideal für Steuerberatung)
-    }
-
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type":  "application/json",
-                },
-                json=payload,
-            )
-
-        if response.status_code != 200:
-            err = response.json() if "application/json" in response.headers.get("content-type","") else {}
-            raise HTTPException(
-                response.status_code,
-                err.get("error", {}).get("message", f"OpenAI Fehler {response.status_code}")
-            )
-
-        result  = response.json()
-        text    = result["choices"][0]["message"]["content"]
-        tokens  = result.get("usage", {}).get("completion_tokens", 0)
-        modell  = result.get("model", "gpt-4o-mini")
-
+        result = await assistant_chat(
+            history=data.messages[-20:],
+            system_text=system_text,
+            max_tokens=data.max_tokens,
+            mandant=data.mandant,
+        )
         return {
-            "content":     text,
-            "tokens_used": tokens,
-            "modell":      modell,
+            "content": result.content,
+            "tokens_used": result.tokens_used,
+            "modell": result.modell,
+            "trace_id": result.trace_id,
         }
-
-    except httpx.TimeoutException:
-        raise HTTPException(504, "OpenAI Timeout — bitte nochmal versuchen")
-    except httpx.ConnectError:
-        raise HTTPException(503, "OpenAI nicht erreichbar — Internetverbindung prüfen")
+    except Exception as e:
+        msg = str(e).lower()
+        if "timeout" in msg:
+            raise HTTPException(504, "OpenAI Timeout — bitte nochmal versuchen")
+        if "not reachable" in msg or "network" in msg:
+            raise HTTPException(503, "OpenAI nicht erreichbar — Internetverbindung prüfen")
+        if "api key" in msg:
+            raise HTTPException(500, "OPENAI_API_KEY fehlt in .env")
+        raise HTTPException(502, f"KI-Fehler: {str(e)[:200]}")
 
 
 @app.get("/ki/status", tags=["KI-Assistent"], summary="KI-Verfügbarkeit prüfen")
-def ki_status():
-    """Prüft ob OpenAI API-Key konfiguriert ist."""
+def ki_status(_user: dict = Depends(get_current_user)):
+    """Prüft ob OpenAI API-Key konfiguriert ist (nur für angemeldete Nutzer)."""
     key = os.getenv("OPENAI_API_KEY", "")
     return {
         "verfuegbar":  bool(key),
         "key_gesetzt": bool(key),
-        "modell":      "gpt-4o-mini",
+        "modell":      os.getenv("OPENAI_MODEL_DEFAULT", "gpt-4o-mini"),
         "anbieter":    "OpenAI",
+        "policy":      "balanced",
         "hinweis":     "" if key else "OPENAI_API_KEY in .env setzen (platform.openai.com/api-keys)",
     }
 
@@ -4106,9 +6955,9 @@ async def dokument_scannen(data: DokumentScanRequest,
     return metadaten
 
 
-@app.post("/dokumente/speichern", tags=["Dokumente"],
-          summary="Gescanntes Dokument mit Metadaten speichern")
-def dokument_speichern(metadaten: dict = Body(...),
+@app.post("/legacy/dokumente/speichern-v2", tags=["Dokumente"],
+          summary="Legacy v2 Dokumentspeicherung (deprecated)")
+def dokument_speichern_legacy_v2(metadaten: dict = Body(...),
     _user: dict = Depends(get_current_user)):
     """
     Speichert ein Dokument mit den vom Steuerberater bestätigten Metadaten.
@@ -4233,62 +7082,23 @@ async def dokument_analysieren(data: DokumentAnalyseRequest,
     """
 
     store = get_ds(_user)
-    import httpx, base64 as b64lib, re as relib
-
-    api_key = os.getenv("OPENAI_API_KEY", "")
-    if not api_key:
-        raise HTTPException(500, "OPENAI_API_KEY fehlt in .env")
-
     try:
-        bild_bytes = b64lib.b64decode(data.inhalt_b64)
-    except Exception:
-        raise HTTPException(400, "Ungültiger Base64-Inhalt")
-
-    # Mime-Type
-    name_lower = data.dateiname.lower()
-    if name_lower.endswith(".pdf"):
-        media_type = "application/pdf"
-    elif name_lower.endswith(".png"):
-        media_type = "image/png"
-    else:
-        media_type = "image/jpeg"
-
-    bild_b64 = b64lib.standard_b64encode(bild_bytes).decode("utf-8")
-
-    user_text = f"Analysiere dieses Dokument: '{data.dateiname}'"
-    if data.mandant:
-        user_text += f" (Mandant: {data.mandant})"
-
-    payload = {
-        "model": "gpt-4o",
-        "max_tokens": 1024,
-        "messages": [
-            {"role": "system", "content": DOKUMENT_SYSTEM_PROMPT},
-            {"role":"user","content":[
-            {"type":"image","source":{"type":"base64","media_type":media_type,"data":bild_b64}},
-            {"type":"text","text":user_text},
-        ]}]
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json=payload,
-            )
-        if response.status_code != 200:
-            raise RuntimeError(f"OpenAI Fehler {response.status_code}")
-
-        raw = response.json()["content"][0]["text"].strip()
-        if "```" in raw:
-            match = __import__("re").search(r"\{.*\}", raw, __import__("re").DOTALL)
-            raw = match.group(0) if match else "{}"
-
-        analyse = json.loads(raw)
+        parsed = await analyze_document(filename=data.dateiname, b64_content=data.inhalt_b64)
+        analyse = {
+            "dokumenttyp": parsed.doktyp,
+            "mandant_hinweis": parsed.mandant or data.mandant or "",
+            "datum": parsed.datum,
+            "frist": parsed.frist,
+            "lieferant": parsed.absender,
+            "ordner_kategorie": parsed.ordner or "Sonstiges",
+            "zusammenfassung": parsed.ki_zusammenfassung,
+            "naechste_schritte": [parsed.aufgabe] if parsed.aufgabe else [],
+            "betrag": parsed.betrag,
+            "vertrauens_score": parsed.konfidenz,
+            "unsichere_felder": parsed.unsichere_felder,
+        }
     except Exception as e:
         log.warning(f"Dokument-KI-Analyse fehlgeschlagen: {e}")
-        # Fallback
         analyse = {
             "dokumenttyp": "sonstiges",
             "mandant_hinweis": data.mandant or "",
@@ -4296,6 +7106,7 @@ async def dokument_analysieren(data: DokumentAnalyseRequest,
             "zusammenfassung": "Automatische Analyse nicht verfügbar",
             "naechste_schritte": ["Bitte manuell prüfen und kategorisieren"],
             "vertrauens_score": 0.3,
+            "unsichere_felder": ["dokumenttyp", "datum", "betrag"],
         }
 
     # Ordner-Pfad vorschlagen
@@ -4448,8 +7259,10 @@ def dokument_loeschen(dok_id: str,
     import os as _os
     datei_pfad = _os.path.join("data","dokumente",dok.get("ordner_pfad",""),dok.get("dateiname",""))
     if _os.path.exists(datei_pfad):
-        try: _os.remove(datei_pfad)
-        except Exception: pass
+        try:
+            _os.remove(datei_pfad)
+        except OSError as exc:
+            log.warning("Dokument Datei konnte nicht geloescht werden: %s (%s)", datei_pfad, exc)
 
     del archiv[dok_id]
     _kv_set(store, "__dokument_archiv_v1", archiv)
@@ -4470,6 +7283,9 @@ def portal_unterschriften_alle(
 ):
     """Kanzlei sieht Status aller Unterschriften direkt im Haupt-System."""
     import secrets as _s
+    from modules.settings_manager import setting_holen
+    if not bool(setting_holen("portal_unterschrift_aktiv")):
+        raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
     expected = os.getenv("PORTAL_ADMIN_KEY", "kanzlei-admin-2024")
     if not _s.compare_digest(admin_key, expected):
         raise HTTPException(403, "Ungültiger Admin-Key")
@@ -4499,6 +7315,7 @@ def portal_unterschriften_alle(
          summary="Portal-Status eines Mandanten (Uploads, Fragen, Unterschriften)")
 def portal_mandant_status(name: str, _user: dict = Depends(get_current_user)):
     """Zeigt im Mandant-Detail: was hat der Mandant im Portal getan?"""
+    from modules.settings_manager import setting_holen
     store = get_ds(_user)
     get_mandant_or_404(name, store)
     uploads = [u for u in store.portal_liste("upload") if u.get("mandant") == name]
@@ -4518,6 +7335,10 @@ def portal_mandant_status(name: str, _user: dict = Depends(get_current_user)):
         "bot_fragen_offen":          sum(1 for f in fragen if f["status"]=="offen"),
         "bot_fragen_beantwortet":    sum(1 for f in fragen if f["status"]=="beantwortet"),
         "portal_link_generieren":    f"/portal/admin/token/{name}?admin_key=...",
+        "portal_aktiv": bool(setting_holen("portal_aktiv")),
+        "portal_unterschrift_aktiv": bool(setting_holen("portal_unterschrift_aktiv")),
+        "portal_upload_max_mb": int(setting_holen("portal_upload_max_mb") or 20),
+        "portal_projektnummer_pflicht": bool(setting_holen("portal_projektnummer_pflicht")),
     }
 
 
@@ -4849,11 +7670,59 @@ def steuer_freigeben(fall_id: str, freigegeben_von: str = Query("Steuerberater")
         raise HTTPException(404, str(e))
 
 @app.get("/steuer/faelle", tags=["Steuer-Autopilot"],
-         summary="Alle Steuerfälle")
-def steuer_faelle_liste(mandant: Optional[str] = Query(None), status: Optional[str] = Query(None),
-    _user: dict = Depends(get_current_user)):
+         summary="Steuerfälle (pool=aktiv|historie|alle)")
+def steuer_faelle_liste(
+    mandant: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    pool: Optional[str] = Query(
+        None,
+        description="aktiv = nicht in Historie; historie = archiviert/freigegeben mit TTL; alle = komplett",
+    ),
+    _user: dict = Depends(get_current_user),
+):
     from core.autonomer_steuerfall import AutononerSteuerfall
-    return {"faelle": AutononerSteuerfall(get_ds(_user)).faelle_laden(mandant, status)}
+    ds = get_ds(_user)
+    p = (pool or "").strip().lower() or None
+    if p and p not in ("aktiv", "historie", "alle"):
+        p = None
+    ap = AutononerSteuerfall(ds)
+    faelle = ap.faelle_laden(mandant, status, p)
+    if p == "historie":
+        from core.kanzlei_historie import historie_steuerfaelle_tage
+        return {"faelle": faelle, "historie_ttl_tage": historie_steuerfaelle_tage(ds)}
+    return {"faelle": faelle}
+
+
+@app.post("/steuer/{fall_id}/historie", tags=["Steuer-Autopilot"],
+          summary="Steuerfall manuell in die Historie legen")
+def steuer_fall_historie(fall_id: str, _user: dict = Depends(get_current_user)):
+    from core.autonomer_steuerfall import AutononerSteuerfall
+    try:
+        return AutononerSteuerfall(get_ds(_user)).fall_nach_historie(fall_id)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/steuer/{fall_id}/wiederherstellen", tags=["Steuer-Autopilot"],
+          summary="Steuerfall aus der Historie zurück in die Bearbeitung")
+def steuer_fall_wiederherstellen(fall_id: str, _user: dict = Depends(get_current_user)):
+    from core.autonomer_steuerfall import AutononerSteuerfall
+    try:
+        return AutononerSteuerfall(get_ds(_user)).fall_aus_historie(fall_id)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.delete("/steuer/{fall_id}", tags=["Steuer-Autopilot"],
+            summary="Steuerfall endgültig löschen")
+def steuer_fall_loeschen(fall_id: str, _user: dict = Depends(get_current_user)):
+    from core.autonomer_steuerfall import AutononerSteuerfall
+    try:
+        return AutononerSteuerfall(get_ds(_user)).fall_loeschen(fall_id)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
 
 @app.get("/steuer/statistiken", tags=["Steuer-Autopilot"],
          summary="Autopilot-Statistiken (gesparte Stunden)")
@@ -5059,6 +7928,125 @@ def saas_plaene(_m: bool = Depends(require_saas_master)):
     return {"plaene": PLAENE}
 
 
+# ── Strukturierte Admin-Pfade: /api/admin/* (Aliase zu /saas/*) ─
+from fastapi import APIRouter as _APIRouterAdminAlias
+
+_api_admin_alias = _APIRouterAdminAlias(prefix="/api/admin", tags=["Admin"])
+
+
+@_api_admin_alias.post("/apikeys")
+def api_admin_apikeys_create(
+    data: ApiKeyCreateRequest,
+    _user: dict = Depends(require_permission("settings:write")),
+):
+    return saas_api_key_create(data, _user)
+
+
+@_api_admin_alias.get("/apikeys")
+def api_admin_apikeys_list(_user: dict = Depends(require_permission("settings:read"))):
+    return saas_api_keys(_user)
+
+
+@_api_admin_alias.delete("/apikeys/{key_id}")
+def api_admin_apikeys_delete(
+    key_id: str,
+    _user: dict = Depends(require_permission("settings:write")),
+):
+    return saas_api_key_delete(key_id, _user)
+
+
+@_api_admin_alias.post("/apikeys/{key_id}/rotate")
+def api_admin_apikeys_rotate(
+    key_id: str,
+    data: ApiKeyRotateRequest = Body(default=ApiKeyRotateRequest()),
+    _user: dict = Depends(require_permission("settings:write")),
+):
+    return saas_api_key_rotate(key_id, data, _user)
+
+
+@_api_admin_alias.post("/webhooks")
+def api_admin_webhooks_create(
+    data: WebhookCreateRequest,
+    _user: dict = Depends(require_permission("settings:write")),
+):
+    return saas_webhook_create(data, _user)
+
+
+@_api_admin_alias.get("/webhooks")
+def api_admin_webhooks_list(_user: dict = Depends(require_permission("settings:read"))):
+    return saas_webhook_list(_user)
+
+
+@_api_admin_alias.delete("/webhooks/{webhook_id}")
+def api_admin_webhooks_delete(
+    webhook_id: str,
+    _user: dict = Depends(require_permission("settings:write")),
+):
+    return saas_webhook_delete(webhook_id, _user)
+
+
+@_api_admin_alias.post("/webhooks/{webhook_id}/test")
+def api_admin_webhooks_test(
+    webhook_id: str,
+    _user: dict = Depends(require_permission("settings:write")),
+):
+    return saas_webhook_test(webhook_id, _user)
+
+
+@_api_admin_alias.get("/readiness")
+def api_admin_readiness(_user: dict = Depends(require_permission("reports:read"))):
+    return saas_readiness(_user)
+
+
+@_api_admin_alias.post("/tenant", status_code=201)
+def api_admin_tenant_create(data: TenantCreate, _m: bool = Depends(require_saas_master)):
+    return tenant_erstellen(data, _m)
+
+
+@_api_admin_alias.get("/tenants")
+def api_admin_tenants_list(_m: bool = Depends(require_saas_master)):
+    return tenants_liste(_m)
+
+
+@_api_admin_alias.get("/statistiken")
+def api_admin_statistiken(_m: bool = Depends(require_saas_master)):
+    return saas_statistiken(_m)
+
+
+@_api_admin_alias.put("/tenant/{tenant_id}")
+def api_admin_tenant_put(
+    tenant_id: str,
+    updates: Dict = Body(...),
+    _m: bool = Depends(require_saas_master),
+):
+    return tenant_update(tenant_id, updates, _m)
+
+
+@_api_admin_alias.post("/tenant/{tenant_id}/sperren")
+def api_admin_tenant_sperren(
+    tenant_id: str,
+    grund: str = Query(""),
+    _m: bool = Depends(require_saas_master),
+):
+    return tenant_sperren(tenant_id, grund, _m)
+
+
+@_api_admin_alias.post("/tenant/{tenant_id}/api-key-erneuern")
+def api_admin_tenant_api_key_erneuern(
+    tenant_id: str,
+    _m: bool = Depends(require_saas_master),
+):
+    return api_key_erneuern(tenant_id, _m)
+
+
+@_api_admin_alias.get("/plaene")
+def api_admin_plaene(_m: bool = Depends(require_saas_master)):
+    return saas_plaene(_m)
+
+
+app.include_router(_api_admin_alias)
+
+
 # ============================================================
 # ONBOARDING
 # ============================================================
@@ -5140,7 +8128,7 @@ async def websocket_live(ws: WebSocket, token: Optional[str] = Query(None)):
     WebSocket für Live-Dashboard-Updates (nur mit gültigem Session-Token).
     Verbindung: ws://localhost:8000/ws/live?token=SESSION_TOKEN
     """
-    from core.auth import verifiziere_session, hat_irgendein_benutzer
+    from backend.auth import verifiziere_session, hat_irgendein_benutzer
     if hat_irgendein_benutzer():
         if not token:
             await ws.close(code=4401)
@@ -5211,23 +8199,19 @@ async def live_update_senden(typ: str, data: dict):
         pass
 
 
-# --- runtime health aliases (server hotfix) ---
-@app.get("/health")
-@app.get("/api/health")
-def health():
-    return {"ok": True, "service": "api"}
-@app.get("/ready")
-@app.get("/api/ready")
-def ready():
-    return {"ok": True, "service": "api", "ready": True}
+# ── Ein Prozess: Mandantenportal-Routen auf dieselbe App ─────
+try:
+    from portal_api import register_portal_with_app
 
-# --- runtime health aliases (server hotfix) ---
-@app.get("/health")
-@app.get("/api/health")
-def health():
-    return {"ok": True, "service": "api"}
+    register_portal_with_app(app)
+except Exception as _portal_err:
+    log.warning("Portal-Router konnte nicht registriert werden: %s", _portal_err)
 
-@app.get("/ready")
-@app.get("/api/ready")
-def ready():
-    return {"ok": True, "service": "api", "ready": True}
+# ── Optional: schrittweise Split-Router aktivieren (opt-in per ENV) ──
+try:
+    from backend.routes import mount_split_routers
+
+    mount_split_routers(app)
+except Exception as _split_err:
+    log.warning("Split-Router konnten nicht registriert werden: %s", _split_err)
+

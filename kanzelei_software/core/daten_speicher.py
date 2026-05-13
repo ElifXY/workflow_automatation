@@ -1,38 +1,325 @@
 # ============================================================
 # KANZLEI AI — DATENSPEICHER v4.0
-# SQLite, Multi-Kanzlei-fähig, Thread-safe
+# SQLite (Dev) — Multi-Kanzlei, Thread-safe
 #
-# ARCHITEKTUR-ENTSCHEIDUNG:
-#   Nicht: 1 DB pro User (unnötig komplex)
-#   Sondern: 1 DB + kanzlei_id in jeder Tabelle
-#   → Kanzlei A sieht niemals Daten von Kanzlei B
-#   → Skaliert bis 10.000 Kanzleien auf einem Server
-#   → Standard für alle SaaS-Produkte (Stripe, Slack, etc.)
+# Bei DATABASE_URL=postgresql://… (pg_primary_db):
+#   API-Keys, Webhooks, Webhook-Queue, Usage-Metriken, Email-Outbox, agent_actions
+#   werden auf PostgreSQL geführt (scripts/postgres_bootstrap.sql + init_pg).
 #
-# Migration:
-#   Bestehende Daten bekommen kanzlei_id = 'default'
-#   Neue Kanzleien bekommen eigene UUID
+# PRODUCTION (ENVIRONMENT=production):
+#   SQLite nur noch mit explizitem Übergang (ALLOW_SQLITE_FALLBACK) für nicht migrierte
+#   Domänen; Mandanten auf PG mit USE_POSTGRES_DATA=1 + DATABASE_URL.
+#
+# ARCHITEKTUR:
+#   1 DB + kanzlei_id in Tabellen — Kanzlei A sieht keine Daten von Kanzlei B.
 # ============================================================
 
 import os
+from pathlib import Path
 import sqlite3
 import json
 import logging
 import threading
+import time
 import uuid
 import hashlib
 import secrets
 from copy import deepcopy
 from contextlib import contextmanager
-from datetime import datetime
-from typing import Dict, List, Optional, Any
+from datetime import date, datetime
+from typing import Dict, List, Optional, Any, Tuple
+
+from core.pg_runtime import pg_primary_db
 
 log = logging.getLogger("kanzlei_db")
 
-DB_PFAD     = os.path.join("data", "kanzlei.db")
+_BASE_DIR = Path(__file__).resolve().parents[1]
+_raw_data_dir = (os.getenv("DATA_DIR") or "").strip()
+if _raw_data_dir:
+    _data_dir_candidate = Path(_raw_data_dir)
+    if not _data_dir_candidate.is_absolute():
+        _data_dir_candidate = (_BASE_DIR / _data_dir_candidate).resolve()
+    _DATA_DIR = _data_dir_candidate
+else:
+    _DATA_DIR = (_BASE_DIR / "data").resolve()
+DB_PFAD = str((_DATA_DIR / "kanzlei.db").resolve())
 DEFAULT_KID = "default"   # Bestehende Daten
 
 _local = threading.local()
+_pg_sqlite_warned = False
+_pg_hybrid_logged = False
+_pg_dokumente_table_known: Optional[bool] = None
+
+
+def _postgres_data_flag_on() -> bool:
+    return (os.getenv("USE_POSTGRES_DATA") or "").strip().lower() in ("1", "true", "yes")
+
+
+def _allow_sqlite_fallback() -> bool:
+    """Nur für Übergang: Production + PostgreSQL-DSN erlaubt sonst kein SQLite in get_connection."""
+    return (os.getenv("ALLOW_SQLITE_FALLBACK") or "").strip().lower() in ("1", "true", "yes")
+
+
+def _pg_mandanten_mode() -> bool:
+    """
+    True: Mandanten-CRUD läuft über PostgreSQL (USE_POSTGRES_DATA + DATABASE_URL).
+    Wirft, wenn Flag gesetzt ist, aber keine Postgres-DSN konfiguriert ist.
+    """
+    if not _postgres_data_flag_on():
+        return False
+    du = (os.getenv("DATABASE_URL") or "").strip().lower()
+    if not du.startswith("postgresql://"):
+        raise RuntimeError(
+            "USE_POSTGRES_DATA ist gesetzt: DATABASE_URL muss postgresql://… sein "
+            "(Schema scripts/postgres_bootstrap.sql, Daten scripts/migrate_sqlite_to_postgres.py)."
+        )
+    return True
+
+
+def _pg_conn():
+    """Gemeinsame Thread-lokale PG-Verbindung (core.pg_runtime)."""
+    from core.pg_runtime import get_pg_connection
+
+    return get_pg_connection()
+
+
+_pg_saas_schema_lock = threading.Lock()
+_pg_saas_schema_ready = False
+
+
+def _pg_saas_backend() -> bool:
+    """True: SaaS-/Metering-Tabellen liegen in PostgreSQL (dieselbe DATABASE_URL)."""
+    return pg_primary_db()
+
+
+def _pg_saas_ddl_statements() -> Tuple[str, ...]:
+    """Idempotente DDL für Hilfstabellen (Outbox + SaaS), falls noch nicht aus Bootstrap."""
+    return (
+        """
+        INSERT INTO kanzleien (id, name, email, plan, aktiv)
+        VALUES ('default', 'Standard-Kanzlei', '', 'starter', 1)
+        ON CONFLICT (id) DO NOTHING
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS email_outbox (
+            id BIGSERIAL PRIMARY KEY,
+            kanzlei_id TEXT NOT NULL REFERENCES kanzleien(id),
+            mandant TEXT NOT NULL,
+            to_email TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            body_text TEXT NOT NULL,
+            body_html TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            max_attempts INTEGER NOT NULL DEFAULT 5,
+            next_attempt_at TIMESTAMPTZ DEFAULT NOW(),
+            last_error TEXT DEFAULT '',
+            idempotency_key TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            sent_at TIMESTAMPTZ
+        )
+        """,
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_email_outbox_idem
+            ON email_outbox (kanzlei_id, idempotency_key)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_email_outbox_due
+            ON email_outbox (status, next_attempt_at, kanzlei_id)
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS tenant_invite_records (
+            id BIGSERIAL PRIMARY KEY,
+            kanzlei_id TEXT NOT NULL REFERENCES kanzleien(id),
+            jti TEXT NOT NULL UNIQUE,
+            role TEXT NOT NULL DEFAULT 'assistent',
+            email_lock TEXT,
+            target_email TEXT,
+            invited_by TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            expires_at BIGINT NOT NULL,
+            revoked_at TIMESTAMPTZ,
+            used_at TIMESTAMPTZ,
+            used_email TEXT,
+            email_outbox_id BIGINT,
+            email_queued_at TIMESTAMPTZ,
+            email_sent_at TIMESTAMPTZ
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_tenant_invite_records_kid ON tenant_invite_records (kanzlei_id, id DESC)",
+        "ALTER TABLE tenant_invite_records ADD COLUMN IF NOT EXISTS email_queued_at TIMESTAMPTZ",
+        """
+        CREATE TABLE IF NOT EXISTS api_keys (
+            id TEXT PRIMARY KEY,
+            kanzlei_id TEXT NOT NULL REFERENCES kanzleien(id),
+            name TEXT NOT NULL,
+            key_hash TEXT NOT NULL,
+            permissions_json TEXT NOT NULL DEFAULT '[]',
+            aktiv INTEGER NOT NULL DEFAULT 1,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            last_used_at TIMESTAMPTZ
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_api_keys_kid ON api_keys (kanzlei_id, aktiv)",
+        """
+        CREATE TABLE IF NOT EXISTS webhook_endpoints (
+            id TEXT PRIMARY KEY,
+            kanzlei_id TEXT NOT NULL REFERENCES kanzleien(id),
+            url TEXT NOT NULL,
+            secret TEXT NOT NULL,
+            events_json TEXT NOT NULL DEFAULT '[]',
+            aktiv INTEGER NOT NULL DEFAULT 1,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            last_status TEXT DEFAULT '',
+            last_error TEXT DEFAULT '',
+            last_sent_at TIMESTAMPTZ
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_webhook_endpoints_kid ON webhook_endpoints (kanzlei_id, aktiv)",
+        """
+        CREATE TABLE IF NOT EXISTS webhook_queue (
+            id BIGSERIAL PRIMARY KEY,
+            kanzlei_id TEXT NOT NULL REFERENCES kanzleien(id),
+            event_type TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at TIMESTAMPTZ DEFAULT NOW(),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            last_error TEXT DEFAULT ''
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_webhook_queue_due ON webhook_queue (status, next_attempt_at, kanzlei_id)",
+        """
+        CREATE TABLE IF NOT EXISTS usage_metrics (
+            kanzlei_id TEXT NOT NULL REFERENCES kanzleien(id),
+            metric TEXT NOT NULL,
+            day TEXT NOT NULL,
+            value INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (kanzlei_id, metric, day)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_usage_metric_day ON usage_metrics (metric, day)",
+        """
+        CREATE TABLE IF NOT EXISTS agent_actions (
+            id BIGSERIAL PRIMARY KEY,
+            kanzlei_id TEXT NOT NULL REFERENCES kanzleien(id),
+            action_key TEXT NOT NULL,
+            mandant TEXT NOT NULL,
+            aktion TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'planned',
+            details TEXT DEFAULT '',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE (kanzlei_id, action_key)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_agent_actions_time ON agent_actions (kanzlei_id, created_at)",
+        """
+        CREATE TABLE IF NOT EXISTS agent_locks (
+            name        TEXT PRIMARY KEY,
+            owner       TEXT NOT NULL,
+            expires_at  BIGINT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS einstellungen (
+            kanzlei_id TEXT NOT NULL REFERENCES kanzleien(id),
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            geaendert_am TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (kanzlei_id, key)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS portal_records (
+            id TEXT PRIMARY KEY,
+            kanzlei_id TEXT NOT NULL REFERENCES kanzleien(id),
+            typ TEXT NOT NULL,
+            mandant TEXT NOT NULL,
+            status TEXT DEFAULT '',
+            data_json TEXT NOT NULL,
+            erstellt_am TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            geaendert_am TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_portal_kid_typ
+            ON portal_records (kanzlei_id, typ, mandant)
+        """,
+    )
+
+
+def _init_db_postgresql() -> None:
+    """Legt Hilfs-/SaaS-Tabellen in PostgreSQL an (ohne SQLite)."""
+    global _pg_saas_schema_ready
+    if not pg_primary_db():
+        return
+    with _pg_saas_schema_lock:
+        if _pg_saas_schema_ready:
+            return
+        conn = _pg_conn()
+        try:
+            with conn.cursor() as cur:
+                for stmt in _pg_saas_ddl_statements():
+                    cur.execute(stmt)
+            conn.commit()
+            _pg_saas_schema_ready = True
+            log.info("PostgreSQL SaaS-/Outbox-Tabellen geprüft bzw. angelegt.")
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def _pg_normalize_row_dict(row: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(row)
+    for k, v in list(out.items()):
+        if isinstance(v, (datetime, date)):
+            out[k] = v.isoformat()
+    return out
+
+
+def _pg_ts_to_naive_datetime(val: Any) -> Optional[datetime]:
+    """Für Tage-Berechnung: Postgres-Timestamp/date oder ISO-String → naive datetime."""
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        t = val
+    elif isinstance(val, date):
+        t = datetime.combine(val, datetime.min.time())
+    else:
+        s = str(val).replace("Z", "+00:00")
+        t = datetime.fromisoformat(s)
+    if t.tzinfo is not None:
+        t = t.replace(tzinfo=None)
+    return t
+
+
+def _fehlende_dokumente_pg(kanzlei_id: str, mandant: str) -> List[str]:
+    """Offene Dokumente aus PostgreSQL, falls Tabelle `dokumente` existiert; sonst []."""
+    global _pg_dokumente_table_known
+    conn = _pg_conn()
+    with conn.cursor() as cur:
+        if _pg_dokumente_table_known is None:
+            cur.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_schema = 'public' AND table_name = 'dokumente'
+                ) AS e
+                """
+            )
+            _pg_dokumente_table_known = bool(cur.fetchone()["e"])
+        if not _pg_dokumente_table_known:
+            return []
+        cur.execute(
+            """
+            SELECT name FROM dokumente
+            WHERE kanzlei_id = %s AND mandant = %s AND status = 'ausstehend'
+            """,
+            (kanzlei_id, mandant),
+        )
+        return [r["name"] for r in cur.fetchall()]
 
 _COMPAT_SECTION_DEFAULTS: Dict[str, Any] = {
     "belege": {},
@@ -50,16 +337,59 @@ _COMPAT_SECTION_DEFAULTS: Dict[str, Any] = {
 
 def get_connection(kanzlei_id: str = DEFAULT_KID) -> sqlite3.Connection:
     """Thread-lokale Connection. Jeder Thread hat seine eigene."""
-    environment = (os.getenv("ENVIRONMENT") or os.getenv("APP_ENV") or "development").lower()
-    if environment == "production":
+    global _pg_sqlite_warned, _pg_hybrid_logged
+    if (os.getenv("POSTGRES_ONLY_DATA") or "").strip().lower() in ("1", "true", "yes"):
         raise RuntimeError(
-            "SQLite ist in Production deaktiviert. Nutze PostgreSQL Runtime-Backend."
+            "POSTGRES_ONLY_DATA=1: SQLite get_connection ist deaktiviert. "
+            "Vollständige PostgreSQL-Migration für alle Domänen erforderlich (oder Flag entfernen)."
         )
+    environment = (os.getenv("ENVIRONMENT") or os.getenv("APP_ENV") or "development").lower()
+    du = (os.getenv("DATABASE_URL") or "").strip().lower()
+    if (
+        environment == "production"
+        and du.startswith("postgresql://")
+        and not _allow_sqlite_fallback()
+    ):
+        raise RuntimeError(
+            "Production mit DATABASE_URL=postgresql://…: SQLite get_connection ist deaktiviert. "
+            "Nur PostgreSQL-Datenpfad nutzen oder temporär ALLOW_SQLITE_FALLBACK=1 setzen."
+        )
+    if environment == "production" and not _pg_mandanten_mode():
+        raise RuntimeError(
+            "SQLite ist in Production deaktiviert. Setze USE_POSTGRES_DATA=1 und "
+            "DATABASE_URL=postgresql://… (siehe docker-compose.yml beim Service api), oder "
+            "für reine Test-Umgebungen ENVIRONMENT=development. "
+            f"Aktuell: USE_POSTGRES_DATA={os.getenv('USE_POSTGRES_DATA')!r}, "
+            f"DATABASE_URL ist Postgres-DSN: {(os.getenv('DATABASE_URL') or '').strip().lower().startswith('postgresql')!r}."
+        )
+    if _pg_mandanten_mode():
+        if not _pg_hybrid_logged:
+            log.warning(
+                "Hybrid-Datenhaltung: Mandanten auf PostgreSQL, übrige Domänen auf SQLite (%s).",
+                DB_PFAD,
+            )
+            _pg_hybrid_logged = True
+    elif du.startswith("postgresql://") and not _pg_sqlite_warned:
+        log.warning(
+            "DATABASE_URL ist PostgreSQL: API-Keys/Webhooks/Outbox/Usage liegen auf Postgres; "
+            "Mandanten/Belege ggf. weiter SQLite (%s) ohne vollständige Migration.",
+            DB_PFAD,
+        )
+        _pg_sqlite_warned = True
     if not hasattr(_local, "conn") or _local.conn is None:
         os.makedirs(os.path.dirname(DB_PFAD), exist_ok=True)
         conn = sqlite3.connect(DB_PFAD, check_same_thread=False)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.OperationalError:
+            # Einige Runtime-Umgebungen erlauben kein Journal-Mode-Umschalten
+            # (z. B. eingeschränkte Volume-Flags). In diesem Fall laufen wir
+            # mit dem SQLite-Default weiter statt die komplette API zu blockieren.
+            try:
+                conn.execute("PRAGMA journal_mode=DELETE")
+            except sqlite3.OperationalError:
+                log.warning("SQLite journal_mode konnte nicht gesetzt werden (%s). Nutze Default.", DB_PFAD)
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA busy_timeout=5000")
         _local.conn = conn
@@ -70,6 +400,12 @@ def get_connection(kanzlei_id: str = DEFAULT_KID) -> sqlite3.Connection:
 def db_transaction(kanzlei_id: str = DEFAULT_KID):
     conn = get_connection(kanzlei_id)
     try:
+        # In SQLite kann ein tenant-spezifischer Write an FK (kanzleien.id) scheitern,
+        # wenn die Kanzlei-Zeile noch nicht existiert. Daher pro Transaktion idempotent absichern.
+        conn.execute(
+            "INSERT OR IGNORE INTO kanzleien (id, name, email, plan, aktiv) VALUES (?, ?, '', 'starter', 1)",
+            (kanzlei_id, f"Kanzlei {kanzlei_id}"),
+        )
         yield conn
         conn.commit()
     except Exception as e:
@@ -80,6 +416,32 @@ def db_transaction(kanzlei_id: str = DEFAULT_KID):
 
 def init_db():
     """Schema initialisieren — kanzlei_id in allen Tabellen."""
+    if pg_primary_db():
+        try:
+            _init_db_postgresql()
+        except Exception as e:
+            # Bei mehreren Uvicorn-Workern kann PG-DDL beim parallelen Start kurz kollidieren.
+            # API darf daran nicht scheitern; SQLite-Schema bleibt für Kern-Domänen Pflicht.
+            log.warning("PG-Schema-Init übersprungen/fehlgeschlagen: %s", e)
+        if (os.getenv("POSTGRES_ONLY_DATA") or "").strip().lower() in ("1", "true", "yes"):
+            return
+
+    environment = (os.getenv("ENVIRONMENT") or os.getenv("APP_ENV") or "development").lower()
+    du = (os.getenv("DATABASE_URL") or "").strip().lower()
+    # Wie get_connection(): striktes Production + Postgres ohne ALLOW_SQLITE_FALLBACK → kein SQLite-DDL
+    if (
+        environment == "production"
+        and du.startswith("postgresql://")
+        and not _allow_sqlite_fallback()
+    ):
+        return
+    if environment == "production" and not _postgres_data_flag_on():
+        raise RuntimeError(
+            "ENVIRONMENT=production: USE_POSTGRES_DATA muss 1/true/yes sein (Docker: "
+            "docker-compose.yml setzt das beim api-Service). Prüfe eine veraltete compose-Datei "
+            "oder entferne USE_POSTGRES_DATA=0 aus der Server-.env."
+        )
+
     conn = get_connection()
     conn.executescript("""
         -- ── Kanzleien (Master-Tabelle) ──────────────────────
@@ -135,6 +497,7 @@ def init_db():
             mandant         TEXT NOT NULL,
             beschreibung    TEXT NOT NULL,
             frist           TEXT NOT NULL,
+            frist_uhrzeit   TEXT DEFAULT '',
             prioritaet      TEXT DEFAULT 'normal' CHECK(prioritaet IN ('niedrig','normal','hoch','kritisch')),
             kategorie       TEXT DEFAULT 'allgemein',
             erledigt        INTEGER DEFAULT 0,
@@ -265,6 +628,28 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_email_outbox_due
             ON email_outbox(status, next_attempt_at, kanzlei_id);
 
+        -- ── Mandanten-Einladungen (Audit / Revoke) ───────────
+        CREATE TABLE IF NOT EXISTS tenant_invite_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kanzlei_id TEXT NOT NULL DEFAULT 'default',
+            jti TEXT NOT NULL UNIQUE,
+            role TEXT NOT NULL DEFAULT 'assistent',
+            email_lock TEXT,
+            target_email TEXT,
+            invited_by TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            expires_at INTEGER NOT NULL,
+            revoked_at TEXT,
+            used_at TEXT,
+            used_email TEXT,
+            email_outbox_id INTEGER,
+            email_queued_at TEXT,
+            email_sent_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_tenant_invite_records_kid
+            ON tenant_invite_records(kanzlei_id, id DESC);
+
         -- ── Usage Metering (Quotas pro Tag) ─────────────────
         CREATE TABLE IF NOT EXISTS usage_metrics (
             kanzlei_id      TEXT NOT NULL,
@@ -324,6 +709,12 @@ def init_db():
         );
         CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_action_key
             ON agent_actions(kanzlei_id, action_key);
+
+        CREATE TABLE IF NOT EXISTS agent_locks (
+            name        TEXT PRIMARY KEY,
+            owner       TEXT NOT NULL,
+            expires_at  INTEGER NOT NULL
+        );
 
         -- ── Next Cut: Domain-Tabellen statt compat::* JSON ───
         CREATE TABLE IF NOT EXISTS workflow_rules_v2 (
@@ -447,8 +838,22 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_payroll_time_v2_kid      ON payroll_time_v2(kanzlei_id, ma_id, monat);
         CREATE INDEX IF NOT EXISTS idx_payroll_runs_v2_kid      ON payroll_runs_v2(kanzlei_id, mandant, monat, status);
     """)
+    _ensure_sqlite_column(conn, "aufgaben", "frist_uhrzeit", "TEXT DEFAULT ''")
+    _ensure_sqlite_column(conn, "aufgaben", "erledigt_am", "TEXT")
     conn.commit()
     log.info(f"DB initialisiert: {DB_PFAD}")
+
+
+def _ensure_sqlite_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    """
+    Fügt eine Spalte idempotent hinzu.
+    `ADD COLUMN IF NOT EXISTS` ist nicht auf allen SQLite-Versionen verfügbar.
+    """
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    existing = {str(r[1]).strip().lower() for r in rows if len(r) > 1}
+    if column.strip().lower() in existing:
+        return
+    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 class DatenSpeicher:
@@ -471,6 +876,20 @@ class DatenSpeicher:
 
     def hole_mandanten(self) -> Dict[str, Dict]:
         """Nur Mandanten DIESER Kanzlei."""
+        if _pg_mandanten_mode():
+            conn = _pg_conn()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM mandanten WHERE kanzlei_id = %s AND aktiv = 1 ORDER BY name",
+                    (self.kanzlei_id,),
+                )
+                rows = cur.fetchall()
+            result: Dict[str, Dict] = {}
+            for r in rows:
+                m = _pg_normalize_row_dict(dict(r))
+                m["fehlende_dokumente_liste"] = _fehlende_dokumente_pg(self.kanzlei_id, m["name"])
+                result[m["name"]] = m
+            return result
         rows = self._conn().execute(
             "SELECT * FROM mandanten WHERE kanzlei_id = ? AND aktiv = 1 ORDER BY name",
             (self.kanzlei_id,)
@@ -498,6 +917,45 @@ def email_outbox_enqueue(
     Legt eine Email in die Outbox.
     Idempotent via (kanzlei_id, idempotency_key).
     """
+    if _pg_saas_backend():
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO email_outbox
+                    (kanzlei_id, mandant, to_email, subject, body_text, body_html, max_attempts, idempotency_key)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (kanzlei_id, idempotency_key) DO NOTHING
+                """,
+                (
+                    kanzlei_id,
+                    mandant,
+                    to_email,
+                    subject,
+                    body_text,
+                    body_html or "",
+                    max(1, int(max_attempts)),
+                    idempotency_key,
+                ),
+            )
+            inserted = cur.rowcount > 0
+            cur.execute(
+                """
+                SELECT id, status, attempts, created_at
+                FROM email_outbox
+                WHERE kanzlei_id = %s AND idempotency_key = %s
+                """,
+                (kanzlei_id, idempotency_key),
+            )
+            row = cur.fetchone()
+        conn.commit()
+        return {
+            "created": inserted,
+            "id": int(row["id"]) if row else None,
+            "status": row["status"] if row else None,
+            "attempts": int(row["attempts"]) if row else 0,
+            "created_at": row["created_at"] if row else None,
+        }
     conn = get_connection()
     cur = conn.execute("""
         INSERT OR IGNORE INTO email_outbox
@@ -523,6 +981,23 @@ def email_outbox_enqueue(
 
 
 def email_outbox_due(limit: int = 20) -> List[Dict[str, Any]]:
+    if _pg_saas_backend():
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM email_outbox
+                WHERE status IN ('pending', 'failed')
+                  AND attempts < max_attempts
+                  AND COALESCE(next_attempt_at, NOW()) <= NOW()
+                ORDER BY created_at ASC
+                LIMIT %s
+                """,
+                (max(1, int(limit)),),
+            )
+            rows = cur.fetchall()
+        return [_pg_normalize_row_dict(dict(r)) for r in rows]
     conn = get_connection()
     rows = conn.execute("""
         SELECT *
@@ -537,6 +1012,22 @@ def email_outbox_due(limit: int = 20) -> List[Dict[str, Any]]:
 
 
 def email_outbox_claim(outbox_id: int) -> bool:
+    if _pg_saas_backend():
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE email_outbox
+                SET status = 'sending'
+                WHERE id = %s
+                  AND status IN ('pending', 'failed')
+                  AND attempts < max_attempts
+                """,
+                (int(outbox_id),),
+            )
+            n = cur.rowcount
+        conn.commit()
+        return n > 0
     conn = get_connection()
     cur = conn.execute("""
         UPDATE email_outbox
@@ -550,6 +1041,21 @@ def email_outbox_claim(outbox_id: int) -> bool:
 
 
 def email_outbox_mark_sent(outbox_id: int) -> None:
+    if _pg_saas_backend():
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE email_outbox
+                SET status = 'sent',
+                    sent_at = NOW(),
+                    last_error = ''
+                WHERE id = %s
+                """,
+                (int(outbox_id),),
+            )
+        conn.commit()
+        return
     conn = get_connection()
     conn.execute("""
         UPDATE email_outbox
@@ -562,6 +1068,29 @@ def email_outbox_mark_sent(outbox_id: int) -> None:
 
 
 def email_outbox_mark_failed(outbox_id: int, err: str) -> None:
+    if _pg_saas_backend():
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE email_outbox
+                SET attempts = attempts + 1,
+                    status = CASE WHEN email_outbox.attempts + 1 >= max_attempts THEN 'dead' ELSE 'failed' END,
+                    last_error = %s,
+                    next_attempt_at = NOW() + (
+                        CASE
+                            WHEN email_outbox.attempts <= 0 THEN INTERVAL '1 minute'
+                            WHEN email_outbox.attempts = 1 THEN INTERVAL '5 minutes'
+                            WHEN email_outbox.attempts = 2 THEN INTERVAL '15 minutes'
+                            ELSE INTERVAL '60 minutes'
+                        END
+                    )
+                WHERE id = %s
+                """,
+                (str(err)[:500], int(outbox_id)),
+            )
+        conn.commit()
+        return
     conn = get_connection()
     conn.execute("""
         UPDATE email_outbox
@@ -583,6 +1112,22 @@ def email_outbox_mark_failed(outbox_id: int, err: str) -> None:
 
 
 def email_outbox_recent(kanzlei_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+    if _pg_saas_backend():
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, mandant, to_email, subject, status, attempts, max_attempts,
+                       created_at, sent_at, last_error
+                FROM email_outbox
+                WHERE kanzlei_id = %s
+                ORDER BY id DESC
+                LIMIT %s
+                """,
+                (kanzlei_id, max(1, int(limit))),
+            )
+            rows = cur.fetchall()
+        return [_pg_normalize_row_dict(dict(r)) for r in rows]
     conn = get_connection()
     rows = conn.execute("""
         SELECT id, mandant, to_email, subject, status, attempts, max_attempts,
@@ -593,6 +1138,62 @@ def email_outbox_recent(kanzlei_id: str, limit: int = 50) -> List[Dict[str, Any]
         LIMIT ?
     """, (kanzlei_id, max(1, int(limit)))).fetchall()
     return [dict(r) for r in rows]
+
+
+def email_outbox_dead_24h_count(kanzlei_id: str) -> int:
+    """Anzahl Outbox-Einträge mit Status dead in den letzten 24h (Readiness)."""
+    if _pg_saas_backend():
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)::int AS n
+                FROM email_outbox
+                WHERE kanzlei_id = %s AND status = 'dead'
+                  AND created_at >= NOW() - INTERVAL '24 hours'
+                """,
+                (kanzlei_id,),
+            )
+            row = cur.fetchone()
+        return int(row["n"]) if row else 0
+    conn = get_connection()
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS n FROM email_outbox
+        WHERE kanzlei_id = ? AND status = 'dead'
+          AND created_at >= datetime('now', '-24 hours')
+        """,
+        (kanzlei_id,),
+    ).fetchone()
+    return int(row["n"]) if row else 0
+
+
+def webhook_queue_failed_24h_count(kanzlei_id: str) -> int:
+    """Fehlgeschlagene / tote Webhook-Queue-Einträge in 24h (Readiness)."""
+    if _pg_saas_backend():
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)::int AS n
+                FROM webhook_queue
+                WHERE kanzlei_id = %s AND status IN ('failed', 'dead')
+                  AND created_at >= NOW() - INTERVAL '24 hours'
+                """,
+                (kanzlei_id,),
+            )
+            row = cur.fetchone()
+        return int(row["n"]) if row else 0
+    conn = get_connection()
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS n FROM webhook_queue
+        WHERE kanzlei_id = ? AND status IN ('failed', 'dead')
+          AND created_at >= datetime('now', '-24 hours')
+        """,
+        (kanzlei_id,),
+    ).fetchone()
+    return int(row["n"]) if row else 0
 
 
 def agent_action_record(
@@ -608,6 +1209,21 @@ def agent_action_record(
     Idempotent: nur erste Erstellung mit action_key gewinnt.
     Rückgabe True = neu reserviert, False = bereits vorhanden.
     """
+    if _pg_saas_backend():
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO agent_actions
+                    (kanzlei_id, action_key, mandant, aktion, status, details)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (kanzlei_id, action_key) DO NOTHING
+                """,
+                (kanzlei_id, action_key, mandant, aktion, status, details[:500]),
+            )
+            n = cur.rowcount
+        conn.commit()
+        return n > 0
     conn = get_connection()
     cur = conn.execute("""
         INSERT OR IGNORE INTO agent_actions
@@ -619,6 +1235,19 @@ def agent_action_record(
 
 
 def agent_action_update(kanzlei_id: str, action_key: str, status: str, details: str = "") -> None:
+    if _pg_saas_backend():
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE agent_actions
+                SET status = %s, details = %s
+                WHERE kanzlei_id = %s AND action_key = %s
+                """,
+                (status, details[:500], kanzlei_id, action_key),
+            )
+        conn.commit()
+        return
     conn = get_connection()
     conn.execute("""
         UPDATE agent_actions
@@ -628,8 +1257,156 @@ def agent_action_update(kanzlei_id: str, action_key: str, status: str, details: 
     conn.commit()
 
 
+def agent_actions_list(kanzlei_id: str, limit: int = 100) -> List[Dict[str, Any]]:
+    """Liste Auto-Agent-Aktionen für eine Kanzlei (PostgreSQL oder SQLite)."""
+    lim = max(1, min(500, int(limit)))
+    kid = str(kanzlei_id or "").strip() or DEFAULT_KID
+    if _pg_saas_backend():
+        _init_db_postgresql()
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT action_key, mandant, aktion, status, details, created_at
+                FROM agent_actions
+                WHERE kanzlei_id = %s
+                ORDER BY id DESC
+                LIMIT %s
+                """,
+                (kid, lim),
+            )
+            rows = cur.fetchall()
+        return [_pg_normalize_row_dict(dict(r)) for r in rows]
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT action_key, mandant, aktion, status, details, created_at
+        FROM agent_actions
+        WHERE kanzlei_id = ?
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (kid, lim),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def agent_lock_try_acquire(owner: str, ttl_seconds: int = 290, lock_name: str = "auto_agent") -> bool:
+    """
+    Prozessübergreifender Lock (SQLite oder PostgreSQL SaaS-Schema).
+    Rückgabe True, wenn dieser ``owner`` die Sperre hält.
+    """
+    now = int(time.time())
+    exp = now + max(30, int(ttl_seconds))
+    name = (lock_name or "auto_agent").strip() or "auto_agent"
+    own = (owner or "").strip() or "unknown"
+    if _pg_saas_backend():
+        try:
+            _init_db_postgresql()
+            conn = _pg_conn()
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO agent_locks (name, owner, expires_at)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (name) DO UPDATE SET
+                        owner = EXCLUDED.owner,
+                        expires_at = EXCLUDED.expires_at
+                    WHERE agent_locks.expires_at < %s OR agent_locks.owner = %s
+                    """,
+                    (name, own, exp, now, own),
+                )
+            conn.commit()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT owner, expires_at FROM agent_locks WHERE name = %s",
+                    (name,),
+                )
+                row = cur.fetchone()
+            return bool(row and row["owner"] == own and int(row["expires_at"]) >= now)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("agent_lock_try_acquire PG failed: %s", exc)
+            try:
+                _pg_conn().rollback()
+            except Exception:
+                pass
+            return False
+    try:
+        conn = get_connection()
+    except RuntimeError as exc:
+        log.warning("agent_lock_try_acquire: kein SQLite (%s)", exc)
+        return False
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_locks (
+            name TEXT PRIMARY KEY,
+            owner TEXT NOT NULL,
+            expires_at INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO agent_locks (name, owner, expires_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(name) DO UPDATE SET
+            owner = excluded.owner,
+            expires_at = excluded.expires_at
+        WHERE agent_locks.expires_at < ? OR agent_locks.owner = ?
+        """,
+        (name, own, exp, now, own),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT owner, expires_at FROM agent_locks WHERE name = ?",
+        (name,),
+    ).fetchone()
+    return bool(row and row["owner"] == own and int(row["expires_at"]) >= now)
+
+
+def agent_lock_release(owner: str, lock_name: str = "auto_agent") -> None:
+    """Lock für ``owner`` freigeben (Ablaufzeit auf 0)."""
+    name = (lock_name or "auto_agent").strip() or "auto_agent"
+    own = (owner or "").strip() or "unknown"
+    if _pg_saas_backend():
+        try:
+            _init_db_postgresql()
+            conn = _pg_conn()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE agent_locks SET expires_at = 0 WHERE name = %s AND owner = %s",
+                    (name, own),
+                )
+            conn.commit()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("agent_lock_release PG failed: %s", exc)
+            try:
+                _pg_conn().rollback()
+            except Exception:
+                pass
+        return
+    try:
+        conn = get_connection()
+    except RuntimeError:
+        return
+    conn.execute(
+        "UPDATE agent_locks SET expires_at = 0 WHERE name = ? AND owner = ?",
+        (name, own),
+    )
+    conn.commit()
+
+
 def usage_get(kanzlei_id: str, metric: str, day: Optional[str] = None) -> int:
     d = day or datetime.now().strftime("%Y-%m-%d")
+    if _pg_saas_backend():
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT value FROM usage_metrics WHERE kanzlei_id = %s AND metric = %s AND day = %s",
+                (kanzlei_id, metric, d),
+            )
+            row = cur.fetchone()
+        return int(row["value"]) if row else 0
     conn = get_connection()
     row = conn.execute(
         "SELECT value FROM usage_metrics WHERE kanzlei_id = ? AND metric = ? AND day = ?",
@@ -640,6 +1417,20 @@ def usage_get(kanzlei_id: str, metric: str, day: Optional[str] = None) -> int:
 
 def usage_increment(kanzlei_id: str, metric: str, amount: int = 1, day: Optional[str] = None) -> int:
     d = day or datetime.now().strftime("%Y-%m-%d")
+    if _pg_saas_backend():
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO usage_metrics (kanzlei_id, metric, day, value)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (kanzlei_id, metric, day) DO UPDATE SET
+                    value = usage_metrics.value + EXCLUDED.value
+                """,
+                (kanzlei_id, metric, d, int(amount)),
+            )
+        conn.commit()
+        return usage_get(kanzlei_id, metric, d)
     conn = get_connection()
     conn.execute("""
         INSERT INTO usage_metrics (kanzlei_id, metric, day, value)
@@ -655,6 +1446,18 @@ def api_key_create(kanzlei_id: str, name: str, permissions: Optional[List[str]] 
     key_plain = f"ksk_{secrets.token_urlsafe(36)}"
     key_hash = hashlib.sha256(key_plain.encode("utf-8")).hexdigest()
     kid = str(uuid.uuid4())
+    if _pg_saas_backend():
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO api_keys (id, kanzlei_id, name, key_hash, permissions_json, aktiv)
+                VALUES (%s, %s, %s, %s, %s, 1)
+                """,
+                (kid, kanzlei_id, name[:120], key_hash, json.dumps(permissions or [])),
+            )
+        conn.commit()
+        return {"id": kid, "key": key_plain}
     conn = get_connection()
     conn.execute("""
         INSERT INTO api_keys (id, kanzlei_id, name, key_hash, permissions_json, aktiv)
@@ -668,6 +1471,33 @@ def api_key_verify(key_plain: str) -> Optional[Dict[str, Any]]:
     if not key_plain:
         return None
     key_hash = hashlib.sha256(key_plain.encode("utf-8")).hexdigest()
+    if _pg_saas_backend():
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, kanzlei_id, name, permissions_json
+                FROM api_keys
+                WHERE key_hash = %s AND aktiv = 1
+                LIMIT 1
+                """,
+                (key_hash,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            cur.execute("UPDATE api_keys SET last_used_at = NOW() WHERE id = %s", (row["id"],))
+        conn.commit()
+        try:
+            perms = json.loads(row["permissions_json"] or "[]")
+        except Exception:
+            perms = []
+        return {
+            "id": row["id"],
+            "kanzlei_id": row["kanzlei_id"],
+            "name": row["name"],
+            "permissions": perms if isinstance(perms, list) else [],
+        }
     conn = get_connection()
     row = conn.execute("""
         SELECT id, kanzlei_id, name, permissions_json
@@ -692,6 +1522,35 @@ def api_key_verify(key_plain: str) -> Optional[Dict[str, Any]]:
 
 
 def api_key_list(kanzlei_id: str) -> List[Dict[str, Any]]:
+    if _pg_saas_backend():
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, name, permissions_json, aktiv, created_at, last_used_at
+                FROM api_keys
+                WHERE kanzlei_id = %s
+                ORDER BY created_at DESC
+                """,
+                (kanzlei_id,),
+            )
+            rows = cur.fetchall()
+        result = []
+        for r in rows:
+            rr = _pg_normalize_row_dict(dict(r))
+            try:
+                perms = json.loads(rr["permissions_json"] or "[]")
+            except Exception:
+                perms = []
+            result.append({
+                "id": rr["id"],
+                "name": rr["name"],
+                "permissions": perms if isinstance(perms, list) else [],
+                "aktiv": bool(rr["aktiv"]),
+                "created_at": rr["created_at"],
+                "last_used_at": rr["last_used_at"],
+            })
+        return result
     conn = get_connection()
     rows = conn.execute("""
         SELECT id, name, permissions_json, aktiv, created_at, last_used_at
@@ -717,6 +1576,16 @@ def api_key_list(kanzlei_id: str) -> List[Dict[str, Any]]:
 
 
 def api_key_deactivate(kanzlei_id: str, key_id: str) -> bool:
+    if _pg_saas_backend():
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE api_keys SET aktiv = 0 WHERE kanzlei_id = %s AND id = %s",
+                (kanzlei_id, key_id),
+            )
+            n = cur.rowcount
+        conn.commit()
+        return n > 0
     conn = get_connection()
     cur = conn.execute(
         "UPDATE api_keys SET aktiv = 0 WHERE kanzlei_id = ? AND id = ?",
@@ -727,6 +1596,31 @@ def api_key_deactivate(kanzlei_id: str, key_id: str) -> bool:
 
 
 def api_key_rotate(kanzlei_id: str, key_id: str, new_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    if _pg_saas_backend():
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT name, permissions_json
+                FROM api_keys
+                WHERE kanzlei_id = %s AND id = %s AND aktiv = 1
+                """,
+                (kanzlei_id, key_id),
+            )
+            row = cur.fetchone()
+        if not row:
+            return None
+        try:
+            perms = json.loads(row["permissions_json"] or "[]")
+        except Exception:
+            perms = []
+        created = api_key_create(
+            kanzlei_id=kanzlei_id,
+            name=(new_name or row["name"]),
+            permissions=perms if isinstance(perms, list) else [],
+        )
+        api_key_deactivate(kanzlei_id, key_id)
+        return {"old_id": key_id, "new_id": created["id"], "key": created["key"]}
     conn = get_connection()
     row = conn.execute("""
         SELECT name, permissions_json
@@ -751,6 +1645,18 @@ def api_key_rotate(kanzlei_id: str, key_id: str, new_name: Optional[str] = None)
 def webhook_endpoint_create(kanzlei_id: str, url: str, events: List[str], secret: Optional[str] = None) -> Dict[str, Any]:
     wid = str(uuid.uuid4())
     sec = secret or secrets.token_urlsafe(24)
+    if _pg_saas_backend():
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO webhook_endpoints (id, kanzlei_id, url, secret, events_json, aktiv)
+                VALUES (%s, %s, %s, %s, %s, 1)
+                """,
+                (wid, kanzlei_id, url[:500], sec, json.dumps(events or [])),
+            )
+        conn.commit()
+        return {"id": wid, "secret": sec}
     conn = get_connection()
     conn.execute("""
         INSERT INTO webhook_endpoints (id, kanzlei_id, url, secret, events_json, aktiv)
@@ -761,6 +1667,37 @@ def webhook_endpoint_create(kanzlei_id: str, url: str, events: List[str], secret
 
 
 def webhook_endpoint_list(kanzlei_id: str) -> List[Dict[str, Any]]:
+    if _pg_saas_backend():
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, url, events_json, aktiv, created_at, last_status, last_error, last_sent_at
+                FROM webhook_endpoints
+                WHERE kanzlei_id = %s
+                ORDER BY created_at DESC
+                """,
+                (kanzlei_id,),
+            )
+            rows = cur.fetchall()
+        result = []
+        for r in rows:
+            rr = _pg_normalize_row_dict(dict(r))
+            try:
+                ev = json.loads(rr["events_json"] or "[]")
+            except Exception:
+                ev = []
+            result.append({
+                "id": rr["id"],
+                "url": rr["url"],
+                "events": ev if isinstance(ev, list) else [],
+                "aktiv": bool(rr["aktiv"]),
+                "created_at": rr["created_at"],
+                "last_status": rr["last_status"],
+                "last_error": rr["last_error"],
+                "last_sent_at": rr["last_sent_at"],
+            })
+        return result
     conn = get_connection()
     rows = conn.execute("""
         SELECT id, url, events_json, aktiv, created_at, last_status, last_error, last_sent_at
@@ -788,6 +1725,32 @@ def webhook_endpoint_list(kanzlei_id: str) -> List[Dict[str, Any]]:
 
 
 def webhook_endpoints_for_event(kanzlei_id: str, event_type: str) -> List[Dict[str, Any]]:
+    if _pg_saas_backend():
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, url, secret, events_json, aktiv
+                FROM webhook_endpoints
+                WHERE kanzlei_id = %s AND aktiv = 1
+                """,
+                (kanzlei_id,),
+            )
+            rows = cur.fetchall()
+        result = []
+        for r in rows:
+            try:
+                ev = json.loads(r["events_json"] or "[]")
+            except Exception:
+                ev = []
+            events = ev if isinstance(ev, list) else []
+            if event_type in events or "*" in events:
+                result.append({
+                    "id": r["id"],
+                    "url": r["url"],
+                    "secret": r["secret"],
+                })
+        return result
     conn = get_connection()
     rows = conn.execute("""
         SELECT id, url, secret, events_json, aktiv
@@ -811,6 +1774,16 @@ def webhook_endpoints_for_event(kanzlei_id: str, event_type: str) -> List[Dict[s
 
 
 def webhook_endpoint_delete(kanzlei_id: str, webhook_id: str) -> bool:
+    if _pg_saas_backend():
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM webhook_endpoints WHERE kanzlei_id = %s AND id = %s",
+                (kanzlei_id, webhook_id),
+            )
+            n = cur.rowcount
+        conn.commit()
+        return n > 0
     conn = get_connection()
     cur = conn.execute(
         "DELETE FROM webhook_endpoints WHERE kanzlei_id = ? AND id = ?",
@@ -821,6 +1794,18 @@ def webhook_endpoint_delete(kanzlei_id: str, webhook_id: str) -> bool:
 
 
 def webhook_enqueue(kanzlei_id: str, event_type: str, payload: Dict[str, Any]) -> None:
+    if _pg_saas_backend():
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO webhook_queue (kanzlei_id, event_type, payload_json, status)
+                VALUES (%s, %s, %s, 'pending')
+                """,
+                (kanzlei_id, event_type, json.dumps(payload, ensure_ascii=False)),
+            )
+        conn.commit()
+        return
     conn = get_connection()
     conn.execute("""
         INSERT INTO webhook_queue (kanzlei_id, event_type, payload_json, status)
@@ -830,6 +1815,21 @@ def webhook_enqueue(kanzlei_id: str, event_type: str, payload: Dict[str, Any]) -
 
 
 def webhook_due(limit: int = 25) -> List[Dict[str, Any]]:
+    if _pg_saas_backend():
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT * FROM webhook_queue
+                WHERE status IN ('pending', 'failed')
+                  AND COALESCE(next_attempt_at, NOW()) <= NOW()
+                ORDER BY id ASC
+                LIMIT %s
+                """,
+                (max(1, int(limit)),),
+            )
+            rows = cur.fetchall()
+        return [_pg_normalize_row_dict(dict(r)) for r in rows]
     conn = get_connection()
     rows = conn.execute("""
         SELECT * FROM webhook_queue
@@ -842,12 +1842,41 @@ def webhook_due(limit: int = 25) -> List[Dict[str, Any]]:
 
 
 def webhook_mark_sent(queue_id: int) -> None:
+    if _pg_saas_backend():
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute("UPDATE webhook_queue SET status = 'sent' WHERE id = %s", (int(queue_id),))
+        conn.commit()
+        return
     conn = get_connection()
     conn.execute("UPDATE webhook_queue SET status = 'sent' WHERE id = ?", (int(queue_id),))
     conn.commit()
 
 
 def webhook_mark_failed(queue_id: int, err: str) -> None:
+    if _pg_saas_backend():
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE webhook_queue
+                SET attempts = attempts + 1,
+                    status = CASE WHEN webhook_queue.attempts + 1 >= 8 THEN 'dead' ELSE 'failed' END,
+                    last_error = %s,
+                    next_attempt_at = NOW() + (
+                        CASE
+                            WHEN webhook_queue.attempts <= 0 THEN INTERVAL '1 minute'
+                            WHEN webhook_queue.attempts = 1 THEN INTERVAL '5 minutes'
+                            WHEN webhook_queue.attempts = 2 THEN INTERVAL '15 minutes'
+                            ELSE INTERVAL '60 minutes'
+                        END
+                    )
+                WHERE id = %s
+                """,
+                (str(err)[:500], int(queue_id)),
+            )
+        conn.commit()
+        return
     conn = get_connection()
     conn.execute("""
         UPDATE webhook_queue
@@ -870,6 +1899,19 @@ def webhook_mark_failed(queue_id: int, err: str) -> None:
 
 class DatenSpeicher(DatenSpeicher):
     def hole_mandant(self, name: str) -> Optional[Dict]:
+        if _pg_mandanten_mode():
+            conn = _pg_conn()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM mandanten WHERE kanzlei_id = %s AND name = %s AND aktiv = 1",
+                    (self.kanzlei_id, name),
+                )
+                row = cur.fetchone()
+            if not row:
+                return None
+            m = _pg_normalize_row_dict(dict(row))
+            m["fehlende_dokumente_liste"] = _fehlende_dokumente_pg(self.kanzlei_id, name)
+            return m
         row = self._conn().execute(
             "SELECT * FROM mandanten WHERE kanzlei_id = ? AND name = ? AND aktiv = 1",
             (self.kanzlei_id, name)
@@ -881,6 +1923,14 @@ class DatenSpeicher(DatenSpeicher):
         return m
 
     def mandant_existiert(self, name: str) -> bool:
+        if _pg_mandanten_mode():
+            conn = _pg_conn()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 AS x FROM mandanten WHERE kanzlei_id = %s AND name = %s AND aktiv = 1",
+                    (self.kanzlei_id, name),
+                )
+                return cur.fetchone() is not None
         row = self._conn().execute(
             "SELECT 1 FROM mandanten WHERE kanzlei_id = ? AND name = ? AND aktiv = 1",
             (self.kanzlei_id, name)
@@ -888,13 +1938,60 @@ class DatenSpeicher(DatenSpeicher):
         return row is not None
 
     def mandant_speichern(self, name: str, daten: Dict) -> bool:
+        if _pg_mandanten_mode():
+            try:
+                conn = _pg_conn()
+                new_id = str(uuid.uuid4())
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO mandanten
+                            (id, kanzlei_id, name, email, telefon, branche, umsatz,
+                             notizen, steuer_id, adresse, letzte_antwort, letzte_email, aktiv)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1)
+                        ON CONFLICT (kanzlei_id, name) DO UPDATE SET
+                            email          = EXCLUDED.email,
+                            telefon        = EXCLUDED.telefon,
+                            branche        = EXCLUDED.branche,
+                            umsatz         = EXCLUDED.umsatz,
+                            notizen        = EXCLUDED.notizen,
+                            steuer_id      = EXCLUDED.steuer_id,
+                            adresse        = EXCLUDED.adresse,
+                            letzte_antwort = EXCLUDED.letzte_antwort,
+                            letzte_email   = EXCLUDED.letzte_email,
+                            aktiv          = 1
+                        """,
+                        (
+                            new_id,
+                            self.kanzlei_id,
+                            name,
+                            daten.get("email", ""),
+                            daten.get("telefon", ""),
+                            daten.get("branche", ""),
+                            float(daten.get("umsatz", 0) or 0),
+                            daten.get("notizen", ""),
+                            daten.get("steuer_id", ""),
+                            daten.get("adresse", ""),
+                            daten.get("letzte_antwort"),
+                            daten.get("letzte_email"),
+                        ),
+                    )
+                conn.commit()
+                return True
+            except Exception as e:
+                log.error(f"mandant_speichern({name}) [pg]: {e}")
+                try:
+                    _pg_conn().rollback()
+                except Exception:
+                    pass
+                return False
         try:
             with db_transaction(self.kanzlei_id) as conn:
                 conn.execute("""
                     INSERT INTO mandanten
                         (kanzlei_id, name, email, telefon, branche, umsatz,
-                         notizen, steuer_id, adresse, letzte_antwort, letzte_email)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         notizen, steuer_id, adresse, letzte_antwort, letzte_email, aktiv)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
                     ON CONFLICT(kanzlei_id, name) DO UPDATE SET
                         email          = excluded.email,
                         telefon        = excluded.telefon,
@@ -904,7 +2001,8 @@ class DatenSpeicher(DatenSpeicher):
                         steuer_id      = excluded.steuer_id,
                         adresse        = excluded.adresse,
                         letzte_antwort = excluded.letzte_antwort,
-                        letzte_email   = excluded.letzte_email
+                        letzte_email   = excluded.letzte_email,
+                        aktiv          = 1
                 """, (
                     self.kanzlei_id,
                     name,
@@ -924,6 +2022,23 @@ class DatenSpeicher(DatenSpeicher):
             return False
 
     def mandant_loeschen(self, name: str) -> bool:
+        if _pg_mandanten_mode():
+            try:
+                conn = _pg_conn()
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE mandanten SET aktiv = 0 WHERE kanzlei_id = %s AND name = %s",
+                        (self.kanzlei_id, name),
+                    )
+                conn.commit()
+                return True
+            except Exception as e:
+                log.error(f"mandant_loeschen({name}) [pg]: {e}")
+                try:
+                    _pg_conn().rollback()
+                except Exception:
+                    pass
+                return False
         try:
             with db_transaction(self.kanzlei_id) as conn:
                 conn.execute(
@@ -936,6 +2051,8 @@ class DatenSpeicher(DatenSpeicher):
             return False
 
     def _fehlende_dokumente(self, mandant: str) -> List[str]:
+        if _pg_mandanten_mode():
+            return _fehlende_dokumente_pg(self.kanzlei_id, mandant)
         rows = self._conn().execute(
             "SELECT name FROM dokumente WHERE kanzlei_id = ? AND mandant = ? AND status = 'ausstehend'",
             (self.kanzlei_id, mandant)
@@ -993,16 +2110,18 @@ class DatenSpeicher(DatenSpeicher):
             with db_transaction(self.kanzlei_id) as conn:
                 conn.execute("""
                     INSERT INTO aufgaben
-                        (id, kanzlei_id, mandant, beschreibung, frist, prioritaet,
-                         kategorie, erledigt, zugewiesen_an, notiz, quelle)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        (id, kanzlei_id, mandant, beschreibung, frist, frist_uhrzeit, prioritaet,
+                         kategorie, erledigt, erledigt_am, zugewiesen_an, notiz, quelle)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
+                        mandant       = excluded.mandant,
                         beschreibung  = excluded.beschreibung,
                         frist         = excluded.frist,
+                        frist_uhrzeit = excluded.frist_uhrzeit,
                         prioritaet    = excluded.prioritaet,
+                        kategorie     = excluded.kategorie,
                         erledigt      = excluded.erledigt,
-                        erledigt_am   = CASE WHEN excluded.erledigt = 1 AND erledigt_am IS NULL
-                                         THEN datetime('now') ELSE erledigt_am END,
+                        erledigt_am   = excluded.erledigt_am,
                         zugewiesen_an = excluded.zugewiesen_an,
                         notiz         = excluded.notiz
                 """, (
@@ -1011,9 +2130,11 @@ class DatenSpeicher(DatenSpeicher):
                     daten.get("mandant", ""),
                     daten.get("beschreibung", ""),
                     daten.get("frist", ""),
+                    daten.get("frist_uhrzeit", ""),
                     daten.get("prioritaet", "normal"),
                     daten.get("kategorie", "allgemein"),
                     1 if daten.get("erledigt") else 0,
+                    (daten.get("erledigt_am") if daten.get("erledigt") else None),
                     daten.get("zugewiesen_an", ""),
                     daten.get("notiz", ""),
                     daten.get("quelle", "manuell"),
@@ -1079,6 +2200,18 @@ class DatenSpeicher(DatenSpeicher):
     def log_eintrag(self, aktion: str, benutzer: str = "system",
                     details: str = "", ip: str = "") -> None:
         try:
+            if _pg_mandanten_mode():
+                conn = _pg_conn()
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO audit_log (kanzlei_id, aktion, benutzer, details, ip_adresse)
+                        VALUES (%s, %s, %s, %s, %s)
+                        """,
+                        (self.kanzlei_id, aktion[:500], benutzer, details[:500], ip),
+                    )
+                conn.commit()
+                return
             with db_transaction(self.kanzlei_id) as conn:
                 conn.execute(
                     "INSERT INTO audit_log (kanzlei_id, aktion, benutzer, details, ip_adresse) VALUES (?,?,?,?,?)",
@@ -1088,6 +2221,20 @@ class DatenSpeicher(DatenSpeicher):
             log.error(f"log_eintrag Fehler: {e}")
 
     def hole_logs(self, limit: int = 100) -> List[Dict]:
+        if _pg_mandanten_mode():
+            conn = _pg_conn()
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT * FROM audit_log
+                    WHERE kanzlei_id = %s
+                    ORDER BY zeitpunkt DESC
+                    LIMIT %s
+                    """,
+                    (self.kanzlei_id, max(1, int(limit))),
+                )
+                rows = cur.fetchall()
+            return [_pg_normalize_row_dict(dict(r)) for r in rows]
         rows = self._conn().execute(
             "SELECT * FROM audit_log WHERE kanzlei_id = ? ORDER BY zeitpunkt DESC LIMIT ?",
             (self.kanzlei_id, limit)
@@ -1103,6 +2250,38 @@ class DatenSpeicher(DatenSpeicher):
 
     def portal_speichern(self, typ: str, record_id: str, mandant: str, payload: Dict) -> bool:
         try:
+            status_s = str(payload.get("status", ""))[:40]
+            dj = json.dumps(payload, ensure_ascii=False)
+            ers = payload.get("erstellt_am")
+            if ers is not None:
+                es = str(ers).strip()
+                if not es:
+                    ers = None
+                else:
+                    try:
+                        datetime.fromisoformat(es.replace("Z", "+00:00"))
+                        ers = es
+                    except ValueError:
+                        ers = None
+            if _pg_mandanten_mode():
+                conn = _pg_conn()
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO portal_records
+                            (id, kanzlei_id, typ, mandant, status, data_json, erstellt_am, geaendert_am)
+                        VALUES (%s, %s, %s, %s, %s, %s, COALESCE(%s::timestamptz, NOW()), NOW())
+                        ON CONFLICT(id) DO UPDATE SET
+                            typ = EXCLUDED.typ,
+                            mandant = EXCLUDED.mandant,
+                            status = EXCLUDED.status,
+                            data_json = EXCLUDED.data_json,
+                            geaendert_am = NOW()
+                        """,
+                        (record_id, self.kanzlei_id, typ, mandant, status_s, dj, ers),
+                    )
+                conn.commit()
+                return True
             with db_transaction(self.kanzlei_id) as conn:
                 conn.execute("""
                     INSERT INTO portal_records
@@ -1119,9 +2298,9 @@ class DatenSpeicher(DatenSpeicher):
                     self.kanzlei_id,
                     typ,
                     mandant,
-                    str(payload.get("status", ""))[:40],
-                    json.dumps(payload, ensure_ascii=False),
-                    payload.get("erstellt_am"),
+                    status_s,
+                    dj,
+                    ers,
                 ))
             return True
         except Exception as e:
@@ -1129,32 +2308,65 @@ class DatenSpeicher(DatenSpeicher):
             return False
 
     def portal_holen(self, typ: str, record_id: str) -> Optional[Dict]:
-        row = self._conn().execute(
-            "SELECT data_json FROM portal_records WHERE kanzlei_id = ? AND typ = ? AND id = ?",
-            (self.kanzlei_id, typ, record_id),
-        ).fetchone()
-        if not row:
-            return None
+        if _pg_mandanten_mode():
+            conn = _pg_conn()
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT data_json FROM portal_records
+                    WHERE kanzlei_id = %s AND typ = %s AND id = %s
+                    """,
+                    (self.kanzlei_id, typ, record_id),
+                )
+                row = cur.fetchone()
+            if not row:
+                return None
+            raw = row.get("data_json") if isinstance(row, dict) else row[0]
+        else:
+            row = self._conn().execute(
+                "SELECT data_json FROM portal_records WHERE kanzlei_id = ? AND typ = ? AND id = ?",
+                (self.kanzlei_id, typ, record_id),
+            ).fetchone()
+            if not row:
+                return None
+            raw = row["data_json"]
         try:
-            return json.loads(row["data_json"])
+            return json.loads(raw)
         except Exception:
             return None
 
     def portal_liste(self, typ: str, mandant: Optional[str] = None, status: Optional[str] = None) -> List[Dict]:
-        sql = "SELECT data_json FROM portal_records WHERE kanzlei_id = ? AND typ = ?"
-        params: List[Any] = [self.kanzlei_id, typ]
-        if mandant:
-            sql += " AND mandant = ?"
-            params.append(mandant)
-        if status:
-            sql += " AND status = ?"
-            params.append(status)
-        sql += " ORDER BY erstellt_am DESC"
-        rows = self._conn().execute(sql, tuple(params)).fetchall()
+        if _pg_mandanten_mode():
+            sql = "SELECT data_json FROM portal_records WHERE kanzlei_id = %s AND typ = %s"
+            params: List[Any] = [self.kanzlei_id, typ]
+            if mandant:
+                sql += " AND mandant = %s"
+                params.append(mandant)
+            if status:
+                sql += " AND status = %s"
+                params.append(status)
+            sql += " ORDER BY erstellt_am DESC"
+            conn = _pg_conn()
+            with conn.cursor() as cur:
+                cur.execute(sql, tuple(params))
+                rows = cur.fetchall()
+            iter_rows = [r["data_json"] for r in rows]
+        else:
+            sql = "SELECT data_json FROM portal_records WHERE kanzlei_id = ? AND typ = ?"
+            params = [self.kanzlei_id, typ]
+            if mandant:
+                sql += " AND mandant = ?"
+                params.append(mandant)
+            if status:
+                sql += " AND status = ?"
+                params.append(status)
+            sql += " ORDER BY erstellt_am DESC"
+            rows = self._conn().execute(sql, tuple(params)).fetchall()
+            iter_rows = [r["data_json"] for r in rows]
         result = []
-        for r in rows:
+        for raw in iter_rows:
             try:
-                result.append(json.loads(r["data_json"]))
+                result.append(json.loads(raw))
             except Exception:
                 continue
         return result
@@ -1164,19 +2376,48 @@ class DatenSpeicher(DatenSpeicher):
     # ══════════════════════════════════════════════════════════
 
     def setting_holen(self, key: str, default=None):
-        row = self._conn().execute(
-            "SELECT value FROM einstellungen WHERE kanzlei_id = ? AND key = ?",
-            (self.kanzlei_id, key)
-        ).fetchone()
-        if not row:
-            return default
+        if _pg_mandanten_mode():
+            conn = _pg_conn()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT value FROM einstellungen WHERE kanzlei_id = %s AND key = %s",
+                    (self.kanzlei_id, key),
+                )
+                row = cur.fetchone()
+            if not row:
+                return default
+            val = row["value"] if isinstance(row, dict) else row[0]
+        else:
+            row = self._conn().execute(
+                "SELECT value FROM einstellungen WHERE kanzlei_id = ? AND key = ?",
+                (self.kanzlei_id, key)
+            ).fetchone()
+            if not row:
+                return default
+            val = row["value"]
         try:
-            return json.loads(row["value"])
+            return json.loads(val)
         except Exception:
-            return row["value"]
+            return val
 
     def setting_setzen(self, key: str, value) -> bool:
         try:
+            payload = json.dumps(value, ensure_ascii=False)
+            if _pg_mandanten_mode():
+                conn = _pg_conn()
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO einstellungen (kanzlei_id, key, value)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (kanzlei_id, key) DO UPDATE SET
+                            value = EXCLUDED.value,
+                            geaendert_am = NOW()
+                        """,
+                        (self.kanzlei_id, key, payload),
+                    )
+                conn.commit()
+                return True
             with db_transaction(self.kanzlei_id) as conn:
                 conn.execute("""
                     INSERT INTO einstellungen (kanzlei_id, key, value)
@@ -1184,7 +2425,7 @@ class DatenSpeicher(DatenSpeicher):
                     ON CONFLICT(kanzlei_id, key) DO UPDATE SET
                         value = excluded.value,
                         geaendert_am = datetime('now')
-                """, (self.kanzlei_id, key, json.dumps(value, ensure_ascii=False)))
+                """, (self.kanzlei_id, key, payload))
             return True
         except Exception as e:
             log.error(f"setting_setzen({key}): {e}")
@@ -1216,11 +2457,24 @@ class DatenSpeicher(DatenSpeicher):
 
     def belege_liste(self) -> List[Dict[str, Any]]:
         belege = self._section_holen("belege", {})
-        return list(belege.values())
+        out: List[Dict[str, Any]] = []
+        for bid, b in belege.items():
+            row = dict(b or {})
+            if not row.get("beleg_id"):
+                row["beleg_id"] = bid
+            out.append(row)
+        return out
 
     def beleg_holen(self, beleg_id: str) -> Optional[Dict[str, Any]]:
         belege = self._section_holen("belege", {})
         return belege.get(beleg_id)
+
+    def beleg_loeschen(self, beleg_id: str) -> bool:
+        belege = self._section_holen("belege", {})
+        if beleg_id not in belege:
+            return False
+        del belege[beleg_id]
+        return self._section_setzen("belege", belege)
 
     def rechnung_speichern(self, rechnung_id: str, rechnung: Dict[str, Any]) -> bool:
         rechnungen = self._section_holen("rechnungen", {})
@@ -1438,12 +2692,24 @@ class DatenSpeicher(DatenSpeicher):
             result: Dict[str, Dict[str, Any]] = {}
             for r in rows:
                 try:
-                    result[r["id"]] = json.loads(r["data_json"])
+                    payload = json.loads(r["data_json"])
+                    if not isinstance(payload, dict):
+                        payload = {}
+                    if not payload.get("id"):
+                        payload["id"] = r["id"]
+                    result[r["id"]] = payload
                 except Exception:
                     continue
             if result:
                 return result
-        return self._section_holen("steuerfaelle", {})
+        raw = self._section_holen("steuerfaelle", {})
+        out: Dict[str, Dict[str, Any]] = {}
+        for fid, fall in raw.items():
+            row = dict(fall or {})
+            if not row.get("id"):
+                row["id"] = fid
+            out[fid] = row
+        return out
 
     def steuerfall_holen(self, fall_id: str) -> Optional[Dict[str, Any]]:
         return self.steuerfaelle_liste().get(fall_id)
@@ -1474,6 +2740,24 @@ class DatenSpeicher(DatenSpeicher):
                     ))
             except Exception as e:
                 log.error(f"steuerfall_speichern(v2): {e}")
+                return False
+        return ok
+
+    def steuerfall_loeschen(self, fall_id: str) -> bool:
+        faelle = dict(self.steuerfaelle_liste())
+        if fall_id not in faelle:
+            return False
+        del faelle[fall_id]
+        ok = self._section_setzen("steuerfaelle", faelle)
+        if self._use_domain_tables_v2():
+            try:
+                with db_transaction(self.kanzlei_id) as conn:
+                    conn.execute(
+                        "DELETE FROM steuerfaelle_v2 WHERE id = ? AND kanzlei_id = ?",
+                        (fall_id, self.kanzlei_id),
+                    )
+            except Exception as e:
+                log.error(f"steuerfall_loeschen(v2): {e}")
                 return False
         return ok
 
@@ -1601,6 +2885,23 @@ class DatenSpeicher(DatenSpeicher):
     # ══════════════════════════════════════════════════════════
 
     def berechne_tage_ohne_antwort(self, mandant: str) -> int:
+        if _pg_mandanten_mode():
+            conn = _pg_conn()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT letzte_antwort FROM mandanten WHERE kanzlei_id = %s AND name = %s",
+                    (self.kanzlei_id, mandant),
+                )
+                row = cur.fetchone()
+            if not row or row.get("letzte_antwort") is None:
+                return 999
+            try:
+                letzte = _pg_ts_to_naive_datetime(row["letzte_antwort"])
+                if letzte is None:
+                    return 999
+                return max(0, (datetime.now() - letzte).days)
+            except Exception:
+                return 0
         row = self._conn().execute(
             "SELECT letzte_antwort FROM mandanten WHERE kanzlei_id = ? AND name = ?",
             (self.kanzlei_id, mandant)
@@ -1615,10 +2916,28 @@ class DatenSpeicher(DatenSpeicher):
 
     def hole_statistiken(self) -> Dict:
         conn = self._conn()
-        mandanten_anz = conn.execute(
-            "SELECT COUNT(*) as n FROM mandanten WHERE kanzlei_id = ? AND aktiv = 1",
-            (self.kanzlei_id,)
-        ).fetchone()["n"]
+        if _pg_mandanten_mode():
+            pg = _pg_conn()
+            with pg.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) AS n FROM mandanten WHERE kanzlei_id = %s AND aktiv = 1",
+                    (self.kanzlei_id,),
+                )
+                mandanten_anz = cur.fetchone()["n"]
+                cur.execute(
+                    "SELECT COALESCE(SUM(umsatz), 0) AS s FROM mandanten WHERE kanzlei_id = %s AND aktiv = 1",
+                    (self.kanzlei_id,),
+                )
+                umsatz = cur.fetchone()["s"]
+        else:
+            mandanten_anz = conn.execute(
+                "SELECT COUNT(*) as n FROM mandanten WHERE kanzlei_id = ? AND aktiv = 1",
+                (self.kanzlei_id,)
+            ).fetchone()["n"]
+            umsatz = conn.execute(
+                "SELECT COALESCE(SUM(umsatz), 0) as s FROM mandanten WHERE kanzlei_id = ? AND aktiv = 1",
+                (self.kanzlei_id,)
+            ).fetchone()["s"]
         aufgaben_offen = conn.execute(
             "SELECT COUNT(*) as n FROM aufgaben WHERE kanzlei_id = ? AND erledigt = 0",
             (self.kanzlei_id,)
@@ -1627,10 +2946,6 @@ class DatenSpeicher(DatenSpeicher):
             "SELECT COUNT(*) as n FROM aufgaben WHERE kanzlei_id = ?",
             (self.kanzlei_id,)
         ).fetchone()["n"]
-        umsatz = conn.execute(
-            "SELECT COALESCE(SUM(umsatz), 0) as s FROM mandanten WHERE kanzlei_id = ? AND aktiv = 1",
-            (self.kanzlei_id,)
-        ).fetchone()["s"]
 
         return {
             "mandanten_gesamt":  mandanten_anz,
@@ -1726,6 +3041,15 @@ class DatenSpeicher(DatenSpeicher):
         }
 
     def berechne_gesamtumsatz(self) -> float:
+        if _pg_mandanten_mode():
+            conn = _pg_conn()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COALESCE(SUM(umsatz), 0) AS s FROM mandanten WHERE kanzlei_id = %s AND aktiv = 1",
+                    (self.kanzlei_id,),
+                )
+                row = cur.fetchone()
+            return float(row["s"] if row else 0)
         row = self._conn().execute(
             "SELECT COALESCE(SUM(umsatz), 0) as s FROM mandanten WHERE kanzlei_id = ? AND aktiv = 1",
             (self.kanzlei_id,)
@@ -1733,6 +3057,29 @@ class DatenSpeicher(DatenSpeicher):
         return float(row["s"] if row else 0)
 
     def berechne_tage_ohne_antwort_alle(self) -> Dict[str, int]:
+        if _pg_mandanten_mode():
+            conn = _pg_conn()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT name, letzte_antwort FROM mandanten WHERE kanzlei_id = %s AND aktiv = 1",
+                    (self.kanzlei_id,),
+                )
+                rows = cur.fetchall()
+            result: Dict[str, int] = {}
+            for r in rows:
+                la = r.get("letzte_antwort")
+                if la is None:
+                    result[r["name"]] = 999
+                else:
+                    try:
+                        dt = _pg_ts_to_naive_datetime(la)
+                        if dt is None:
+                            result[r["name"]] = 999
+                        else:
+                            result[r["name"]] = max(0, (datetime.now() - dt).days)
+                    except Exception:
+                        result[r["name"]] = 0
+            return result
         rows = self._conn().execute(
             "SELECT name, letzte_antwort FROM mandanten WHERE kanzlei_id = ? AND aktiv = 1",
             (self.kanzlei_id,)
