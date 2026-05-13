@@ -1,5 +1,6 @@
 # ============================================================
 # KANZLEI AI — AUTH v4.0
+# INTERNAL: Nutzung nur über ``backend.auth``.
 # Multi-Kanzlei: Jeder Benutzer gehört zu einer Kanzlei.
 # Login gibt kanzlei_id in Session zurück.
 # Alle Datenzugriffe werden dann mit dieser ID gefiltert.
@@ -15,8 +16,9 @@ import time
 import uuid
 import importlib
 import bcrypt
+import re
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Tuple
+from typing import Any, Optional, Dict, Tuple
 from collections import defaultdict
 
 log = logging.getLogger("kanzlei_auth")
@@ -115,11 +117,43 @@ def _verifiziere_passwort(passwort: str, hash_gespeichert: str, salt: str) -> bo
     return hmac.compare_digest(neu_hash, hash_gespeichert)
 
 
+_PW_UPPER_RE = re.compile(r"[A-Z]")
+_PW_LOWER_RE = re.compile(r"[a-z]")
+_PW_DIGIT_RE = re.compile(r"\d")
+_PW_SPECIAL_RE = re.compile(r"[^A-Za-z0-9]")
+
+
+def _assert_strong_password(passwort: str, email: str = "") -> None:
+    pw = str(passwort or "")
+    if len(pw) < 12:
+        raise ValueError("Passwort muss mindestens 12 Zeichen haben")
+    if not _PW_UPPER_RE.search(pw):
+        raise ValueError("Passwort muss mindestens einen Großbuchstaben enthalten")
+    if not _PW_LOWER_RE.search(pw):
+        raise ValueError("Passwort muss mindestens einen Kleinbuchstaben enthalten")
+    if not _PW_DIGIT_RE.search(pw):
+        raise ValueError("Passwort muss mindestens eine Zahl enthalten")
+    if not _PW_SPECIAL_RE.search(pw):
+        raise ValueError("Passwort muss mindestens ein Sonderzeichen enthalten")
+    if " " in pw:
+        raise ValueError("Passwort darf keine Leerzeichen enthalten")
+    mail = str(email or "").strip().lower()
+    if mail and "@" in mail:
+        local = mail.split("@", 1)[0]
+        if local and local in pw.lower():
+            raise ValueError("Passwort darf keinen Teil der E-Mail enthalten")
+
+
 # ═══════════════════════════════════════════════════════════
 # DB-SCHEMA (benutzer mit kanzlei_id)
 # ═══════════════════════════════════════════════════════════
 
 def _get_conn():
+    """Nur SQLite — bei DATABASE_URL=postgresql:// nutzt Auth core.auth_postgres."""
+    from core.auth_postgres import auth_pg_enabled
+
+    if auth_pg_enabled():
+        raise RuntimeError("Auth nutzt PostgreSQL — kein SQLite-_get_conn().")
     from core.daten_speicher import get_connection
     conn = get_connection()
     conn.executescript("""
@@ -161,6 +195,10 @@ def _get_conn():
 
 def erstelle_kanzlei(name: str, email: str = "", plan: str = "starter") -> Dict:
     """Neue Kanzlei anlegen. Gibt kanzlei_id zurück."""
+    from core.auth_postgres import auth_pg_enabled, pg_erstelle_kanzlei
+
+    if auth_pg_enabled():
+        return pg_erstelle_kanzlei(name, email, plan)
     kid = str(uuid.uuid4())[:8]
     conn = _get_conn()
     conn.execute(
@@ -173,6 +211,10 @@ def erstelle_kanzlei(name: str, email: str = "", plan: str = "starter") -> Dict:
 
 
 def hole_kanzlei(kanzlei_id: str) -> Optional[Dict]:
+    from core.auth_postgres import auth_pg_enabled, pg_hole_kanzlei
+
+    if auth_pg_enabled():
+        return pg_hole_kanzlei(kanzlei_id)
     conn = _get_conn()
     row = conn.execute(
         "SELECT * FROM kanzleien WHERE id = ? AND aktiv = 1", (kanzlei_id,)
@@ -181,6 +223,10 @@ def hole_kanzlei(kanzlei_id: str) -> Optional[Dict]:
 
 
 def liste_kanzleien() -> list:
+    from core.auth_postgres import auth_pg_enabled, pg_liste_kanzleien
+
+    if auth_pg_enabled():
+        return pg_liste_kanzleien()
     conn = _get_conn()
     rows = conn.execute(
         "SELECT id, name, email, plan, aktiv, erstellt_am FROM kanzleien ORDER BY name"
@@ -194,7 +240,11 @@ def liste_kanzleien() -> list:
 
 def hat_benutzer(kanzlei_id: str = "default") -> bool:
     """Prüft ob mindestens ein Benutzer in dieser Kanzlei existiert."""
+    from core.auth_postgres import auth_pg_enabled, pg_hat_benutzer
+
     try:
+        if auth_pg_enabled():
+            return pg_hat_benutzer(kanzlei_id)
         conn = _get_conn()
         row = conn.execute(
             "SELECT COUNT(*) FROM benutzer WHERE kanzlei_id = ? AND aktiv = 1",
@@ -207,7 +257,11 @@ def hat_benutzer(kanzlei_id: str = "default") -> bool:
 
 def hat_irgendein_benutzer() -> bool:
     """Prüft ob überhaupt ein Benutzer existiert (für Setup-Check)."""
+    from core.auth_postgres import auth_pg_enabled, pg_hat_irgendein_benutzer
+
     try:
+        if auth_pg_enabled():
+            return pg_hat_irgendein_benutzer()
         conn = _get_conn()
         row = conn.execute("SELECT COUNT(*) FROM benutzer WHERE aktiv = 1").fetchone()
         return row[0] > 0
@@ -223,21 +277,42 @@ def erstelle_benutzer(
     kanzlei_id: str = "default",
 ) -> Dict:
     """Neuen Benutzer anlegen. Gehört zu kanzlei_id."""
-    if len(passwort) < 8:
-        raise ValueError("Passwort muss mindestens 8 Zeichen haben")
+    from core.auth_postgres import (
+        auth_pg_enabled,
+        pg_benutzer_existiert,
+        pg_erstelle_benutzer,
+        pg_lade_benutzer_profil,
+    )
+
+    _assert_strong_password(passwort, email)
     if not benutzername.strip():
         raise ValueError("Benutzername darf nicht leer sein")
 
-    conn = _get_conn()
     rolle_map = {
+        "OWNER": "owner",
+        "owner": "owner",
         "ADMIN": "admin",
         "MITARBEITER": "assistent",
+        "USER": "assistent",
         "admin": "admin",
+        "user": "assistent",
         "mitarbeiter": "assistent",
         "steuerberater": "steuerberater",
+        "selbststaendig": "steuerberater",
         "assistent": "assistent",
     }
     rolle = rolle_map.get((rolle or "").strip(), "assistent")
+    if auth_pg_enabled():
+        if pg_benutzer_existiert(kanzlei_id, benutzername):
+            raise ValueError(f"Benutzer '{benutzername}' existiert bereits in dieser Kanzlei")
+        hash_wert, salt = _hash_passwort(passwort)
+        pg_erstelle_benutzer(benutzername, rolle, email, kanzlei_id, hash_wert, salt)
+        log.info(f"Benutzer erstellt (PG): {benutzername} | Kanzlei: {kanzlei_id} | Rolle: {rolle}")
+        prof = pg_lade_benutzer_profil(benutzername, kanzlei_id)
+        uid = int(prof["id"]) if prof and prof.get("id") is not None else None
+        return {"id": uid, "benutzername": benutzername, "rolle": rolle, "email": email, "kanzlei_id": kanzlei_id}
+
+    conn = _get_conn()
     existing = conn.execute(
         "SELECT 1 FROM benutzer WHERE kanzlei_id = ? AND benutzername = ?",
         (kanzlei_id, benutzername)
@@ -253,19 +328,27 @@ def erstelle_benutzer(
     conn.commit()
 
     log.info(f"Benutzer erstellt: {benutzername} | Kanzlei: {kanzlei_id} | Rolle: {rolle}")
-    return {"benutzername": benutzername, "rolle": rolle, "email": email, "kanzlei_id": kanzlei_id}
+    row = conn.execute(
+        "SELECT id FROM benutzer WHERE kanzlei_id = ? AND benutzername = ?",
+        (kanzlei_id, benutzername),
+    ).fetchone()
+    uid = int(row["id"]) if row else None
+    return {"id": uid, "benutzername": benutzername, "rolle": rolle, "email": email, "kanzlei_id": kanzlei_id}
 
 
 def setup_erstbenutzer(
     benutzername: str = "admin",
-    passwort: str = "Admin2024!",
+    passwort: Optional[str] = None,
     kanzlei_id: str = "default",
 ) -> bool:
     """Erstellt Standard-Admin wenn noch kein Benutzer existiert."""
     if hat_irgendein_benutzer():
         return False
     try:
-        erstelle_benutzer(benutzername, passwort, rolle="admin", kanzlei_id=kanzlei_id)
+        pw = (passwort or os.getenv("INITIAL_ADMIN_PASSWORD") or "").strip()
+        if len(pw) < 12:
+            raise ValueError("INITIAL_ADMIN_PASSWORD fehlt oder zu kurz (>=12)")
+        erstelle_benutzer(benutzername, pw, rolle="owner", kanzlei_id=kanzlei_id)
         log.info(f"Erstbenutzer angelegt: {benutzername} in Kanzlei {kanzlei_id}")
         return True
     except Exception as e:
@@ -274,13 +357,29 @@ def setup_erstbenutzer(
 
 
 def liste_benutzer(kanzlei_id: str = "default") -> list:
+    from core.auth_postgres import auth_pg_enabled, pg_liste_benutzer
+
     try:
+        if auth_pg_enabled():
+            return pg_liste_benutzer(kanzlei_id)
         conn = _get_conn()
-        rows = conn.execute(
-            "SELECT benutzername, rolle, email, aktiv, erstellt_am, letzter_login "
-            "FROM benutzer WHERE kanzlei_id = ? ORDER BY benutzername",
-            (kanzlei_id,)
-        ).fetchall()
+        cols = {
+            str(r["name"]).lower()
+            for r in conn.execute("PRAGMA table_info(benutzer)").fetchall()
+            if isinstance(r, dict) and r.get("name")
+        }
+        if "letzter_login" in cols:
+            sql = (
+                "SELECT id, benutzername, rolle, email, aktiv, erstellt_am, letzter_login "
+                "FROM benutzer WHERE kanzlei_id = ? ORDER BY benutzername"
+            )
+        else:
+            # Legacy-Schema ohne letzter_login
+            sql = (
+                "SELECT id, benutzername, rolle, email, aktiv, erstellt_am, NULL AS letzter_login "
+                "FROM benutzer WHERE kanzlei_id = ? ORDER BY benutzername"
+            )
+        rows = conn.execute(sql, (kanzlei_id,)).fetchall()
         return [dict(r) for r in rows]
     except Exception as e:
         log.error(f"liste_benutzer: {e}")
@@ -291,8 +390,24 @@ def aendere_passwort(
     benutzername: str, altes_passwort: str, neues_passwort: str,
     kanzlei_id: str = "default",
 ) -> bool:
-    if len(neues_passwort) < 8:
-        raise ValueError("Neues Passwort muss mindestens 8 Zeichen haben")
+    from core.auth_postgres import auth_pg_enabled
+
+    _assert_strong_password(neues_passwort)
+    if auth_pg_enabled():
+        from core.auth_postgres import pg_fetch_password_row
+
+        row = pg_fetch_password_row(kanzlei_id, benutzername)
+        if not row:
+            raise ValueError("Benutzer nicht gefunden")
+        if not _verifiziere_passwort(altes_passwort, row["hash"], row["salt"]):
+            raise ValueError("Altes Passwort falsch")
+        neuer_hash, neuer_salt = _hash_passwort(neues_passwort)
+        from core.auth_postgres import pg_aendere_passwort
+
+        pg_aendere_passwort(benutzername, kanzlei_id, neuer_hash, neuer_salt)
+        log.info(f"Passwort geändert (PG): {benutzername} in {kanzlei_id}")
+        return True
+
     conn = _get_conn()
     row = conn.execute(
         "SELECT hash, salt FROM benutzer WHERE kanzlei_id = ? AND benutzername = ? AND aktiv = 1",
@@ -312,8 +427,147 @@ def aendere_passwort(
     return True
 
 
-def benutzer_deaktivieren(benutzername: str, kanzlei_id: str = "default") -> bool:
+def finde_benutzer_nach_email(email: str) -> Optional[Dict[str, Any]]:
+    """Aktiven Benutzer über E-Mail finden (kanzlei_id + benutzername)."""
+    e = (email or "").strip()
+    if not e:
+        return None
+    from core.auth_postgres import auth_pg_enabled
+
     try:
+        if auth_pg_enabled():
+            from core.pg_runtime import get_pg_connection
+
+            with get_pg_connection().cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, benutzername, kanzlei_id, email, rolle, aktiv
+                    FROM benutzer
+                    WHERE LOWER(TRIM(COALESCE(email, ''))) = LOWER(TRIM(%s))
+                      AND aktiv = 1
+                    ORDER BY id ASC
+                    LIMIT 1
+                    """,
+                    (e,),
+                )
+                row = cur.fetchone()
+            return dict(row) if row else None
+        conn = _get_conn()
+        row = conn.execute(
+            """
+            SELECT id, benutzername, kanzlei_id, email, rolle, aktiv
+            FROM benutzer
+            WHERE LOWER(TRIM(COALESCE(email, ''))) = LOWER(TRIM(?))
+              AND aktiv = 1
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (e,),
+        ).fetchone()
+        return dict(row) if row else None
+    except Exception as ex:
+        log.error(f"finde_benutzer_nach_email: {ex}")
+        return None
+
+
+def setze_passwort_ohne_altes(benutzername: str, kanzlei_id: str, neues_passwort: str) -> bool:
+    """Admin-/Reset-Pfad: Passwort ohne altes Passwort setzen."""
+    from core.auth_postgres import auth_pg_enabled
+
+    _assert_strong_password(neues_passwort)
+
+    neuer_hash, neuer_salt = _hash_passwort(neues_passwort)
+    try:
+        if auth_pg_enabled():
+            from core.pg_runtime import get_pg_connection
+
+            cn = get_pg_connection()
+            with cn.cursor() as cur:
+                cur.execute(
+                    "UPDATE benutzer SET hash=%s, salt=%s WHERE kanzlei_id=%s AND benutzername=%s AND aktiv=1",
+                    (neuer_hash, neuer_salt, kanzlei_id, benutzername),
+                )
+                changed = cur.rowcount
+            cn.commit()
+            return changed > 0
+        conn = _get_conn()
+        cur = conn.execute(
+            "UPDATE benutzer SET hash=?, salt=? WHERE kanzlei_id=? AND benutzername=? AND aktiv=1",
+            (neuer_hash, neuer_salt, kanzlei_id, benutzername),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    except Exception as ex:
+        log.error(f"setze_passwort_ohne_altes: {ex}")
+        return False
+
+
+def benutzer_rolle_setzen(benutzername: str, kanzlei_id: str, neue_rolle: str) -> bool:
+    """Rolle eines Benutzers in der Kanzlei ändern (nur bekannte Rollen)."""
+    from core.auth_postgres import auth_pg_enabled, pg_benutzer_rolle_setzen
+
+    rolle_map = {
+        "OWNER": "owner",
+        "owner": "owner",
+        "ADMIN": "admin",
+        "MITARBEITER": "assistent",
+        "admin": "admin",
+        "mitarbeiter": "assistent",
+        "steuerberater": "steuerberater",
+        "selbststaendig": "steuerberater",
+        "assistent": "assistent",
+        "user": "assistent",
+    }
+    rolle = rolle_map.get((neue_rolle or "").strip(), "assistent")
+
+    # Owner-Schutz: ein bestehender Owner darf nicht herabgestuft werden.
+    try:
+        from core.auth_postgres import auth_pg_enabled as _pg_on, pg_lade_benutzer_profil
+
+        if _pg_on():
+            current = pg_lade_benutzer_profil(benutzername, kanzlei_id) or {}
+        else:
+            row = _get_conn().execute(
+                "SELECT rolle FROM benutzer WHERE kanzlei_id = ? AND benutzername = ? AND aktiv = 1",
+                (kanzlei_id, benutzername),
+            ).fetchone()
+            current = dict(row) if row else {}
+        current_role = (current.get("rolle") or "").strip().lower()
+        if current_role == "owner" and rolle != "owner":
+            log.warning(
+                "benutzer_rolle_setzen: Owner-Schutz - %s in %s bleibt owner",
+                benutzername,
+                kanzlei_id,
+            )
+            return False
+    except Exception:
+        # Schutz darf den Pfad nicht hart blockieren, falls Profil-Lookup fehlt.
+        pass
+
+    try:
+        if auth_pg_enabled():
+            pg_benutzer_rolle_setzen(benutzername, kanzlei_id, rolle)
+            return True
+        conn = _get_conn()
+        conn.execute(
+            "UPDATE benutzer SET rolle = ? WHERE kanzlei_id = ? AND benutzername = ? AND aktiv = 1",
+            (rolle, kanzlei_id, benutzername),
+        )
+        conn.commit()
+        log.info(f"Rolle geändert: {benutzername} in {kanzlei_id} -> {rolle}")
+        return True
+    except Exception as e:
+        log.error(f"benutzer_rolle_setzen: {e}")
+        return False
+
+
+def benutzer_deaktivieren(benutzername: str, kanzlei_id: str = "default") -> bool:
+    from core.auth_postgres import auth_pg_enabled, pg_benutzer_deaktivieren
+
+    try:
+        if auth_pg_enabled():
+            pg_benutzer_deaktivieren(benutzername, kanzlei_id)
+            return True
         conn = _get_conn()
         conn.execute(
             "UPDATE benutzer SET aktiv = 0 WHERE kanzlei_id = ? AND benutzername = ?",
@@ -324,6 +578,72 @@ def benutzer_deaktivieren(benutzername: str, kanzlei_id: str = "default") -> boo
     except Exception as e:
         log.error(f"benutzer_deaktivieren: {e}")
         return False
+
+
+def hole_benutzer_kurz_nach_id(user_id: int, kanzlei_id: str) -> Optional[Dict[str, Any]]:
+    """Benutzerzeile nach numerischer ``id`` innerhalb ``kanzlei_id`` (aktiv oder inaktiv)."""
+    from core.auth_postgres import auth_pg_enabled
+    from core.pg_runtime import get_pg_connection
+
+    try:
+        if auth_pg_enabled():
+            with get_pg_connection().cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, benutzername, email, rolle, aktiv
+                    FROM benutzer WHERE id = %s AND kanzlei_id = %s
+                    """,
+                    (int(user_id), kanzlei_id),
+                )
+                row = cur.fetchone()
+            return dict(row) if row else None
+        conn = _get_conn()
+        row = conn.execute(
+            """
+            SELECT id, benutzername, email, rolle, aktiv
+            FROM benutzer WHERE id = ? AND kanzlei_id = ?
+            """,
+            (int(user_id), kanzlei_id),
+        ).fetchone()
+        return dict(row) if row else None
+    except Exception as e:
+        log.error(f"hole_benutzer_kurz_nach_id: {e}")
+        return None
+
+
+def benutzer_deaktivieren_nach_id(user_id: int, kanzlei_id: str) -> bool:
+    """Soft-Delete (``aktiv=0``) per numerischer User-ID, nur innerhalb ``kanzlei_id``."""
+    from core.auth_postgres import auth_pg_enabled
+    from core.pg_runtime import get_pg_connection
+
+    try:
+        if auth_pg_enabled():
+            cn = get_pg_connection()
+            with cn.cursor() as cur:
+                cur.execute(
+                    "UPDATE benutzer SET aktiv = 0 WHERE kanzlei_id = %s AND id = %s",
+                    (kanzlei_id, int(user_id)),
+                )
+                n = cur.rowcount
+            cn.commit()
+            return n > 0
+        conn = _get_conn()
+        cur = conn.execute(
+            "UPDATE benutzer SET aktiv = 0 WHERE kanzlei_id = ? AND id = ?",
+            (kanzlei_id, int(user_id)),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    except Exception as e:
+        log.error(f"benutzer_deaktivieren_nach_id: {e}")
+        return False
+
+
+def benutzer_rolle_setzen_nach_id(user_id: int, kanzlei_id: str, neue_rolle: str) -> bool:
+    row = hole_benutzer_kurz_nach_id(int(user_id), kanzlei_id)
+    if not row:
+        return False
+    return benutzer_rolle_setzen(str(row["benutzername"]), kanzlei_id, neue_rolle)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -366,12 +686,19 @@ def login(benutzername: str, passwort: str, ip: str = "unknown") -> Optional[Dic
         remaining = max(0, _gesperrte_ips.get(ip, time.time()) - time.time())
         raise ValueError(f"Zu viele Login-Versuche. Bitte {int(remaining)}s warten.")
 
+    from core.auth_postgres import auth_pg_enabled, pg_login_fetch, pg_login_touch
+
     try:
-        conn = _get_conn()
-        row = conn.execute(
-            "SELECT * FROM benutzer WHERE benutzername = ? AND aktiv = 1",
-            (benutzername,)
-        ).fetchone()
+        if auth_pg_enabled():
+            row = pg_login_fetch(benutzername)
+        else:
+            conn = _get_conn()
+            row = conn.execute(
+                "SELECT * FROM benutzer WHERE benutzername = ? AND aktiv = 1",
+                (benutzername,)
+            ).fetchone()
+            if row:
+                row = dict(row)
     except Exception as e:
         log.error(f"Login DB-Fehler: {e}")
         return None
@@ -389,21 +716,31 @@ def login(benutzername: str, passwort: str, ip: str = "unknown") -> Optional[Dic
     expires    = datetime.now() + timedelta(seconds=TOKEN_TTL)
 
     # Session enthält kanzlei_id — das ist der Kern des Multi-Kanzlei-Systems
-    _session_speichern(token, {
-        "benutzername": benutzername,
-        "kanzlei_id":   kanzlei_id,
-        "rolle":        row["rolle"],
-        "email":        row["email"] or "",
-        "expires":      expires.timestamp(),
-        "ip":           ip,
-    })
+    uid = row.get("id")
+    _session_speichern(
+        token,
+        {
+            "benutzername": benutzername,
+            "kanzlei_id": kanzlei_id,
+            "tenant_id": kanzlei_id,
+            "rolle": row["rolle"],
+            "email": row["email"] or "",
+            "user_id": int(uid) if uid is not None else None,
+            "expires": expires.timestamp(),
+            "ip": ip,
+        },
+    )
 
     try:
-        conn.execute(
-            "UPDATE benutzer SET letzter_login = datetime('now') WHERE benutzername = ? AND kanzlei_id = ?",
-            (benutzername, kanzlei_id)
-        )
-        conn.commit()
+        if auth_pg_enabled():
+            pg_login_touch(benutzername, kanzlei_id)
+        else:
+            conn = _get_conn()
+            conn.execute(
+                "UPDATE benutzer SET letzter_login = datetime('now') WHERE benutzername = ? AND kanzlei_id = ?",
+                (benutzername, kanzlei_id)
+            )
+            conn.commit()
     except Exception:
         pass
 
@@ -411,12 +748,228 @@ def login(benutzername: str, passwort: str, ip: str = "unknown") -> Optional[Dic
     log.info(f"Login: {benutzername} | Kanzlei: {kanzlei_id} | IP: {ip}")
 
     return {
-        "token":        token,
+        "token": token,
         "benutzername": benutzername,
-        "kanzlei_id":   kanzlei_id,
-        "rolle":        row["rolle"],
-        "expires":      expires.isoformat(),
+        "kanzlei_id": kanzlei_id,
+        "tenant_id": kanzlei_id,
+        "rolle": row["rolle"],
+        "email": row.get("email") or "",
+        "user_id": int(row["id"]) if row.get("id") is not None else None,
+        "expires": expires.isoformat(),
     }
+
+
+def login_by_email(email: str, passwort: str, ip: str = "unknown") -> Optional[Dict]:
+    """
+    Wie login(), aber Lookup über E-Mail (benutzer.email), case-insensitive.
+    Liefert dieselbe Session-Struktur inkl. benutzername für JWT-sub.
+    """
+    email = (email or "").strip()
+    if not email:
+        return None
+    if not _prüfe_rate_limit(ip):
+        remaining = max(0, _gesperrte_ips.get(ip, time.time()) - time.time())
+        raise ValueError(f"Zu viele Login-Versuche. Bitte {int(remaining)}s warten.")
+
+    from core.auth_postgres import auth_pg_enabled, pg_login_fetch_by_email, pg_login_touch
+
+    try:
+        if auth_pg_enabled():
+            row = pg_login_fetch_by_email(email)
+        else:
+            conn = _get_conn()
+            row = conn.execute(
+                "SELECT * FROM benutzer WHERE LOWER(TRIM(COALESCE(email, ''))) = LOWER(?) AND aktiv = 1",
+                (email,),
+            ).fetchone()
+            if row:
+                row = dict(row)
+    except Exception as e:
+        log.error(f"Login-by-email DB-Fehler: {e}")
+        return None
+
+    if not row:
+        log.warning("Login-by-email: keine Zeile für E-Mail")
+        return None
+
+    benutzername = row["benutzername"]
+    if not _verifiziere_passwort(passwort, row["hash"], row["salt"]):
+        log.warning(f"Login-by-email: falsches Passwort für '{benutzername}'")
+        return None
+
+    kanzlei_id = row["kanzlei_id"] or "default"
+    token = secrets.token_urlsafe(48)
+    expires = datetime.now() + timedelta(seconds=TOKEN_TTL)
+
+    uid = row.get("id")
+    _session_speichern(
+        token,
+        {
+            "benutzername": benutzername,
+            "kanzlei_id": kanzlei_id,
+            "tenant_id": kanzlei_id,
+            "rolle": row["rolle"],
+            "email": row.get("email") or "",
+            "user_id": int(uid) if uid is not None else None,
+            "expires": expires.timestamp(),
+            "ip": ip,
+        },
+    )
+
+    try:
+        if auth_pg_enabled():
+            pg_login_touch(benutzername, kanzlei_id)
+        else:
+            conn = _get_conn()
+            conn.execute(
+                "UPDATE benutzer SET letzter_login = datetime('now') WHERE benutzername = ? AND kanzlei_id = ?",
+                (benutzername, kanzlei_id),
+            )
+            conn.commit()
+    except Exception:
+        pass
+
+    _login_versuche[ip] = []
+    log.info(f"Login-by-email: {benutzername} | Kanzlei: {kanzlei_id} | IP: {ip}")
+
+    return {
+        "token": token,
+        "benutzername": benutzername,
+        "kanzlei_id": kanzlei_id,
+        "tenant_id": kanzlei_id,
+        "rolle": row["rolle"],
+        "email": row.get("email") or "",
+        "user_id": int(row["id"]) if row.get("id") is not None else None,
+        "expires": expires.isoformat(),
+    }
+
+
+def email_adresse_bereits_registriert(email: str) -> bool:
+    """True, wenn diese E-Mail (unabhängig von Kanzlei) schon in ``benutzer`` vorkommt."""
+    e = (email or "").strip()
+    if not e:
+        return False
+    from core.auth_postgres import auth_pg_enabled, pg_email_adresse_bereits_registriert
+
+    try:
+        if auth_pg_enabled():
+            return pg_email_adresse_bereits_registriert(e)
+        conn = _get_conn()
+        row = conn.execute(
+            """
+            SELECT 1 FROM benutzer
+            WHERE LOWER(TRIM(COALESCE(email, ''))) = LOWER(?)
+            LIMIT 1
+            """,
+            (e,),
+        ).fetchone()
+        return row is not None
+    except Exception as ex:
+        log.error(f"email_adresse_bereits_registriert: {ex}")
+        return True
+
+
+def _interner_benutzername_fuer_email(email: str) -> str:
+    """Stabiler interner Login-Name aus E-Mail (≤ 50 Zeichen, kollisionssicher)."""
+    norm = email.strip().lower()
+    h = hashlib.sha256(norm.encode("utf-8")).hexdigest()[:24]
+    return f"u{h}"
+
+
+def loginname_aus_email(email: str) -> str:
+    """Öffentlicher Helfer: interner Login-Name für E-Mail-Registrierung / Einladungen."""
+    return _interner_benutzername_fuer_email(email)
+
+
+def lade_benutzer_profil(benutzername: str, kanzlei_id: str = "default") -> Optional[Dict[str, Any]]:
+    """Aktiven Benutzer inkl. numerischer ``id`` für /api/me."""
+    from core.auth_postgres import auth_pg_enabled, pg_lade_benutzer_profil
+
+    try:
+        if auth_pg_enabled():
+            return pg_lade_benutzer_profil(benutzername, kanzlei_id)
+        conn = _get_conn()
+        row = conn.execute(
+            """
+            SELECT id, benutzername, email, rolle, kanzlei_id
+            FROM benutzer
+            WHERE benutzername = ? AND kanzlei_id = ? AND aktiv = 1
+            """,
+            (benutzername, kanzlei_id),
+        ).fetchone()
+        return dict(row) if row else None
+    except Exception as e:
+        log.error(f"lade_benutzer_profil: {e}")
+        return None
+
+
+def registriere_per_email(
+    email: str,
+    passwort: str,
+    *,
+    admin_key: Optional[str] = None,
+    rolle: Optional[str] = None,
+    invite_token: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    SaaS-Registrierung per E-Mail (Passwort ≥ 12, bcrypt in DB).
+
+    - **Standard:** eigene Kanzlei pro Signup (``erstelle_kanzlei``) + erste Rolle ``admin``
+      (oder ``rolle`` aus dem Request bei neuen Kanzleien).
+    - **Einladung:** gültiges ``invite_token`` → Beitritt zu bestehender Kanzlei; Rolle nur aus dem Token.
+    """
+    e = (email or "").strip().lower()
+    if not e or "@" not in e:
+        raise ValueError("invalid")
+    try:
+        _assert_strong_password(passwort, e)
+    except ValueError:
+        raise ValueError("invalid")
+    if email_adresse_bereits_registriert(e):
+        raise ValueError("invalid")
+
+    from core.tenant_invites import verify_tenant_invite_token
+
+    inv = verify_tenant_invite_token((invite_token or "").strip()) if invite_token else None
+
+    # Default: Public signup für SaaS-Growth.
+    # Invite-only: ohne Token nur mit Admin-Key (außer erster User), wenn ALLOW_PUBLIC_REGISTER=0.
+    allow_public = (os.getenv("ALLOW_PUBLIC_REGISTER") or "1").strip().lower() in {"1", "true", "yes", "on"}
+    if not inv and not allow_public and hat_irgendein_benutzer():
+        import secrets as sc
+
+        expected = (os.getenv("PORTAL_ADMIN_KEY") or "").strip()
+        if len(expected) < 20:
+            raise ValueError("invalid")
+        if not admin_key or not sc.compare_digest((admin_key or "").strip(), expected):
+            raise ValueError("invalid")
+
+    if inv:
+        kid = inv["kanzlei_id"]
+        lock = inv.get("email_lock")
+        if lock and lock != e:
+            raise ValueError("invalid")
+        eff_rolle = inv["role"]
+        if not hole_kanzlei(kid):
+            raise ValueError("invalid")
+    else:
+        local = e.split("@", 1)[0][:40]
+        tenant = erstelle_kanzlei(name=f"Kanzlei {local}", email=e, plan="starter")
+        kid = tenant["kanzlei_id"]
+        # Erste/r Nutzer/in einer neuen Kanzlei wird Owner — unabhängig vom UI-Wunsch.
+        # Damit gibt es pro Tenant immer genau eine unantastbare Top-Rolle.
+        eff_rolle = "owner"
+
+    bname = _interner_benutzername_fuer_email(e)
+    row = erstelle_benutzer(bname, passwort, rolle=eff_rolle, email=e, kanzlei_id=kid)
+    if inv and inv.get("jti"):
+        try:
+            from core.tenant_invite_records import invite_record_mark_used
+
+            invite_record_mark_used(jti=str(inv["jti"]), kanzlei_id=str(kid), used_email=e)
+        except Exception:
+            pass
+    return row
 
 
 def logout(token: str) -> bool:
@@ -427,6 +980,46 @@ def logout(token: str) -> bool:
         log.info(f"Logout: {user}")
         return True
     return False
+
+
+def logout_all_user_sessions(benutzername: str, kanzlei_id: str) -> int:
+    """
+    Invalidiert alle Sessions eines Benutzers innerhalb derselben Kanzlei.
+    Rückgabe: Anzahl invalidierter Sessions.
+    """
+    bname = (benutzername or "").strip()
+    kid = (kanzlei_id or "default").strip() or "default"
+    if not bname:
+        return 0
+
+    removed = 0
+
+    # In-memory sessions
+    for token, sess in list(_sessions.items()):
+        if str(sess.get("benutzername") or "").strip() == bname and str(sess.get("kanzlei_id") or "default").strip() == kid:
+            _sessions.pop(token, None)
+            removed += 1
+
+    # Redis sessions
+    r = _get_redis()
+    if r:
+        try:
+            for key in r.scan_iter("kanzlei:session:*"):
+                raw = r.get(key)
+                if not raw:
+                    continue
+                try:
+                    sess = json.loads(raw)
+                except Exception:
+                    continue
+                if str(sess.get("benutzername") or "").strip() == bname and str(sess.get("kanzlei_id") or "default").strip() == kid:
+                    r.delete(key)
+                    removed += 1
+        except Exception:
+            pass
+
+    log.info("Logout all sessions: %s | kanzlei=%s | invalidated=%s", bname, kid, removed)
+    return removed
 
 
 def verifiziere_session(token: str) -> Optional[Dict]:
