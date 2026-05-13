@@ -1373,6 +1373,9 @@ _AUTH_EXEMPT_EXACT_PATHS = frozenset(
         "/api/auth/registrieren",
         "/api/auth/setup-status",
         "/billing/stripe/config",
+        # Nginx / öffentliche Checks nutzen /api/* — Präfixe "/ready" schützen nicht "/api/ready".
+        "/api/health",
+        "/api/ready",
     }
 )
 _AUTH_EXEMPT_PREFIXES = (
