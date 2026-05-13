@@ -120,6 +120,8 @@ _API_GATEWAY_EXACT = frozenset(
         "/",
         "/health",
         "/ready",
+        "/api/health",
+        "/api/ready",
         "/api/v1/health",
         "/api/v1/meta",
         "/api/v1/introduction",
