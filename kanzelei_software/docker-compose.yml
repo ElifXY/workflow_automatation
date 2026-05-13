@@ -47,6 +47,10 @@ x-api-common: &api-common
     - .env.defaults
     - path: .env
       required: false
+  # DATABASE_URL baut Compose aus ${POSTGRES_PASSWORD} der Host-.env (Datei .env neben dieser YAML) bzw. Shell-Umgebung.
+  # Wichtig: Das Passwort in postgres_data wird nur beim ersten Anlegen des Volumes gesetzt. Späteres Ändern von
+  # POSTGRES_PASSWORD in .env ändert die bestehende DB nicht → API: „password authentication failed“. Lösung:
+  # Passwort wieder auf den ursprünglichen Wert setzen, in Postgres ALTER USER setzen, oder Volume postgres_data entfernen (Datenverlust).
   environment:
     DATABASE_URL: "postgresql://${POSTGRES_USER:-kanzlei}:${POSTGRES_PASSWORD:-KzDevOnly_ChangeBeforeProd_x9mK2vQ8wN4pL7a1b2c3d4}@postgres:5432/${POSTGRES_DB:-kanzlei_ai}"
     REDIS_URL: "redis://:${REDIS_PASSWORD:-KzDevOnly_ChangeBeforeProd_x9mK2vQ8wN4pL7a1b2c3d4}@redis:6379/0"
@@ -172,6 +176,7 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: kanzlei_postgres
+    # POSTGRES_* nur beim ersten Start des Named Volumes postgres_data wirksam; danach siehe Kommentar bei api DATABASE_URL.
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-kanzlei}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-KzDevOnly_ChangeBeforeProd_x9mK2vQ8wN4pL7a1b2c3d4}
