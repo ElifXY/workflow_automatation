@@ -11,6 +11,7 @@ FROM python:3.11-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     libmagic1 \
+    gosu \
     && rm -rf /var/lib/apt/lists/*
 
 # Arbeitsverzeichnis
@@ -31,10 +32,12 @@ RUN mkdir -p data/uploads data/backups data/dokumente \
 # Fallback, falls eine veraltete compose-Datei USE_POSTGRES_DATA nicht setzt (sonst Production + SQLite-Fehler).
 ENV USE_POSTGRES_DATA=1
 
-# Nicht-Root User (Sicherheit)
+# Nicht-Root User; Start als root nur für Entrypoint (chown Volumes), danach gosu → kanzlei
 RUN useradd -m -u 1000 kanzlei && \
-    chown -R kanzlei:kanzlei /app
-USER kanzlei
+    chown -R kanzlei:kanzlei /app && \
+    chmod +x /app/scripts/docker_api_entrypoint.sh
+
+ENTRYPOINT ["/app/scripts/docker_api_entrypoint.sh"]
 
 # Health-Check (127.0.0.1: konsistent mit compose; start_period groß für ersten Cold-Start)
 HEALTHCHECK --interval=15s --timeout=10s --start-period=120s --retries=10 \
