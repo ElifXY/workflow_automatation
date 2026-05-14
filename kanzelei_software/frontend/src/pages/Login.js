@@ -6,7 +6,7 @@
 import { useEffect, useState } from "react";
 import { ThemeQuickSwitch } from "../theme";
 
-const BASE = process.env.REACT_APP_API_URL || "/api";
+const apiBase = (process.env.REACT_APP_API_URL || "/api").replace(/\/$/, "");
 
 export default function Login({ onLogin }) {
   const [identity, setIdentity] = useState("");
@@ -42,7 +42,7 @@ export default function Login({ onLogin }) {
     let active = true;
     (async () => {
       try {
-        const res = await fetch(`${BASE}/auth/oauth/exchange`, {
+        const res = await fetch(`${apiBase}/auth/oauth/exchange`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ code }),
@@ -85,7 +85,7 @@ export default function Login({ onLogin }) {
         ? { email: trimmed.toLowerCase(), password: pass }
         : { benutzername: trimmed, passwort: pass };
       // Ein Endpunkt: /api/auth/login (LoginRequest) — gleiche Logik wie Registrierung (E-Mail + Passwort)
-      const res = await fetch(`${BASE}/auth/login`, {
+      const res = await fetch(`${apiBase}/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -145,7 +145,7 @@ export default function Login({ onLogin }) {
       return;
     }
     try {
-      const res = await fetch(`${BASE}/auth/email/resend`, {
+      const res = await fetch(`${apiBase}/auth/email/resend`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email }),
@@ -415,10 +415,10 @@ export default function Login({ onLogin }) {
         </div>
 
         <div style={{ marginTop: 14, display: "grid", gap: 8 }}>
-          <a href={`${BASE}/auth/oauth/google/start?redirect_to=${encodeURIComponent("/login")}`} style={{ color: "var(--text)", border: "1px solid var(--border2)", borderRadius: 10, padding: "10px 12px", textAlign: "center", background: "var(--bg3)" }}>
+          <a href={`${apiBase}/auth/oauth/google/start?redirect_to=${encodeURIComponent("/login")}`} style={{ color: "var(--text)", border: "1px solid var(--border2)", borderRadius: 10, padding: "10px 12px", textAlign: "center", background: "var(--bg3)" }}>
             Mit Google anmelden
           </a>
-          <a href={`${BASE}/auth/oauth/microsoft/start?redirect_to=${encodeURIComponent("/login")}`} style={{ color: "var(--text)", border: "1px solid var(--border2)", borderRadius: 10, padding: "10px 12px", textAlign: "center", background: "var(--bg3)" }}>
+          <a href={`${apiBase}/auth/oauth/microsoft/start?redirect_to=${encodeURIComponent("/login")}`} style={{ color: "var(--text)", border: "1px solid var(--border2)", borderRadius: 10, padding: "10px 12px", textAlign: "center", background: "var(--bg3)" }}>
             Mit Microsoft anmelden
           </a>
         </div>

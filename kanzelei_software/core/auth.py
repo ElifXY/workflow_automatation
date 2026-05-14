@@ -101,10 +101,20 @@ def _hash_passwort(passwort: str, salt: str = None) -> Tuple[str, str]:
     return hashed, "bcrypt"
 
 
-def _verifiziere_passwort(passwort: str, hash_gespeichert: str, salt: str) -> bool:
+def _verifiziere_passwort(passwort: str, hash_gespeichert: Any, salt: Any) -> bool:
+    def _txt(v: Any) -> str:
+        if v is None:
+            return ""
+        if isinstance(v, memoryview):
+            return v.tobytes().decode("utf-8", errors="replace")
+        if isinstance(v, (bytes, bytearray)):
+            return bytes(v).decode("utf-8", errors="replace")
+        return str(v).strip()
+
+    h = _txt(hash_gespeichert)
+    s = _txt(salt)
     # Neuer Standard: bcrypt (rohes bcrypt + passlib — gleiche Hashes, unterschiedliche Randfälle)
-    if (salt or "").lower() == "bcrypt" or (hash_gespeichert or "").startswith("$2"):
-        h = (hash_gespeichert or "").strip()
+    if s.lower() == "bcrypt" or h.startswith("$2"):
         if not h:
             return False
         try:
@@ -122,10 +132,10 @@ def _verifiziere_passwort(passwort: str, hash_gespeichert: str, salt: str) -> bo
 
     # Legacy-Fallback: PBKDF2
     neu_hash = hashlib.pbkdf2_hmac(
-        "sha256", passwort.encode("utf-8"), (salt or "").encode("utf-8"),
+        "sha256", passwort.encode("utf-8"), s.encode("utf-8"),
         iterations=260000,
     ).hex()
-    return hmac.compare_digest(neu_hash, hash_gespeichert)
+    return hmac.compare_digest(neu_hash, h)
 
 
 _PW_UPPER_RE = re.compile(r"[A-Z]")
@@ -789,7 +799,7 @@ def login_by_email(email: str, passwort: str, ip: str = "unknown") -> Optional[D
 
     internal_login = _interner_benutzername_fuer_email(email) if "@" in email else ""
 
-    from core.auth_postgres import auth_pg_enabled, pg_login_fetch_by_email, pg_login_touch
+    from core.auth_postgres import auth_pg_enabled, pg_login_fetch_by_email, pg_login_fetch, pg_login_touch
 
     try:
         if auth_pg_enabled():
@@ -824,8 +834,23 @@ def login_by_email(email: str, passwort: str, ip: str = "unknown") -> Optional[D
             if row:
                 row = dict(row)
     except Exception as e:
-        log.error(f"Login-by-email DB-Fehler: {e}")
-        return None
+        log.error("Login-by-email DB-Fehler: %s", e, exc_info=True)
+        row = None
+
+    if not row and internal_login:
+        try:
+            if auth_pg_enabled():
+                row = pg_login_fetch(internal_login)
+            else:
+                conn = _get_conn()
+                r2 = conn.execute(
+                    "SELECT * FROM benutzer WHERE benutzername = ? AND aktiv = 1",
+                    (internal_login,),
+                ).fetchone()
+                row = dict(r2) if r2 else None
+        except Exception as e2:
+            log.warning("login_by_email Fallback interner Benutzername: %s", e2)
+            row = None
 
     if not row:
         log.warning("Login-by-email: keine Zeile für E-Mail")

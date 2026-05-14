@@ -143,9 +143,14 @@ def pg_benutzer_deaktivieren(benutzername: str, kanzlei_id: str = "default") -> 
 
 
 def pg_login_fetch(benutzername: str) -> Optional[Dict[str, Any]]:
+    """``aktiv``: INTEGER 1 oder BOOLEAN true (ORM-Migrationen)."""
     with get_pg_connection().cursor() as cur:
         cur.execute(
-            "SELECT * FROM benutzer WHERE benutzername = %s AND aktiv = 1",
+            """
+            SELECT * FROM benutzer
+            WHERE benutzername = %s
+              AND (aktiv = 1 OR aktiv IS TRUE)
+            """,
             (benutzername,),
         )
         row = cur.fetchone()
@@ -193,7 +198,7 @@ def pg_login_fetch_by_email(email: str, internal_login: str = "") -> Optional[Di
             cur.execute(
                 """
                 SELECT * FROM benutzer
-                WHERE aktiv = 1
+                WHERE (aktiv = 1 OR aktiv IS TRUE)
                   AND (
                         LOWER(TRIM(COALESCE(email, ''))) = LOWER(TRIM(%s))
                      OR LOWER(TRIM(benutzername)) = LOWER(TRIM(%s))
@@ -207,7 +212,7 @@ def pg_login_fetch_by_email(email: str, internal_login: str = "") -> Optional[Di
             cur.execute(
                 """
                 SELECT * FROM benutzer
-                WHERE aktiv = 1
+                WHERE (aktiv = 1 OR aktiv IS TRUE)
                   AND (
                         LOWER(TRIM(COALESCE(email, ''))) = LOWER(TRIM(%s))
                      OR LOWER(TRIM(benutzername)) = LOWER(TRIM(%s))
