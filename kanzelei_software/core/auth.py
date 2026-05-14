@@ -102,10 +102,21 @@ def _hash_passwort(passwort: str, salt: str = None) -> Tuple[str, str]:
 
 
 def _verifiziere_passwort(passwort: str, hash_gespeichert: str, salt: str) -> bool:
-    # Neuer Standard: bcrypt
+    # Neuer Standard: bcrypt (rohes bcrypt + passlib — gleiche Hashes, unterschiedliche Randfälle)
     if (salt or "").lower() == "bcrypt" or (hash_gespeichert or "").startswith("$2"):
+        h = (hash_gespeichert or "").strip()
+        if not h:
+            return False
         try:
-            return bcrypt.checkpw(passwort.encode("utf-8"), hash_gespeichert.encode("utf-8"))
+            if bcrypt.checkpw(passwort.encode("utf-8"), h.encode("utf-8")):
+                return True
+        except Exception:
+            pass
+        try:
+            from passlib.context import CryptContext
+
+            ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+            return bool(ctx.verify(passwort, h))
         except Exception:
             return False
 
@@ -768,6 +779,8 @@ def login_by_email(email: str, passwort: str, ip: str = "unknown") -> Optional[D
     internem Namen ``u``+SHA256 (Standard bei ``registriere_per_email``).
     """
     email = (email or "").strip()
+    if "@" in email:
+        email = email.lower()
     if not email:
         return None
     if not _prüfe_rate_limit(ip):

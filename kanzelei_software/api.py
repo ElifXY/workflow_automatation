@@ -4796,6 +4796,8 @@ async def auth_login(data: LoginRequest, request: Request):
                 )
             except Exception:
                 pass
+            if (data.email or "").strip():
+                raise HTTPException(401, "E-Mail oder Passwort falsch.")
             raise HTTPException(401, "Benutzername oder Passwort falsch")
         require_verified = (os.getenv("AUTH_REQUIRE_EMAIL_VERIFIED") or "1").strip().lower() in {"1", "true", "yes", "on"}
         mail = str(result.get("email") or "").strip().lower()

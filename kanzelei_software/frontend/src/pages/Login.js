@@ -80,11 +80,12 @@ export default function Login({ onLogin }) {
     setLoading(true); setError(""); setResendInfo("");
     try {
       const isEmail = identity.includes("@");
+      const trimmed = identity.trim();
       const body = isEmail
-        ? { email: identity.trim(), password: pass }
-        : { benutzername: identity.trim(), passwort: pass };
-      const loginPath = isEmail ? `${BASE}/login` : `${BASE}/auth/login`;
-      const res  = await fetch(loginPath, {
+        ? { email: trimmed.toLowerCase(), password: pass }
+        : { benutzername: trimmed, passwort: pass };
+      // Ein Endpunkt: /api/auth/login (LoginRequest) — gleiche Logik wie Registrierung (E-Mail + Passwort)
+      const res = await fetch(`${BASE}/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
