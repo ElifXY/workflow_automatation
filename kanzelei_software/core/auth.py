@@ -579,6 +579,8 @@ def finde_benutzer_nach_email(email: str) -> Optional[Dict[str, Any]]:
     e = (email or "").strip()
     if not e:
         return None
+    if "@" in e:
+        e = e.lower()
     from core.auth_postgres import auth_pg_enabled
 
     try:
@@ -598,7 +600,11 @@ def finde_benutzer_nach_email(email: str) -> Optional[Dict[str, Any]]:
                     (e,),
                 )
                 row = cur.fetchone()
-            return dict(row) if row else None
+            if row:
+                return dict(row)
+            if _auth_sqlite_login_fallback_enabled():
+                return _sqlite_finde_benutzer_nach_email_row(e)
+            return None
         conn = _get_conn()
         row = conn.execute(
             """
@@ -614,6 +620,28 @@ def finde_benutzer_nach_email(email: str) -> Optional[Dict[str, Any]]:
         return dict(row) if row else None
     except Exception as ex:
         log.error(f"finde_benutzer_nach_email: {ex}")
+        return None
+
+
+def _sqlite_finde_benutzer_nach_email_row(e: str) -> Optional[Dict[str, Any]]:
+    try:
+        from core.daten_speicher import get_connection
+
+        conn = get_connection()
+        row = conn.execute(
+            """
+            SELECT id, benutzername, kanzlei_id, email, rolle, aktiv
+            FROM benutzer
+            WHERE LOWER(TRIM(COALESCE(email, ''))) = LOWER(TRIM(?))
+              AND aktiv = 1
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (e,),
+        ).fetchone()
+        return dict(row) if row else None
+    except Exception as ex:
+        log.warning("_sqlite_finde_benutzer_nach_email_row: %s", ex)
         return None
 
 
@@ -636,7 +664,24 @@ def setze_passwort_ohne_altes(benutzername: str, kanzlei_id: str, neues_passwort
                 )
                 changed = cur.rowcount
             cn.commit()
-            return changed > 0
+            if changed > 0:
+                return True
+            if _auth_sqlite_login_fallback_enabled():
+                try:
+                    from core.daten_speicher import get_connection
+
+                    conn = get_connection()
+                    cur = conn.execute(
+                        "UPDATE benutzer SET hash=?, salt=? WHERE kanzlei_id=? AND benutzername=? AND aktiv=1",
+                        (neuer_hash, neuer_salt, kanzlei_id, benutzername),
+                    )
+                    conn.commit()
+                    if cur.rowcount > 0:
+                        log.info("Passwort geändert (SQLite-Fallback): %s in %s", benutzername, kanzlei_id)
+                        return True
+                except Exception as e2:
+                    log.warning("setze_passwort_ohne_altes SQLite-Fallback: %s", e2)
+            return False
         conn = _get_conn()
         cur = conn.execute(
             "UPDATE benutzer SET hash=?, salt=? WHERE kanzlei_id=? AND benutzername=? AND aktiv=1",
