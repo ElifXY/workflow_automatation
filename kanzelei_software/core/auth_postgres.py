@@ -183,7 +183,7 @@ def pg_lade_benutzer_profil(benutzername: str, kanzlei_id: str) -> Optional[Dict
 
 
 def pg_login_fetch_by_email(email: str) -> Optional[Dict[str, Any]]:
-    """Aktiven Benutzer anhand E-Mail (case-insensitive, getrimmt)."""
+    """Aktiven Benutzer: Treffer über Spalte ``email`` **oder** ``benutzername`` (gleicher String, z. B. E-Mail als Loginname)."""
     e = (email or "").strip()
     if not e:
         return None
@@ -191,15 +191,18 @@ def pg_login_fetch_by_email(email: str) -> Optional[Dict[str, Any]]:
         cur.execute(
             """
             SELECT * FROM benutzer
-            WHERE LOWER(TRIM(COALESCE(email, ''))) = LOWER(TRIM(%s))
-              AND aktiv = 1
+            WHERE aktiv = 1
+              AND (
+                    LOWER(TRIM(COALESCE(email, ''))) = LOWER(TRIM(%s))
+                 OR LOWER(TRIM(benutzername)) = LOWER(TRIM(%s))
+                  )
             LIMIT 2
             """,
-            (e,),
+            (e, e),
         )
         rows = cur.fetchall()
     if len(rows) > 1:
-        log.warning("Login-by-email: mehrere aktive Benutzer mit derselben E-Mail — erste Zeile genutzt")
+        log.warning("Login-by-email: mehrere aktive Benutzer — erste Zeile genutzt")
     return dict(rows[0]) if rows else None
 
 

@@ -764,8 +764,8 @@ def login(benutzername: str, passwort: str, ip: str = "unknown") -> Optional[Dic
 
 def login_by_email(email: str, passwort: str, ip: str = "unknown") -> Optional[Dict]:
     """
-    Wie login(), aber Lookup über E-Mail (benutzer.email), case-insensitive.
-    Liefert dieselbe Session-Struktur inkl. benutzername für JWT-sub.
+    Wie login(), aber Lookup über E-Mail (``benutzer.email``) **oder** gleichen String in
+    ``benutzername`` (häufig: E-Mail als interner Loginname, ``email``-Spalte leer).
     """
     email = (email or "").strip()
     if not email:
@@ -782,8 +782,15 @@ def login_by_email(email: str, passwort: str, ip: str = "unknown") -> Optional[D
         else:
             conn = _get_conn()
             row = conn.execute(
-                "SELECT * FROM benutzer WHERE LOWER(TRIM(COALESCE(email, ''))) = LOWER(?) AND aktiv = 1",
-                (email,),
+                """
+                SELECT * FROM benutzer
+                WHERE aktiv = 1
+                  AND (
+                        LOWER(TRIM(COALESCE(email, ''))) = LOWER(?)
+                     OR LOWER(TRIM(benutzername)) = LOWER(?)
+                      )
+                """,
+                (email, email),
             ).fetchone()
             if row:
                 row = dict(row)
