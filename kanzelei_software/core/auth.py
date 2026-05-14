@@ -707,6 +707,8 @@ def login(benutzername: str, passwort: str, ip: str = "unknown") -> Optional[Dic
     Login. Gibt Session-Dict mit kanzlei_id zurück.
     Die kanzlei_id bestimmt welche Daten der User sieht.
     """
+    benutzername = (benutzername or "").strip()
+    passwort = (passwort or "").strip()
     if not _prüfe_rate_limit(ip):
         remaining = max(0, _gesperrte_ips.get(ip, time.time()) - time.time())
         raise ValueError(f"Zu viele Login-Versuche. Bitte {int(remaining)}s warten.")
@@ -726,6 +728,13 @@ def login(benutzername: str, passwort: str, ip: str = "unknown") -> Optional[Dic
                 row = dict(row)
     except Exception as e:
         log.error(f"Login DB-Fehler: {e}")
+        try:
+            if auth_pg_enabled():
+                from core.pg_runtime import get_pg_connection
+
+                get_pg_connection().rollback()
+        except Exception:
+            pass
         return None
 
     if not row:
@@ -790,6 +799,7 @@ def login_by_email(email: str, passwort: str, ip: str = "unknown") -> Optional[D
     internem Namen ``u``+SHA256 (Standard bei ``registriere_per_email``).
     """
     email = (email or "").strip()
+    passwort = (passwort or "").strip()
     if "@" in email:
         email = email.lower()
     if not email:

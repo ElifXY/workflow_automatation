@@ -9,7 +9,7 @@ from __future__ import annotations
 from fastapi import HTTPException, BackgroundTasks, Query, status, Depends, Header, Body, Request
 from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse
 from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 from typing import Optional, List, Dict, Any
 
 from datetime import datetime, timedelta
@@ -3831,7 +3831,12 @@ _EMAIL_LOGIN_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", re.IGNORECASE)
 class EmailPasswordLoginRequest(BaseModel):
     """OAuth-ähnlicher Login per E-Mail (Tabellenfeld ``benutzer.email``)."""
     email: str = Field(..., min_length=5, max_length=254)
-    password: str = Field(..., min_length=8, max_length=500)
+    password: str = Field(
+        ...,
+        min_length=8,
+        max_length=500,
+        validation_alias=AliasChoices("password", "passwort"),
+    )
 
     @field_validator("email")
     @classmethod
@@ -4127,7 +4132,12 @@ def _email_is_verified(email: str) -> bool:
     e = (email or "").strip().lower()
     if not e:
         return False
-    return bool(_email_verified_map().get(e, False))
+    m = _email_verified_map()
+    # Nur explizit gesetzte False-Werte (z. B. nach /api/register) blockieren.
+    # Fehlender Schlüssel = Konten vor dem Verifizierungs-Store / manuelle Admin-Nutzer → als verifiziert behandeln.
+    if e in m:
+        return bool(m[e])
+    return True
 
 
 def _email_verify_tokens() -> List[Dict[str, Any]]:
@@ -4806,10 +4816,14 @@ async def auth_login(data: LoginRequest, request: Request):
     ip = _get_client_ip(request)
     try:
         if (data.email or "").strip():
-            pw = str(data.password or data.passwort or "")
+            pw = str(data.password or data.passwort or "").strip()
             result = login_by_email(str(data.email), pw, ip=ip)
         else:
-            result = login(str(data.benutzername or ""), str(data.passwort or ""), ip=ip)
+            result = login(
+                str(data.benutzername or "").strip(),
+                str(data.passwort or "").strip(),
+                ip=ip,
+            )
         if not result:
             try:
                 from backend.audit import audit_event as _audit
@@ -4837,7 +4851,8 @@ async def auth_login(data: LoginRequest, request: Request):
             raise HTTPException(403, "E-Mail noch nicht bestätigt")
         kid = result.get("kanzlei_id", "default")
         log_store = DatenSpeicher(kanzlei_id=kid)
-        log_store.log_eintrag(f"LOGIN | {data.benutzername}", benutzer=data.benutzername, ip=ip)
+        _log_bn = str(result.get("benutzername") or data.benutzername or data.email or "?").strip()
+        log_store.log_eintrag(f"LOGIN | {_log_bn}", benutzer=_log_bn, ip=ip)
         try:
             from backend.audit import audit_event as _audit
             _audit(result, "LOGIN_OK", status="ok", ip=ip)
@@ -4939,7 +4954,7 @@ async def api_login_email_jwt(data: EmailPasswordLoginRequest, request: Request)
         raise HTTPException(503, "System nicht initialisiert: bitte zuerst einen Admin registrieren")
     ip = _get_client_ip(request)
     try:
-        result = login_by_email(data.email, data.password, ip=ip)
+        result = login_by_email(data.email, (data.password or "").strip(), ip=ip)
     except ValueError as e:
         raise HTTPException(429, str(e))
     if not result:
