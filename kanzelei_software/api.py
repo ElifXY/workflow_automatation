@@ -88,6 +88,7 @@ from backend.feature_gate import should_block_advanced_path
 from backend.tenant import tenant_id_from_user
 from core.rbac import has_permission
 from core.tenant_nav_policy import merged_settings_for_user
+from core.pg_runtime import pg_primary_db
 from modules.settings_manager import setting_holen as global_setting_holen
 
 
@@ -1093,10 +1094,11 @@ async def startup_event():
             prod_errs.append(
                 "DATABASE_URL fehlt: Production benötigt Postgres-Verbindung (Compose setzt sie beim Service api)."
             )
-        elif not database_url.lower().startswith("postgresql://"):
-            prod_errs.append(
-                "Production verlangt PostgreSQL: DATABASE_URL muss mit postgresql:// beginnen."
-            )
+        else:
+            if not pg_primary_db():
+                prod_errs.append(
+                    "Production verlangt PostgreSQL: DATABASE_URL muss postgresql://… oder postgres://… sein."
+                )
         if Path("data").exists():
             json_runtime = [
                 str(p) for p in Path("data").rglob("*.json")
@@ -3791,10 +3793,11 @@ class LoginRequest(BaseModel):
 
     model_config = ConfigDict(str_strip_whitespace=True, extra="ignore")
 
-    benutzername: Optional[str] = Field(default=None, min_length=2)
-    passwort: Optional[str] = Field(default=None, min_length=4)
+    benutzername: Optional[str] = Field(default=None, min_length=2, max_length=200)
+    passwort: Optional[str] = Field(default=None, max_length=500)
     email: Optional[str] = Field(default=None, min_length=5, max_length=254)
-    password: Optional[str] = Field(default=None, min_length=8, max_length=500)
+    # Kein min_length: ältere Konten / importierte Nutzer können kürzere Passwörter haben.
+    password: Optional[str] = Field(default=None, max_length=500)
 
     @field_validator("benutzername", "passwort", "email", "password", mode="before")
     @classmethod
@@ -3822,6 +3825,8 @@ class LoginRequest(BaseModel):
         has_password = bool(
             (self.password or "").strip() or (self.passwort or "").strip()
         )
+        if has_user and has_passwort and len((self.passwort or "").strip()) < 4:
+            raise ValueError("passwort zu kurz")
         if (has_user and has_passwort) or (has_email and has_password):
             return self
         raise ValueError("Provide benutzername+passwort or email+password")
@@ -3838,7 +3843,7 @@ class EmailPasswordLoginRequest(BaseModel):
     email: str = Field(..., min_length=5, max_length=254)
     password: str = Field(
         ...,
-        min_length=8,
+        min_length=4,
         max_length=500,
         validation_alias=AliasChoices("password", "passwort"),
     )
@@ -5638,7 +5643,7 @@ _api_data_struct = _APIRouterUsersData(prefix="/api/data", tags=["Data"])
 
 @_api_data_struct.get("/status")
 def api_data_status(_user: dict = Depends(get_current_user)):
-    du_pg = (os.getenv("DATABASE_URL") or "").strip().lower().startswith("postgresql://")
+    du_pg = pg_primary_db()
     use_pg_m = (os.getenv("USE_POSTGRES_DATA") or "").strip().lower() in ("1", "true", "yes")
     pg_only = (os.getenv("POSTGRES_ONLY_DATA") or "").strip().lower() in ("1", "true", "yes")
     kid_status = _user.get("tenant_id") or _user.get("kanzlei_id")

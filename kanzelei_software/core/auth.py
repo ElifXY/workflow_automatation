@@ -47,14 +47,26 @@ def _auth_sqlite_login_fallback_enabled() -> bool:
     Docker-Dev/Hybrid: DATABASE_URL=Postgres (Auth-Tabellen dort), gleichzeitig legacy ``benutzer``
     in SQLite (DATA_DIR/kanzlei.db). Ohne Fallback schlägt Login mit korrekten Daten fehl.
 
-    Abschalten: AUTH_SQLITE_LOGIN_FALLBACK=0. In Production nie aktiv (ENVIRONMENT=production).
+    Abschalten: AUTH_SQLITE_LOGIN_FALLBACK=0.
+
+    Production: Fallback standardmäßig aus; bei bewusstem Hybrid (ALLOW_SQLITE_FALLBACK=1)
+    ebenfalls aktiv, damit Login nicht an einer leeren PG-``benutzer``-Tabelle scheitert.
     """
     if (os.getenv("AUTH_SQLITE_LOGIN_FALLBACK") or "").strip().lower() in ("0", "false", "no"):
         return False
-    if (os.getenv("ENVIRONMENT") or os.getenv("APP_ENV") or "development").lower() == "production":
+    from core.pg_runtime import pg_primary_db
+
+    if not pg_primary_db():
         return False
-    du = (os.getenv("DATABASE_URL") or "").strip().lower()
-    return du.startswith("postgresql://")
+    env = (os.getenv("ENVIRONMENT") or os.getenv("APP_ENV") or "development").lower()
+    if env == "production":
+        return (os.getenv("ALLOW_SQLITE_FALLBACK") or "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+    return True
 
 
 def _sqlite_login_fetch_by_username(benutzername: str) -> Optional[Dict]:

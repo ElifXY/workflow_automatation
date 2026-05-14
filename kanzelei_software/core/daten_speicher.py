@@ -67,10 +67,9 @@ def _pg_mandanten_mode() -> bool:
     """
     if not _postgres_data_flag_on():
         return False
-    du = (os.getenv("DATABASE_URL") or "").strip().lower()
-    if not du.startswith("postgresql://"):
+    if not pg_primary_db():
         raise RuntimeError(
-            "USE_POSTGRES_DATA ist gesetzt: DATABASE_URL muss postgresql://… sein "
+            "USE_POSTGRES_DATA ist gesetzt: DATABASE_URL muss postgresql://… oder postgres://… sein "
             "(Schema scripts/postgres_bootstrap.sql, Daten scripts/migrate_sqlite_to_postgres.py)."
         )
     return True
@@ -344,14 +343,13 @@ def get_connection(kanzlei_id: str = DEFAULT_KID) -> sqlite3.Connection:
             "Vollständige PostgreSQL-Migration für alle Domänen erforderlich (oder Flag entfernen)."
         )
     environment = (os.getenv("ENVIRONMENT") or os.getenv("APP_ENV") or "development").lower()
-    du = (os.getenv("DATABASE_URL") or "").strip().lower()
     if (
         environment == "production"
-        and du.startswith("postgresql://")
+        and pg_primary_db()
         and not _allow_sqlite_fallback()
     ):
         raise RuntimeError(
-            "Production mit DATABASE_URL=postgresql://…: SQLite get_connection ist deaktiviert. "
+            "Production mit DATABASE_URL=PostgreSQL: SQLite get_connection ist deaktiviert. "
             "Nur PostgreSQL-Datenpfad nutzen oder temporär ALLOW_SQLITE_FALLBACK=1 setzen."
         )
     if environment == "production" and not _pg_mandanten_mode():
@@ -360,7 +358,7 @@ def get_connection(kanzlei_id: str = DEFAULT_KID) -> sqlite3.Connection:
             "DATABASE_URL=postgresql://… (siehe docker-compose.yml beim Service api), oder "
             "für reine Test-Umgebungen ENVIRONMENT=development. "
             f"Aktuell: USE_POSTGRES_DATA={os.getenv('USE_POSTGRES_DATA')!r}, "
-            f"DATABASE_URL ist Postgres-DSN: {(os.getenv('DATABASE_URL') or '').strip().lower().startswith('postgresql')!r}."
+            f"DATABASE_URL ist Postgres-DSN: {pg_primary_db()!r}."
         )
     if _pg_mandanten_mode():
         if not _pg_hybrid_logged:
@@ -369,7 +367,7 @@ def get_connection(kanzlei_id: str = DEFAULT_KID) -> sqlite3.Connection:
                 DB_PFAD,
             )
             _pg_hybrid_logged = True
-    elif du.startswith("postgresql://") and not _pg_sqlite_warned:
+    elif pg_primary_db() and not _pg_sqlite_warned:
         log.warning(
             "DATABASE_URL ist PostgreSQL: API-Keys/Webhooks/Outbox/Usage liegen auf Postgres; "
             "Mandanten/Belege ggf. weiter SQLite (%s) ohne vollständige Migration.",
@@ -427,11 +425,10 @@ def init_db():
             return
 
     environment = (os.getenv("ENVIRONMENT") or os.getenv("APP_ENV") or "development").lower()
-    du = (os.getenv("DATABASE_URL") or "").strip().lower()
     # Wie get_connection(): striktes Production + Postgres ohne ALLOW_SQLITE_FALLBACK → kein SQLite-DDL
     if (
         environment == "production"
-        and du.startswith("postgresql://")
+        and pg_primary_db()
         and not _allow_sqlite_fallback()
     ):
         return

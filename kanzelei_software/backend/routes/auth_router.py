@@ -60,9 +60,12 @@ def api_register_email(request: Request, data: Dict[str, Any] = Body(...)):
 
 
 @router.post("/auth/logout", summary="Logout — Session beenden")
-def auth_logout(authorization: Optional[str] = Header(None)):
+def auth_logout(
+    authorization: Optional[str] = Header(None),
+    current_user: dict = Depends(get_current_user),
+):
     root = _root()
-    return root.auth_logout(authorization)
+    return root.auth_logout(authorization, current_user)
 
 
 @router.post("/auth/refresh", summary="Neues Access-Token aus Refresh-Token")
