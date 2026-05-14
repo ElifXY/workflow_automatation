@@ -764,8 +764,8 @@ def login(benutzername: str, passwort: str, ip: str = "unknown") -> Optional[Dic
 
 def login_by_email(email: str, passwort: str, ip: str = "unknown") -> Optional[Dict]:
     """
-    Wie login(), aber Lookup über E-Mail (``benutzer.email``) **oder** gleichen String in
-    ``benutzername`` (häufig: E-Mail als interner Loginname, ``email``-Spalte leer).
+    Lookup über ``benutzer.email``, identischen ``benutzername`` (selten) oder
+    internem Namen ``u``+SHA256 (Standard bei ``registriere_per_email``).
     """
     email = (email or "").strip()
     if not email:
@@ -774,24 +774,40 @@ def login_by_email(email: str, passwort: str, ip: str = "unknown") -> Optional[D
         remaining = max(0, _gesperrte_ips.get(ip, time.time()) - time.time())
         raise ValueError(f"Zu viele Login-Versuche. Bitte {int(remaining)}s warten.")
 
+    internal_login = _interner_benutzername_fuer_email(email) if "@" in email else ""
+
     from core.auth_postgres import auth_pg_enabled, pg_login_fetch_by_email, pg_login_touch
 
     try:
         if auth_pg_enabled():
-            row = pg_login_fetch_by_email(email)
+            row = pg_login_fetch_by_email(email, internal_login)
         else:
             conn = _get_conn()
-            row = conn.execute(
-                """
-                SELECT * FROM benutzer
-                WHERE aktiv = 1
-                  AND (
-                        LOWER(TRIM(COALESCE(email, ''))) = LOWER(?)
-                     OR LOWER(TRIM(benutzername)) = LOWER(?)
-                      )
-                """,
-                (email, email),
-            ).fetchone()
+            if internal_login:
+                row = conn.execute(
+                    """
+                    SELECT * FROM benutzer
+                    WHERE aktiv = 1
+                      AND (
+                            LOWER(TRIM(COALESCE(email, ''))) = LOWER(?)
+                         OR LOWER(TRIM(benutzername)) = LOWER(?)
+                         OR benutzername = ?
+                          )
+                    """,
+                    (email, email, internal_login),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT * FROM benutzer
+                    WHERE aktiv = 1
+                      AND (
+                            LOWER(TRIM(COALESCE(email, ''))) = LOWER(?)
+                         OR LOWER(TRIM(benutzername)) = LOWER(?)
+                          )
+                    """,
+                    (email, email),
+                ).fetchone()
             if row:
                 row = dict(row)
     except Exception as e:

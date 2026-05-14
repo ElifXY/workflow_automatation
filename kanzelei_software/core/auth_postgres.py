@@ -182,24 +182,40 @@ def pg_lade_benutzer_profil(benutzername: str, kanzlei_id: str) -> Optional[Dict
     return dict(row) if row else None
 
 
-def pg_login_fetch_by_email(email: str) -> Optional[Dict[str, Any]]:
-    """Aktiven Benutzer: Treffer über Spalte ``email`` **oder** ``benutzername`` (gleicher String, z. B. E-Mail als Loginname)."""
+def pg_login_fetch_by_email(email: str, internal_login: str = "") -> Optional[Dict[str, Any]]:
+    """Treffer über ``email``, rohem ``benutzername`` oder internem Hash-Login ``u…`` (Registrierung per E-Mail)."""
     e = (email or "").strip()
     if not e:
         return None
+    internal = (internal_login or "").strip()
     with get_pg_connection().cursor() as cur:
-        cur.execute(
-            """
-            SELECT * FROM benutzer
-            WHERE aktiv = 1
-              AND (
-                    LOWER(TRIM(COALESCE(email, ''))) = LOWER(TRIM(%s))
-                 OR LOWER(TRIM(benutzername)) = LOWER(TRIM(%s))
-                  )
-            LIMIT 2
-            """,
-            (e, e),
-        )
+        if internal:
+            cur.execute(
+                """
+                SELECT * FROM benutzer
+                WHERE aktiv = 1
+                  AND (
+                        LOWER(TRIM(COALESCE(email, ''))) = LOWER(TRIM(%s))
+                     OR LOWER(TRIM(benutzername)) = LOWER(TRIM(%s))
+                     OR benutzername = %s
+                      )
+                LIMIT 2
+                """,
+                (e, e, internal),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT * FROM benutzer
+                WHERE aktiv = 1
+                  AND (
+                        LOWER(TRIM(COALESCE(email, ''))) = LOWER(TRIM(%s))
+                     OR LOWER(TRIM(benutzername)) = LOWER(TRIM(%s))
+                      )
+                LIMIT 2
+                """,
+                (e, e),
+            )
         rows = cur.fetchall()
     if len(rows) > 1:
         log.warning("Login-by-email: mehrere aktive Benutzer — erste Zeile genutzt")
