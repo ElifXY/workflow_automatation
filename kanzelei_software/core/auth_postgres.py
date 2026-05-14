@@ -143,14 +143,10 @@ def pg_benutzer_deaktivieren(benutzername: str, kanzlei_id: str = "default") -> 
 
 
 def pg_login_fetch(benutzername: str) -> Optional[Dict[str, Any]]:
-    """``aktiv``: INTEGER 1 oder BOOLEAN true (ORM-Migrationen)."""
+    """Spalte ``aktiv`` ist im Bootstrap INTEGER (0/1); ``IS TRUE`` ist in PG nur für BOOLEAN erlaubt."""
     with get_pg_connection().cursor() as cur:
         cur.execute(
-            """
-            SELECT * FROM benutzer
-            WHERE benutzername = %s
-              AND (aktiv = 1 OR aktiv IS TRUE)
-            """,
+            "SELECT * FROM benutzer WHERE benutzername = %s AND aktiv = 1",
             (benutzername,),
         )
         row = cur.fetchone()
@@ -198,7 +194,7 @@ def pg_login_fetch_by_email(email: str, internal_login: str = "") -> Optional[Di
             cur.execute(
                 """
                 SELECT * FROM benutzer
-                WHERE (aktiv = 1 OR aktiv IS TRUE)
+                WHERE aktiv = 1
                   AND (
                         LOWER(TRIM(COALESCE(email, ''))) = LOWER(TRIM(%s))
                      OR LOWER(TRIM(benutzername)) = LOWER(TRIM(%s))
@@ -212,7 +208,7 @@ def pg_login_fetch_by_email(email: str, internal_login: str = "") -> Optional[Di
             cur.execute(
                 """
                 SELECT * FROM benutzer
-                WHERE (aktiv = 1 OR aktiv IS TRUE)
+                WHERE aktiv = 1
                   AND (
                         LOWER(TRIM(COALESCE(email, ''))) = LOWER(TRIM(%s))
                      OR LOWER(TRIM(benutzername)) = LOWER(TRIM(%s))

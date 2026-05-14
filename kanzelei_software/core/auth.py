@@ -836,6 +836,13 @@ def login_by_email(email: str, passwort: str, ip: str = "unknown") -> Optional[D
     except Exception as e:
         log.error("Login-by-email DB-Fehler: %s", e, exc_info=True)
         row = None
+        try:
+            if auth_pg_enabled():
+                from core.pg_runtime import get_pg_connection
+
+                get_pg_connection().rollback()
+        except Exception:
+            pass
 
     if not row and internal_login:
         try:
