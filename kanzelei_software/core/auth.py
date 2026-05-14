@@ -42,6 +42,86 @@ def _sanitize_login_passwort(pw: str) -> str:
     return _ZW_JOINER_RE.sub("", str(pw or "")).strip()
 
 
+def _auth_sqlite_login_fallback_enabled() -> bool:
+    """
+    Docker-Dev/Hybrid: DATABASE_URL=Postgres (Auth-Tabellen dort), gleichzeitig legacy ``benutzer``
+    in SQLite (DATA_DIR/kanzlei.db). Ohne Fallback schlägt Login mit korrekten Daten fehl.
+
+    Abschalten: AUTH_SQLITE_LOGIN_FALLBACK=0. In Production nie aktiv (ENVIRONMENT=production).
+    """
+    if (os.getenv("AUTH_SQLITE_LOGIN_FALLBACK") or "").strip().lower() in ("0", "false", "no"):
+        return False
+    if (os.getenv("ENVIRONMENT") or os.getenv("APP_ENV") or "development").lower() == "production":
+        return False
+    du = (os.getenv("DATABASE_URL") or "").strip().lower()
+    return du.startswith("postgresql://")
+
+
+def _sqlite_login_fetch_by_username(benutzername: str) -> Optional[Dict]:
+    try:
+        from core.daten_speicher import get_connection
+
+        conn = get_connection()
+        row = conn.execute(
+            "SELECT * FROM benutzer WHERE benutzername = ? AND aktiv = 1",
+            (benutzername,),
+        ).fetchone()
+        return dict(row) if row else None
+    except Exception as e:
+        log.warning("SQLite-Fallback login (Benutzername): %s", e)
+        return None
+
+
+def _sqlite_login_fetch_by_email(email: str, internal_login: str) -> Optional[Dict]:
+    try:
+        from core.daten_speicher import get_connection
+
+        conn = get_connection()
+        if internal_login:
+            row = conn.execute(
+                """
+                SELECT * FROM benutzer
+                WHERE aktiv = 1
+                  AND (
+                        LOWER(TRIM(COALESCE(email, ''))) = LOWER(?)
+                     OR LOWER(TRIM(benutzername)) = LOWER(?)
+                     OR benutzername = ?
+                      )
+                """,
+                (email, email, internal_login),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """
+                SELECT * FROM benutzer
+                WHERE aktiv = 1
+                  AND (
+                        LOWER(TRIM(COALESCE(email, ''))) = LOWER(?)
+                     OR LOWER(TRIM(benutzername)) = LOWER(?)
+                      )
+                """,
+                (email, email),
+            ).fetchone()
+        return dict(row) if row else None
+    except Exception as e:
+        log.warning("SQLite-Fallback login-by-email: %s", e)
+        return None
+
+
+def _sqlite_login_touch(benutzername: str, kanzlei_id: str) -> None:
+    try:
+        from core.daten_speicher import get_connection
+
+        conn = get_connection()
+        conn.execute(
+            "UPDATE benutzer SET letzter_login = datetime('now') WHERE benutzername = ? AND kanzlei_id = ?",
+            (benutzername, kanzlei_id),
+        )
+        conn.commit()
+    except Exception:
+        pass
+
+
 TOKEN_TTL    = int(os.getenv("SESSION_TIMEOUT_MINUTEN", "60")) * 60
 MAX_VERSUCHE = 5
 SPERRE_DAUER = 300
@@ -305,7 +385,15 @@ def hat_irgendein_benutzer() -> bool:
 
     try:
         if auth_pg_enabled():
-            return pg_hat_irgendein_benutzer()
+            if pg_hat_irgendein_benutzer():
+                return True
+            if _auth_sqlite_login_fallback_enabled():
+                from core.daten_speicher import get_connection
+
+                c = get_connection()
+                r = c.execute("SELECT COUNT(*) FROM benutzer WHERE aktiv = 1").fetchone()
+                return bool(r and int(r[0]) > 0)
+            return False
         conn = _get_conn()
         row = conn.execute("SELECT COUNT(*) FROM benutzer WHERE aktiv = 1").fetchone()
         return row[0] > 0
@@ -737,6 +825,7 @@ def login(benutzername: str, passwort: str, ip: str = "unknown") -> Optional[Dic
 
     from core.auth_postgres import auth_pg_enabled, pg_login_fetch, pg_login_touch
 
+    row_from_sqlite_fb = False
     try:
         if auth_pg_enabled():
             row = pg_login_fetch(benutzername)
@@ -744,7 +833,7 @@ def login(benutzername: str, passwort: str, ip: str = "unknown") -> Optional[Dic
             conn = _get_conn()
             row = conn.execute(
                 "SELECT * FROM benutzer WHERE benutzername = ? AND aktiv = 1",
-                (benutzername,)
+                (benutzername,),
             ).fetchone()
             if row:
                 row = dict(row)
@@ -758,6 +847,15 @@ def login(benutzername: str, passwort: str, ip: str = "unknown") -> Optional[Dic
         except Exception:
             pass
         return None
+
+    if not row and auth_pg_enabled() and _auth_sqlite_login_fallback_enabled():
+        row = _sqlite_login_fetch_by_username(benutzername)
+        if row:
+            row_from_sqlite_fb = True
+            log.info(
+                "Login: Benutzer '%s' nur in SQLite (Hybrid-Dev); siehe AUTH_SQLITE_LOGIN_FALLBACK.",
+                benutzername,
+            )
 
     if not row:
         log.warning(f"Login: Benutzer '{benutzername}' nicht gefunden")
@@ -788,15 +886,17 @@ def login(benutzername: str, passwort: str, ip: str = "unknown") -> Optional[Dic
     )
 
     try:
-        if auth_pg_enabled():
+        if auth_pg_enabled() and not row_from_sqlite_fb:
             pg_login_touch(benutzername, kanzlei_id)
-        else:
+        elif not auth_pg_enabled():
             conn = _get_conn()
             conn.execute(
                 "UPDATE benutzer SET letzter_login = datetime('now') WHERE benutzername = ? AND kanzlei_id = ?",
-                (benutzername, kanzlei_id)
+                (benutzername, kanzlei_id),
             )
             conn.commit()
+        else:
+            _sqlite_login_touch(benutzername, kanzlei_id)
     except Exception:
         pass
 
@@ -832,6 +932,7 @@ def login_by_email(email: str, passwort: str, ip: str = "unknown") -> Optional[D
 
     from core.auth_postgres import auth_pg_enabled, pg_login_fetch_by_email, pg_login_fetch, pg_login_touch
 
+    row_from_sqlite_fb = False
     try:
         if auth_pg_enabled():
             row = pg_login_fetch_by_email(email, internal_login)
@@ -875,6 +976,14 @@ def login_by_email(email: str, passwort: str, ip: str = "unknown") -> Optional[D
         except Exception:
             pass
 
+    if not row and auth_pg_enabled() and _auth_sqlite_login_fallback_enabled():
+        row = _sqlite_login_fetch_by_email(email, internal_login)
+        if row:
+            row_from_sqlite_fb = True
+            log.info(
+                "Login-by-email: Treffer nur in SQLite (Hybrid-Dev, Postgres leer für diese E-Mail)."
+            )
+
     if not row and internal_login:
         try:
             if auth_pg_enabled():
@@ -889,6 +998,11 @@ def login_by_email(email: str, passwort: str, ip: str = "unknown") -> Optional[D
         except Exception as e2:
             log.warning("login_by_email Fallback interner Benutzername: %s", e2)
             row = None
+
+    if not row and internal_login and auth_pg_enabled() and _auth_sqlite_login_fallback_enabled():
+        row = _sqlite_login_fetch_by_username(internal_login)
+        if row:
+            row_from_sqlite_fb = True
 
     if not row:
         log.warning("Login-by-email: keine Zeile für E-Mail")
@@ -919,15 +1033,17 @@ def login_by_email(email: str, passwort: str, ip: str = "unknown") -> Optional[D
     )
 
     try:
-        if auth_pg_enabled():
+        if auth_pg_enabled() and not row_from_sqlite_fb:
             pg_login_touch(benutzername, kanzlei_id)
-        else:
+        elif not auth_pg_enabled():
             conn = _get_conn()
             conn.execute(
                 "UPDATE benutzer SET letzter_login = datetime('now') WHERE benutzername = ? AND kanzlei_id = ?",
                 (benutzername, kanzlei_id),
             )
             conn.commit()
+        else:
+            _sqlite_login_touch(benutzername, kanzlei_id)
     except Exception:
         pass
 
