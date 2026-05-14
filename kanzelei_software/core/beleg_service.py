@@ -265,6 +265,29 @@ def beleg_speichern(ds, beleg: Dict) -> str:
     return beleg_id
 
 
+_ARCHIV_STATI = frozenset({"abgelehnt", "rejected", "declined", "verworfen"})
+_PIPELINE_STATI = frozenset({"vorschlag", "bestaetigt", "manuell"})
+
+
+def _beleg_ist_archiviert(b: Dict) -> bool:
+    """Abgelehnt / Archiv — Synonyme + Zeitstempel."""
+    if b.get("abgelehnt_am"):
+        return True
+    st = str(b.get("status") or "").strip().lower()
+    return st in _ARCHIV_STATI
+
+
+def _beleg_workflow_status(b: Dict) -> str:
+    """
+    Vergleichbarer Workflow-Status (kleingeschrieben), nur für nicht-archivierte Belege.
+    Leere/neu/Entwurf → wie offener Buchungsvorschlag.
+    """
+    s = str(b.get("status") or "").strip().lower()
+    if not s or s in {"neu", "entwurf", "draft"}:
+        return "vorschlag"
+    return s
+
+
 def belege_laden(ds, mandant: str = None, status: str = None) -> List[Dict]:
     """Belege aus DatenSpeicher laden."""
     belege = ds.belege_liste()
@@ -300,6 +323,48 @@ def beleg_bestaetigen(ds, beleg_id: str, korrekturen: Dict = None) -> Dict:
     return beleg
 
 
+def beleg_wiederherstellen(ds, beleg_id: str) -> Dict:
+    """Abgelehnten Beleg wieder als Buchungsvorschlag öffnen."""
+    beleg = ds.beleg_holen(beleg_id)
+    if not beleg:
+        raise ValueError(f"Beleg {beleg_id} nicht gefunden")
+    if not _beleg_ist_archiviert(beleg):
+        raise ValueError("Beleg ist nicht im Archiv")
+    beleg["status"] = "vorschlag"
+    beleg.pop("abgelehnt_am", None)
+    ok = ds.beleg_speichern(beleg_id, beleg)
+    if ok is False:
+        raise RuntimeError(f"Speichern fehlgeschlagen (Beleg {beleg_id})")
+    ds.log_eintrag(f"BELEG_WIEDERHERGESTELLT | {beleg_id}")
+    return beleg
+
+
+def beleg_endgueltig_loeschen(ds, beleg_id: str) -> Dict:
+    """Archivierten Beleg dauerhaft löschen."""
+    beleg = ds.beleg_holen(beleg_id)
+    if not beleg:
+        raise ValueError(f"Beleg {beleg_id} nicht gefunden")
+    if not _beleg_ist_archiviert(beleg):
+        raise ValueError("Nur archivierte Belege können endgültig gelöscht werden")
+    if not ds.beleg_loeschen(beleg_id):
+        raise RuntimeError(f"Löschen fehlgeschlagen (Beleg {beleg_id})")
+    ds.log_eintrag(f"BELEG_GELOESCHT | {beleg_id}")
+    return {"status": "deleted", "id": beleg_id}
+
+
+def belege_archiv_alle_loeschen(ds, mandant: str = None) -> Dict:
+    """Alle archivierten Belege optional gefiltert nach Mandant löschen."""
+    geloescht = 0
+    for b in belege_laden(ds, mandant):
+        if not _beleg_ist_archiviert(b):
+            continue
+        bid = b.get("beleg_id")
+        if bid and ds.beleg_loeschen(bid):
+            geloescht += 1
+            ds.log_eintrag(f"BELEG_GELOESCHT | {bid}")
+    return {"geloescht": geloescht}
+
+
 def beleg_ablehnen(ds, beleg_id: str) -> Dict:
     """Beleg als abgelehnt markieren."""
     beleg = ds.beleg_holen(beleg_id)
@@ -307,7 +372,9 @@ def beleg_ablehnen(ds, beleg_id: str) -> Dict:
         raise ValueError(f"Beleg {beleg_id} nicht gefunden")
     beleg["status"] = "abgelehnt"
     beleg["abgelehnt_am"] = datetime.now().isoformat()
-    ds.beleg_speichern(beleg_id, beleg)
+    ok = ds.beleg_speichern(beleg_id, beleg)
+    if ok is False:
+        raise RuntimeError(f"Speichern fehlgeschlagen (Beleg {beleg_id})")
     ds.log_eintrag(f"BELEG_ABGELEHNT | {beleg_id}")
     return {"status": "abgelehnt", "id": beleg_id}
 
@@ -315,9 +382,15 @@ def beleg_ablehnen(ds, beleg_id: str) -> Dict:
 def belege_statistiken(ds, mandant: str = None) -> Dict:
     """Statistiken über verarbeitete Belege."""
     belege = belege_laden(ds, mandant)
-
-    ausgaben = [b for b in belege if b.get("typ") == "ausgabe"]
-    einnahmen = [b for b in belege if b.get("typ") == "einnahme"]
+    # Ohne Archiv; Beträge nur für echte Workflow-States (keine Zombie-Datensätze mit sonstigem Status)
+    aktiv_shell = [b for b in belege if not _beleg_ist_archiviert(b)]
+    aktiv = [
+        b for b in aktiv_shell
+        if _beleg_workflow_status(b) in _PIPELINE_STATI
+    ]
+    # Ausgaben/Einnamen: weiter alle nicht-archivierten (Phantom-Status soll Betrag nicht verstecken)
+    ausgaben = [b for b in aktiv_shell if b.get("typ") == "ausgabe"]
+    einnahmen = [b for b in aktiv_shell if b.get("typ") == "einnahme"]
 
     total_ausgaben  = sum(b.get("betrag_brutto", 0) for b in ausgaben)
     total_einnahmen = sum(b.get("betrag_brutto", 0) for b in einnahmen)
@@ -331,12 +404,19 @@ def belege_statistiken(ds, mandant: str = None) -> Dict:
         kat = b.get("kategorie_name", b.get("kategorie", "Sonstiges"))
         kategorien[kat] = kategorien.get(kat, 0) + b.get("betrag_brutto", 0)
 
+    abgelehnt_n = sum(1 for b in belege if _beleg_ist_archiviert(b))
+
     return {
-        "gesamt_belege":      len(belege),
+        "gesamt_belege": len(aktiv),
         "ausgaben_belege":    len(ausgaben),
         "einnahmen_belege":   len(einnahmen),
-        "vorschlaege_offen":  sum(1 for b in belege if b.get("status") == "vorschlag"),
-        "bestaetigt":         sum(1 for b in belege if b.get("status") == "bestaetigt"),
+        "vorschlaege_offen":  sum(
+            1 for b in aktiv if _beleg_workflow_status(b) == "vorschlag"
+        ),
+        "bestaetigt": sum(
+            1 for b in aktiv if _beleg_workflow_status(b) == "bestaetigt"
+        ),
+        "abgelehnt":          abgelehnt_n,
         "total_ausgaben":     round(total_ausgaben, 2),
         "total_einnahmen":    round(total_einnahmen, 2),
         "total_vorsteuer":    round(total_vst, 2),

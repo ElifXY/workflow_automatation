@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # ============================================================
 # KANZLEI AI — SCHEDULER v1.0
-# Datei: scheduler.py
+# Datei: core/scheduler.py — Docker: python backend/scheduler.py (Wrapper unter backend/).
 #
 # Läuft als eigener Prozess (Docker-Service "scheduler")
 # Führt täglich aus:
@@ -17,6 +17,7 @@ import time
 import logging
 import os
 import sys
+import hashlib
 from datetime import datetime
 
 log = logging.getLogger("kanzlei_scheduler")
@@ -33,6 +34,7 @@ logging.basicConfig(
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from core.daten_speicher import DatenSpeicher
+from core.daten_speicher import email_outbox_enqueue
 ds = DatenSpeicher()
 
 BOT_UHRZEIT       = os.getenv("BOT_ANALYSE_UHRZEIT",  "07:00")
@@ -40,9 +42,17 @@ WORKFLOW_UHRZEIT  = os.getenv("WORKFLOW_BATCH_UHRZEIT","06:00")
 BACKUP_UHRZEIT    = os.getenv("BACKUP_UHRZEIT",        "02:00")
 LOHN_TAG          = 1   # Am 1. jeden Monats
 CHECK_INTERVAL    = 60  # Sekunden zwischen Checks
+REVENUE_OPS_UHRZEIT = os.getenv("REVENUE_OPS_UHRZEIT", "09:00")
+REVENUE_OPS_MIN_VIEWS_7D = int(os.getenv("REVENUE_OPS_MIN_VIEWS_7D", "20") or "20")
+REVENUE_OPS_MIN_VIEW_TO_PAID_PCT = float(os.getenv("REVENUE_OPS_MIN_VIEW_TO_PAID_PCT", "2.0") or "2.0")
 
 # Tracking: welche Jobs heute bereits liefen
 _heute_gelaufen: set = set()
+
+
+def _setting(key: str, default):
+    val = ds.setting_holen(key, default)
+    return default if val is None else val
 
 
 def uhrzeit_erreicht(uhrzeit_str: str) -> bool:
@@ -58,6 +68,8 @@ def job_id(name: str) -> str:
 
 def run_workflow_batch():
     """Alle aktiven Workflow-Regeln ausführen."""
+    if not bool(_setting("auto_workflow_monatsabschluss", True)):
+        return
     jid = job_id("workflow")
     if jid in _heute_gelaufen:
         return
@@ -129,6 +141,8 @@ def run_mahnwesen():
 
 def run_lohnabrechnung():
     """Monatliche Lohnabrechnung am 1. des Monats."""
+    if not bool(_setting("auto_workflow_lohn", True)):
+        return
     heute = datetime.now()
     if heute.day != LOHN_TAG:
         return
@@ -160,6 +174,129 @@ def run_backup():
     _heute_gelaufen.add(jid)
 
 
+def _billing_obs_get_for_kid(kanzlei_id: str) -> dict:
+    try:
+        st = DatenSpeicher(kanzlei_id=kanzlei_id)
+        raw = st.setting_holen("__billing_observability_v1", {}) or {}
+        return raw if isinstance(raw, dict) else {}
+    except Exception:
+        return {}
+
+
+def _billing_funnel_7d_for_kid(kanzlei_id: str) -> dict:
+    try:
+        st = DatenSpeicher(kanzlei_id=kanzlei_id)
+        raw = st.setting_holen("__billing_funnel_events_v1", []) or []
+        events = raw if isinstance(raw, list) else []
+    except Exception:
+        events = []
+    from datetime import timedelta
+    threshold = datetime.utcnow() - timedelta(hours=168)
+    views = 0
+    paid = 0
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        try:
+            ts = datetime.fromisoformat(str(ev.get("ts") or "").replace("Z", ""))
+        except Exception:
+            continue
+        if ts < threshold:
+            continue
+        stg = str(ev.get("stage") or "").strip().lower()
+        if stg == "cta_view":
+            views += 1
+        elif stg == "checkout_success":
+            paid += 1
+    return {"views": views, "paid": paid, "view_to_paid_percent": round(100 * paid / max(1, views), 2)}
+
+
+def _digest_recipients_for_kid(kanzlei_id: str) -> list:
+    try:
+        from backend.auth import liste_benutzer
+        from core.rbac import canonical_role
+        rows = liste_benutzer(kanzlei_id) or []
+    except Exception:
+        rows = []
+    out = []
+    seen = set()
+    for u in rows:
+        role = canonical_role((u or {}).get("rolle") or (u or {}).get("role"))
+        if role not in {"owner", "admin"}:
+            continue
+        mail = str((u or {}).get("email") or "").strip().lower()
+        if not mail or mail in seen:
+            continue
+        out.append(mail)
+        seen.add(mail)
+    return out[:20]
+
+
+def _enqueue_ops_alert(kanzlei_id: str, recipients: list, lines: list) -> int:
+    sent = 0
+    subject = f"Revenue Ops Alert ({datetime.utcnow().strftime('%Y-%m-%d')})"
+    body = "\n".join(["Revenue Ops Monitor", ""] + lines)
+    for email in recipients:
+        idem_src = f"{kanzlei_id}|revenue-ops|{datetime.utcnow().strftime('%Y-%m-%d')}|{email}|{body[:160]}"
+        idem = hashlib.sha256(idem_src.encode("utf-8")).hexdigest()
+        enq = email_outbox_enqueue(
+            kanzlei_id=kanzlei_id,
+            mandant="revenue_ops",
+            to_email=email,
+            subject=subject,
+            body_text=body,
+            body_html="",
+            idempotency_key=idem,
+            max_attempts=5,
+        )
+        if enq and (enq.get("created") or enq.get("id")):
+            sent += 1
+    return sent
+
+
+def run_revenue_ops_check():
+    """Täglicher automatischer Revenue-Ops Check mit Alert-Mail an Owner/Admin."""
+    jid = job_id("revenue_ops")
+    if jid in _heute_gelaufen:
+        return
+    try:
+        from backend.auth import liste_kanzleien
+        tenants = liste_kanzleien() or []
+    except Exception as e:
+        log.error(f"Revenue-Ops: konnte Kanzleien nicht laden: {e}")
+        return
+    total_alerts = 0
+    for t in tenants:
+        kid = str((t or {}).get("id") or "").strip()
+        if not kid:
+            continue
+        obs = _billing_obs_get_for_kid(kid)
+        funnel = _billing_funnel_7d_for_kid(kid)
+        alerts = []
+        if int(obs.get("digest_skipped_no_recipients", 0) or 0) > 0:
+            alerts.append("Digest wurde mindestens einmal ohne Empfänger übersprungen.")
+        if int(obs.get("channel_shift_detected", 0) or 0) > 0:
+            alerts.append("Kanal-Shift erkannt: Top-UTM hat gewechselt.")
+        if (
+            funnel.get("views", 0) >= REVENUE_OPS_MIN_VIEWS_7D
+            and float(funnel.get("view_to_paid_percent", 0.0)) < REVENUE_OPS_MIN_VIEW_TO_PAID_PCT
+        ):
+            alerts.append(
+                f"7d View->Paid nur {funnel.get('view_to_paid_percent', 0)}% bei {funnel.get('views', 0)} Views."
+            )
+        if not alerts:
+            continue
+        rec = _digest_recipients_for_kid(kid)
+        if not rec:
+            log.warning("Revenue-Ops Alert übersprungen (keine Owner/Admin Empfänger): %s", kid)
+            continue
+        sent = _enqueue_ops_alert(kid, rec, alerts)
+        total_alerts += int(sent)
+        log.warning("Revenue-Ops Alert: kanzlei=%s sent=%s issues=%s", kid, sent, len(alerts))
+    _heute_gelaufen.add(jid)
+    ds.log_eintrag(f"SCHEDULER_REVENUE_OPS | alert_emails={total_alerts}")
+
+
 def reset_tagesflags():
     """Mitternacht: Reset der Tages-Flags."""
     jetzt = datetime.now()
@@ -172,11 +309,15 @@ def reset_tagesflags():
 
 
 def main():
+    workflow_time = str(_setting("workflow_batch_uhrzeit", WORKFLOW_UHRZEIT))[:5]
+    bot_time = str(_setting("ki_bot_analyse_uhrzeit", BOT_UHRZEIT))[:5]
     log.info("=" * 60)
     log.info("KANZLEI AI SCHEDULER — gestartet")
-    log.info(f"  Workflow:    {WORKFLOW_UHRZEIT}")
-    log.info(f"  Bot-Analyse: {BOT_UHRZEIT}")
+    log.info(f"  Workflow:    {workflow_time}")
+    log.info(f"  Bot-Analyse: {bot_time}")
     log.info(f"  Backup:      {BACKUP_UHRZEIT}")
+    log.info(f"  Revenue-Ops: {REVENUE_OPS_UHRZEIT}")
+    log.info(f"  Revenue-Ops Schwellen: min_views_7d={REVENUE_OPS_MIN_VIEWS_7D}, min_view_to_paid_pct={REVENUE_OPS_MIN_VIEW_TO_PAID_PCT}")
     log.info(f"  Lohn:        am {LOHN_TAG}. jeden Monats")
     log.info("=" * 60)
 
@@ -185,14 +326,13 @@ def main():
             reset_tagesflags()
 
             # Workflow-Batch
-            if uhrzeit_erreicht(WORKFLOW_UHRZEIT):
+            workflow_time = str(_setting("workflow_batch_uhrzeit", WORKFLOW_UHRZEIT))[:5]
+            if uhrzeit_erreicht(workflow_time):
                 run_workflow_batch()
 
             # Bot-Analyse (30 Min nach Workflow)
-            bot_hhmm = WORKFLOW_UHRZEIT[:2] + ":" + str(
-                (int(WORKFLOW_UHRZEIT[3:]) + 30) % 60
-            ).zfill(2)
-            if uhrzeit_erreicht(BOT_UHRZEIT):
+            bot_time = str(_setting("ki_bot_analyse_uhrzeit", BOT_UHRZEIT))[:5]
+            if uhrzeit_erreicht(bot_time):
                 run_bot_analyse()
 
             # Mahnwesen (07:30)
@@ -207,6 +347,10 @@ def main():
             if uhrzeit_erreicht(BACKUP_UHRZEIT):
                 run_backup()
 
+            # Revenue Ops Monitor (Daily)
+            if uhrzeit_erreicht(REVENUE_OPS_UHRZEIT):
+                run_revenue_ops_check()
+
         except KeyboardInterrupt:
             log.info("Scheduler wird beendet...")
             break
@@ -217,4 +361,7 @@ def main():
 
 
 if __name__ == "__main__":
+    log.warning(
+        "Scheduler direkt aus core/scheduler.py gestartet — bevorzugt: python backend/scheduler.py"
+    )
     main()

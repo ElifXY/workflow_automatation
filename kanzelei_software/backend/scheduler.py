@@ -1,3 +1,9 @@
+"""
+Geplanter Docker-Einstieg für Hintergrundjobs (ein Prozess).
+
+Implementierung: ``core.scheduler`` (``main``). Nicht parallel zu einem zweiten
+Scheduler-Prozess starten, sonst doppelte Jobs.
+"""
 import os
 import sys
 

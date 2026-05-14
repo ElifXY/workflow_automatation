@@ -23,6 +23,7 @@ import {
   getAufgabenMandant,
   addAufgabeAPI,
   toggleAufgabeAPI,
+  updateAufgabeAPI,
   deleteAufgabeAPI,
   getDokumente,
   dokumentAnfordern,
@@ -37,6 +38,7 @@ import {
   workflowOnboarding,
   getTimeline,
   getKommunikation,
+  extrahiereAufgabenArray,
   addKommunikation,
   exportExcel,
   exportDatev,
@@ -46,25 +48,30 @@ import {
 } from "../api";
 
 // ─── Design Tokens (konsistent mit App.js) ──────────────────
-const C = {
-  red: "#e05555", orange: "#e08c45", green: "#5cb87a",
-  blue: "#5b8de8", accent: "#c8a96e", text: "#e8eaf0",
-  text2: "#8b91a0", text3: "#555d6e", bg: "#0b0d11",
-  bg2: "#111419", bg3: "#181c24",
-  border: "rgba(255,255,255,0.07)",
-  border2: "rgba(255,255,255,0.12)",
+const PRIO_COLORS = {
+  kritisch: "var(--red)", hoch: "var(--orange)",
+  normal: "var(--blue)", niedrig: "var(--text3)",
 };
 
-const PRIO_COLORS = {
-  kritisch: C.red, hoch: C.orange,
-  normal: C.blue, niedrig: C.text3,
+const istErledigt = (a) => {
+  const e = a?.erledigt;
+  if (e == null || e === false) return false;
+  if (e === true) return true;
+  if (typeof e === "number") return e !== 0;
+  if (typeof e === "string") {
+    const s = e.trim().toLowerCase();
+    if (["", "0", "false", "nein", "no", "none", "null"].includes(s)) return false;
+    if (["1", "true", "yes", "ja"].includes(s)) return true;
+    return false;
+  }
+  return Boolean(e);
 };
 
 // ═══════════════════════════════════════════════════════════
 // PRIMITIVE COMPONENTS
 // ═══════════════════════════════════════════════════════════
 
-const Badge = ({ children, color = C.accent, style = {} }) => (
+const Badge = ({ children, color = "var(--accent)", style = {} }) => (
   <span style={{
     display: "inline-block", padding: "2px 9px", borderRadius: 20,
     fontSize: 11, fontWeight: 600, letterSpacing: "0.04em",
@@ -80,11 +87,11 @@ const Btn = ({ children, onClick, variant = "primary", size = "md",
   const sizes = { xs: "4px 9px", sm: "6px 13px", md: "9px 18px", lg: "12px 24px" };
   const fsize = { xs: 11, sm: 13, md: 14, lg: 15 };
   const variants = {
-    primary: { background: C.accent, color: "#1a1200", border: "none" },
-    danger:  { background: C.red + "18", color: C.red, border: `1px solid ${C.red}30` },
-    ghost:   { background: "transparent", color: C.text2, border: `1px solid ${C.border2}` },
-    subtle:  { background: C.bg3, color: C.text2, border: `1px solid ${C.border}` },
-    success: { background: C.green + "20", color: C.green, border: `1px solid ${C.green}30` },
+    primary: { background: "var(--accent)", color: "var(--on-accent)", border: "none" },
+    danger:  { background: "var(--red)" + "18", color: "var(--red)", border: `1px solid ${"var(--red)"}30` },
+    ghost:   { background: "transparent", color: "var(--text2)", border: `1px solid var(--border2)` },
+    subtle:  { background: "var(--bg3)", color: "var(--text2)", border: `1px solid var(--border)` },
+    success: { background: "var(--green)" + "20", color: "var(--green)", border: `1px solid ${"var(--green)"}30` },
   };
   return (
     <button onClick={!disabled && !loading ? onClick : undefined} title={title}
@@ -110,18 +117,18 @@ const Input = ({ placeholder, value, onChange, onKeyDown, type = "text",
   <input type={type} placeholder={placeholder} value={value} disabled={disabled}
     onChange={e => onChange(e.target.value)} onKeyDown={onKeyDown}
     style={{
-      width: "100%", background: C.bg, border: `1px solid ${C.border2}`,
-      borderRadius: 10, color: C.text, padding: "9px 13px", fontSize: 14,
+      width: "100%", background: "var(--bg)", border: `1px solid var(--border2)`,
+      borderRadius: 10, color: "var(--text)", padding: "9px 13px", fontSize: 14,
       outline: "none", fontFamily: "'DM Sans', sans-serif", ...style,
     }}
-    onFocus={e => e.target.style.borderColor = C.accent}
-    onBlur={e => e.target.style.borderColor = C.border2}
+    onFocus={e => e.target.style.borderColor = "var(--accent)"}
+    onBlur={e => e.target.style.borderColor = "var(--border2)"}
   />
 );
 
 const Card = ({ children, style = {} }) => (
   <div style={{
-    background: C.bg2, border: `1px solid ${C.border}`,
+    background: "var(--bg2)", border: `1px solid var(--border)`,
     borderRadius: 14, padding: 20, ...style,
   }}>
     {children}
@@ -132,7 +139,7 @@ const SectionTitle = ({ children, action }) => (
   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
                 marginBottom: 14 }}>
     <div style={{ fontFamily: "'DM Serif Display', serif", fontSize: 17,
-                  color: C.text, letterSpacing: "-0.01em" }}>
+                  color: "var(--text)", letterSpacing: "-0.01em" }}>
       {children}
     </div>
     {action}
@@ -142,20 +149,20 @@ const SectionTitle = ({ children, action }) => (
 const Spinner = ({ size = 24 }) => (
   <div style={{
     width: size, height: size, borderRadius: "50%",
-    border: `2px solid ${C.border2}`, borderTopColor: C.accent,
+    border: `2px solid var(--border2)`, borderTopColor: "var(--accent)",
     animation: "spin 0.7s linear infinite", display: "inline-block",
   }} />
 );
 
 const Toast = ({ text, type = "success" }) => {
-  const tc = { success: C.green, error: C.red, info: C.blue, warn: C.orange };
+  const tc = { success: "var(--green)", error: "var(--red)", info: "var(--blue)", warn: "var(--orange)" };
   return (
     <div style={{
       position: "fixed", bottom: 24, right: 24, zIndex: 9999,
-      background: C.bg3, border: `1px solid ${(tc[type] || C.accent)}44`,
-      borderLeft: `3px solid ${tc[type] || C.accent}`,
-      borderRadius: 12, padding: "12px 18px", color: C.text,
-      fontSize: 13, fontWeight: 500, boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
+      background: "var(--bg3)", border: `1px solid ${(tc[type] || "var(--accent)")}44`,
+      borderLeft: `3px solid ${tc[type] || "var(--accent)"}`,
+      borderRadius: 12, padding: "12px 18px", color: "var(--text)",
+      fontSize: 13, fontWeight: 500, boxShadow: "var(--shadow-elev)",
       animation: "slideUp 0.25s ease",
     }}>
       {text}
@@ -167,14 +174,14 @@ const Toast = ({ text, type = "success" }) => {
 // AUFGABEN SECTION — BUGFIX + EMAIL EDITOR
 // ═══════════════════════════════════════════════════════════
 
-const AufgabenSection = ({ name, aufgaben, onToggle, onDelete, onRefresh }) => {
+const AufgabenSection = ({ name, aufgaben, onToggle, onEdit, onDelete, onRefresh }) => {
   const [beschreibung, setBeschreibung] = useState("");
   const [frist, setFrist]               = useState("");
+  const [fristUhrzeit, setFristUhrzeit] = useState("");
   const [prioritaet, setPrio]           = useState("normal");
   const [kategorie, setKategorie]       = useState("");
   const [adding, setAdding]             = useState(false);
   const [addError, setAddError]         = useState("");  // BUG FIX: Error-Anzeige
-  const [filter, setFilter]             = useState("offen");
 
   const handleAdd = async () => {
     // BUG FIX: Validierung mit sichtbarem Feedback statt stilles Fehlschlagen
@@ -186,60 +193,48 @@ const AufgabenSection = ({ name, aufgaben, onToggle, onDelete, onRefresh }) => {
       await addAufgabeAPI(name, {
         beschreibung: beschreibung.trim(),
         frist,
+        frist_uhrzeit: fristUhrzeit || undefined,
         prioritaet,
         kategorie: kategorie.trim() || undefined,
       });
-      setBeschreibung(""); setFrist(""); setPrio("normal"); setKategorie("");
+      setBeschreibung(""); setFrist(""); setFristUhrzeit(""); setPrio("normal"); setKategorie("");
       await onRefresh(); // BUG FIX: onRefresh korrekt awaiten
     } catch (e) {
       setAddError(e.message || "Aufgabe konnte nicht gespeichert werden");
     } finally { setAdding(false); }
   };
 
-  const jetzt    = new Date();
-  const filtered = aufgaben.filter(a => {
-    if (filter === "offen")   return !a.erledigt;
-    if (filter === "erledigt") return a.erledigt;
-    return true;
-  });
+  const jetzt = new Date();
+  const filtered = aufgaben.filter((a) => !istErledigt(a));
 
   const getFristInfo = (fristStr, erledigt) => {
-    if (erledigt) return { label: "Erledigt", color: C.green, tage: null };
-    if (!fristStr) return { label: "Kein Datum", color: C.text3, tage: null };
+    if (erledigt) return { label: "Erledigt", color: "var(--green)", tage: null };
+    if (!fristStr) return { label: "Kein Datum", color: "var(--text3)", tage: null };
     const f    = new Date(fristStr);
     const diff = Math.round((f - jetzt) / 86400000);
-    if (diff < 0)  return { label: `${Math.abs(diff)}d überfällig`, color: C.red,    tage: diff };
-    if (diff === 0) return { label: "Heute fällig",                 color: C.red,    tage: 0 };
-    if (diff <= 1)  return { label: "Morgen fällig",                color: C.orange, tage: 1 };
-    if (diff <= 7)  return { label: `in ${diff} Tagen`,             color: C.orange, tage: diff };
-    return { label: `in ${diff} Tagen`, color: C.text3, tage: diff };
+    if (diff < 0)  return { label: `${Math.abs(diff)}d überfällig`, color: "var(--red)",    tage: diff };
+    if (diff === 0) return { label: "Heute fällig",                 color: "var(--red)",    tage: 0 };
+    if (diff <= 1)  return { label: "Morgen fällig",                color: "var(--orange)", tage: 1 };
+    if (diff <= 7)  return { label: `in ${diff} Tagen`,             color: "var(--orange)", tage: diff };
+    return { label: `in ${diff} Tagen`, color: "var(--text3)", tage: diff };
   };
 
   return (
     <Card>
-      <SectionTitle action={
-        <div style={{ display: "flex", gap: 6 }}>
-          {["offen", "erledigt", "alle"].map(f => (
-            <Btn key={f} size="xs" variant={filter === f ? "subtle" : "ghost"}
-                 onClick={() => setFilter(f)} style={{ textTransform: "capitalize" }}>
-              {f}
-            </Btn>
-          ))}
-        </div>
-      }>
+      <SectionTitle>
         Aufgaben & Fristen
-        <Badge color={C.accent} style={{ marginLeft: 10, fontSize: 10 }}>
-          {aufgaben.filter(a => !a.erledigt).length} offen
+        <Badge color={"var(--accent)"} style={{ marginLeft: 10, fontSize: 10 }}>
+          {aufgaben.filter((a) => !istErledigt(a)).length} offen
         </Badge>
       </SectionTitle>
 
       {/* Neue Aufgabe */}
       <div style={{
-        background: C.bg3, border: `1px solid ${addError ? C.red + "50" : C.border}`,
+        background: "var(--bg3)", border: `1px solid ${addError ? "color-mix(in srgb, var(--red) 35%, transparent)" : "var(--border)"}`,
         borderRadius: 12, padding: "14px 16px", marginBottom: 16,
         transition: "border 0.2s",
       }}>
-        <div style={{ fontSize: 11, color: C.text3, textTransform: "uppercase",
+        <div style={{ fontSize: 11, color: "var(--text3)", textTransform: "uppercase",
                       letterSpacing: "0.07em", marginBottom: 10 }}>
           Neue Aufgabe
         </div>
@@ -247,9 +242,9 @@ const AufgabenSection = ({ name, aufgaben, onToggle, onDelete, onRefresh }) => {
         {/* BUG FIX: Fehler-Anzeige */}
         {addError && (
           <div style={{
-            background: C.red + "15", border: `1px solid ${C.red}30`,
+            background: "var(--red)" + "15", border: `1px solid ${"var(--red)"}30`,
             borderRadius: 8, padding: "8px 12px", marginBottom: 10,
-            fontSize: 12, color: C.red, display: "flex",
+            fontSize: 12, color: "var(--red)", display: "flex",
             alignItems: "center", gap: 6,
           }}>
             ⚠ {addError}
@@ -263,13 +258,26 @@ const AufgabenSection = ({ name, aufgaben, onToggle, onDelete, onRefresh }) => {
                onKeyDown={e => e.key === "Enter" && !e.shiftKey && handleAdd()}
                style={{ marginBottom: 8 }} />
 
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <div style={{ flex: "0 0 auto" }}>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+          <div style={{ flex: "0 0 auto", display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={{ fontSize: 10, color: "var(--text3)", letterSpacing: "0.06em" }}>FRIST (DATUM)</span>
             <input type="date" value={frist}
                    onChange={e => { setFrist(e.target.value); if (addError) setAddError(""); }}
                    style={{
-                     background: C.bg, border: `1px solid ${!frist && addError ? C.red + "60" : C.border2}`,
-                     borderRadius: 10, color: frist ? C.text : C.text3,
+                     background: "var(--bg)", border: `1px solid ${!frist && addError ? "color-mix(in srgb, var(--red) 42%, transparent)" : "var(--border2)"}`,
+                     borderRadius: 10, color: frist ? "var(--text)" : "var(--text3)",
+                     padding: "9px 11px", fontSize: 14, outline: "none",
+                     fontFamily: "'DM Sans', sans-serif",
+                   }} />
+          </div>
+          <div style={{ flex: "0 0 auto", display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={{ fontSize: 10, color: "var(--text3)", letterSpacing: "0.06em" }}>UHRZEIT (OPTIONAL)</span>
+            <input type="time" value={fristUhrzeit}
+                   onChange={e => setFristUhrzeit(e.target.value)}
+                   title="Bis zu welcher Uhrzeit die Aufgabe am Fristtag erledigt sein soll (leer lassen = ganztägig)"
+                   style={{
+                     background: "var(--bg)", border: `1px solid var(--border2)`,
+                     borderRadius: 10, color: "var(--text)",
                      padding: "9px 11px", fontSize: 14, outline: "none",
                      fontFamily: "'DM Sans', sans-serif",
                    }} />
@@ -282,7 +290,7 @@ const AufgabenSection = ({ name, aufgaben, onToggle, onDelete, onRefresh }) => {
         {/* Priorität & Kategorie */}
         <div style={{ display: "flex", gap: 16, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-            <span style={{ fontSize: 11, color: C.text3 }}>Priorität:</span>
+            <span style={{ fontSize: 11, color: "var(--text3)" }}>Priorität:</span>
             {Object.entries(PRIO_COLORS).map(([p, c]) => (
               <Btn key={p} size="xs" variant={prioritaet === p ? "subtle" : "ghost"}
                    onClick={() => setPrio(p)} style={{ color: c, textTransform: "capitalize" }}>
@@ -298,40 +306,44 @@ const AufgabenSection = ({ name, aufgaben, onToggle, onDelete, onRefresh }) => {
 
       {/* Aufgaben-Liste */}
       {filtered.length === 0 ? (
-        <div style={{ textAlign: "center", padding: "24px 0", color: C.text3, fontSize: 13 }}>
-          {filter === "offen" ? "Keine offenen Aufgaben ✓" :
-           filter === "erledigt" ? "Noch nichts erledigt" : "Keine Aufgaben vorhanden"}
+        <div style={{ textAlign: "center", padding: "24px 0", color: "var(--text3)", fontSize: 13 }}>
+          Keine offenen Aufgaben ✓
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {filtered.map((a, i) => {
-            const fi = getFristInfo(a.frist, a.erledigt);
-            const pc = PRIO_COLORS[a.prioritaet] || C.text3;
+            const fi = getFristInfo(a.frist, istErledigt(a));
+            const pc = PRIO_COLORS[a.prioritaet] || "var(--text3)";
             return (
               <div key={a.id} style={{
                 display: "flex", alignItems: "flex-start", gap: 12,
                 padding: "12px 14px",
-                background: a.erledigt ? "transparent" : C.bg,
-                border: `1px solid ${a.erledigt ? C.border : fi.tage !== null && fi.tage < 3 ? fi.color + "44" : C.border2}`,
-                borderRadius: 10, opacity: a.erledigt ? 0.55 : 1,
+                background: "var(--bg)",
+                border: `1px solid ${fi.tage !== null && fi.tage < 3 ? `color-mix(in srgb, ${fi.color} 30%, transparent)` : "var(--border2)"}`,
+                borderRadius: 10, opacity: 1,
                 transition: "all 0.15s ease",
                 animation: `fadeUp 0.3s ease ${i * 30}ms both`,
               }}>
-                <input type="checkbox" checked={!!a.erledigt}
+                <input type="checkbox" checked={istErledigt(a)}
                        onChange={() => onToggle(a.id)}
-                       style={{ marginTop: 3, cursor: "pointer", accentColor: C.accent, flexShrink: 0 }} />
+                       style={{ marginTop: 3, cursor: "pointer", accentColor: "var(--accent)", flexShrink: 0 }} />
 
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{
-                    fontWeight: 500, color: C.text, fontSize: 14,
-                    textDecoration: a.erledigt ? "line-through" : "none",
+                    fontWeight: 500, color: "var(--text)", fontSize: 14,
+                    textDecoration: "none",
                   }}>
                     {a.beschreibung}
                   </div>
                   <div style={{ display: "flex", gap: 8, marginTop: 5, flexWrap: "wrap", alignItems: "center" }}>
                     {a.frist && (
-                      <span style={{ fontSize: 12, color: C.text3 }}>
+                      <span style={{ fontSize: 12, color: "var(--text3)" }}>
                         📅 {new Date(a.frist).toLocaleDateString("de-DE")}
+                      </span>
+                    )}
+                    {a.frist_uhrzeit && (
+                      <span style={{ fontSize: 12, color: "var(--text3)" }}>
+                        🕒 {a.frist_uhrzeit}
                       </span>
                     )}
                     <Badge color={fi.color} style={{ fontSize: 10 }}>{fi.label}</Badge>
@@ -339,11 +351,15 @@ const AufgabenSection = ({ name, aufgaben, onToggle, onDelete, onRefresh }) => {
                       <Badge color={pc} style={{ fontSize: 10 }}>{a.prioritaet}</Badge>
                     )}
                     {a.kategorie && (
-                      <Badge color={C.text3} style={{ fontSize: 10 }}>{a.kategorie}</Badge>
+                      <Badge color={"var(--text3)"} style={{ fontSize: 10 }}>{a.kategorie}</Badge>
                     )}
                   </div>
                 </div>
 
+                <Btn size="xs" variant="ghost" title="Aufgabe bearbeiten"
+                     onClick={() => onEdit(a)} style={{ flexShrink: 0 }}>
+                  Bearb.
+                </Btn>
                 <Btn size="xs" variant="danger" title="Aufgabe löschen"
                      onClick={() => onDelete(a.id)} style={{ flexShrink: 0, opacity: 0.6 }}>
                   ✕
@@ -356,6 +372,56 @@ const AufgabenSection = ({ name, aufgaben, onToggle, onDelete, onRefresh }) => {
     </Card>
   );
 };
+
+/** Erledigte Aufgaben mit TTL — Wiederherstellen = wieder offen */
+const AufgabenHistorieSection = ({
+  items,
+  ttlTage,
+  onWiederherstellen,
+  onPermanentDelete,
+}) => (
+  <Card>
+    <SectionTitle>Historie erledigter Aufgaben</SectionTitle>
+    <div style={{
+      fontSize: 12, color: "var(--text3)", marginBottom: 14, lineHeight: 1.55,
+    }}>
+      Erledigte Aufgaben erscheinen hier und werden nach{" "}
+      <strong>{ttlTage} Tagen</strong> automatisch entfernt. Die Frist legen Sie unter{" "}
+      <Link to="/settings" style={{ color: "var(--accent)" }}>Einstellungen → Workflow</Link> fest.
+    </div>
+    {(!items || items.length === 0) ? (
+      <div style={{ textAlign: "center", padding: "18px 0", color: "var(--text3)", fontSize: 13 }}>
+        Keine Einträge in der Historie.
+      </div>
+    ) : (
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {items.map((a, i) => (
+          <div key={a.id} style={{
+            display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+            padding: "10px 12px", background: "var(--bg3)",
+            border: `1px solid var(--border)`, borderRadius: 10,
+            animation: `fadeUp 0.3s ease ${i * 35}ms both`,
+          }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, color: "var(--text2)", textDecoration: "line-through" }}>
+                {a.beschreibung}
+              </div>
+              <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 4 }}>
+                Erledigt{a.erledigt_am ? ` · ${String(a.erledigt_am).slice(0, 10)}` : ""}
+                {typeof a.historie_verbleibend_tage === "number" && (
+                  <span> · noch ca. {a.historie_verbleibend_tage} Tag{a.historie_verbleibend_tage !== 1 ? "e" : ""}</span>
+                )}
+              </div>
+            </div>
+            <Btn size="xs" variant="subtle" onClick={() => onWiederherstellen(a.id)}>↩ Wiederherstellen</Btn>
+            <Btn size="xs" variant="ghost" title="Endgültig entfernen"
+                 onClick={() => onPermanentDelete(a.id)}>Löschen</Btn>
+          </div>
+        ))}
+      </div>
+    )}
+  </Card>
+);
 
 // ═══════════════════════════════════════════════════════════
 // DOKUMENTE SECTION
@@ -397,7 +463,7 @@ const DokumenteSection = ({ name, dokumente, onRefresh }) => {
       <SectionTitle>
         Dokumente
         {dokumente.length > 0 && (
-          <Badge color={C.orange} style={{ marginLeft: 10, fontSize: 10 }}>
+          <Badge color={"var(--orange)"} style={{ marginLeft: 10, fontSize: 10 }}>
             {dokumente.length} fehlend
           </Badge>
         )}
@@ -405,7 +471,7 @@ const DokumenteSection = ({ name, dokumente, onRefresh }) => {
 
       {/* Fehlende Dokumente */}
       {dokumente.length === 0 ? (
-        <div style={{ fontSize: 13, color: C.text3, marginBottom: 14, padding: "8px 0" }}>
+        <div style={{ fontSize: 13, color: "var(--text3)", marginBottom: 14, padding: "8px 0" }}>
           Alle Dokumente vollständig ✓
         </div>
       ) : (
@@ -413,13 +479,13 @@ const DokumenteSection = ({ name, dokumente, onRefresh }) => {
           {dokumente.map((dok, i) => (
             <div key={i} style={{
               display: "flex", alignItems: "center", justifyContent: "space-between",
-              padding: "10px 14px", background: C.bg,
-              border: `1px solid ${C.orange}33`, borderRadius: 10,
+              padding: "10px 14px", background: "var(--bg)",
+              border: `1px solid ${"var(--orange)"}33`, borderRadius: 10,
               animation: `fadeUp 0.3s ease ${i * 40}ms both`,
             }}>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <span style={{ color: C.orange, fontSize: 14 }}>▲</span>
-                <span style={{ fontSize: 13, color: C.text }}>{dok}</span>
+                <span style={{ color: "var(--orange)", fontSize: 14 }}>▲</span>
+                <span style={{ fontSize: 13, color: "var(--text)" }}>{dok}</span>
               </div>
               <Btn size="xs" variant="success"
                    loading={erhaltenId === dok}
@@ -433,7 +499,7 @@ const DokumenteSection = ({ name, dokumente, onRefresh }) => {
 
       {/* Schnellauswahl häufige Dokumente */}
       <div style={{ marginBottom: 10 }}>
-        <div style={{ fontSize: 11, color: C.text3, marginBottom: 6,
+        <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 6,
                       textTransform: "uppercase", letterSpacing: "0.06em" }}>
           Häufig angefordert
         </div>
@@ -519,8 +585,8 @@ const EmailSection = ({ name, email }) => {
 
       {!email && (
         <div style={{
-          fontSize: 12, color: C.orange, marginBottom: 12,
-          background: C.orange + "15", border: `1px solid ${C.orange}30`,
+          fontSize: 12, color: "var(--orange)", marginBottom: 12,
+          background: "var(--orange)" + "15", border: `1px solid ${"var(--orange)"}30`,
           borderRadius: 8, padding: "8px 12px",
         }}>
           ⚠ Keine E-Mail-Adresse hinterlegt
@@ -529,8 +595,8 @@ const EmailSection = ({ name, email }) => {
 
       {gesendet && (
         <div style={{
-          fontSize: 12, color: C.green, marginBottom: 12,
-          background: C.green + "15", border: `1px solid ${C.green}30`,
+          fontSize: 12, color: "var(--green)", marginBottom: 12,
+          background: "var(--green)" + "15", border: `1px solid ${"var(--green)"}30`,
           borderRadius: 8, padding: "8px 12px",
         }}>
           ✓ Email wurde versendet
@@ -545,7 +611,7 @@ const EmailSection = ({ name, email }) => {
         <>
           {/* Betreff */}
           <div style={{ marginBottom: 10 }}>
-            <div style={{ fontSize: 11, color: C.text3, marginBottom: 4,
+            <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 4,
                           textTransform: "uppercase", letterSpacing: "0.06em" }}>
               Betreff
             </div>
@@ -560,9 +626,9 @@ const EmailSection = ({ name, email }) => {
           <div style={{ marginBottom: 12 }}>
             <div style={{ display: "flex", justifyContent: "space-between",
                           alignItems: "center", marginBottom: 6 }}>
-              <div style={{ fontSize: 11, color: C.text3, textTransform: "uppercase",
+              <div style={{ fontSize: 11, color: "var(--text3)", textTransform: "uppercase",
                              letterSpacing: "0.06em" }}>
-                Email-Text {editMode && <span style={{ color: C.accent }}>(bearbeitet)</span>}
+                Email-Text {editMode && <span style={{ color: "var(--accent)" }}>(bearbeitet)</span>}
               </div>
               <div style={{ display: "flex", gap: 6 }}>
                 <Btn size="xs" variant={editMode ? "subtle" : "ghost"}
@@ -581,9 +647,9 @@ const EmailSection = ({ name, email }) => {
                 onChange={e => setEditText(e.target.value)}
                 rows={10}
                 style={{
-                  width: "100%", background: C.bg,
-                  border: `1px solid ${C.accent}66`,
-                  borderRadius: 10, color: C.text,
+                  width: "100%", background: "var(--bg)",
+                  border: `1px solid ${"var(--accent)"}66`,
+                  borderRadius: 10, color: "var(--text)",
                   padding: "12px 14px", fontSize: 13,
                   fontFamily: "'DM Sans', sans-serif",
                   lineHeight: 1.8, resize: "vertical", outline: "none",
@@ -592,8 +658,8 @@ const EmailSection = ({ name, email }) => {
             ) : (
               <pre style={{
                 whiteSpace: "pre-wrap", fontFamily: "'DM Sans', sans-serif",
-                fontSize: 12, color: C.text2, lineHeight: 1.8,
-                background: C.bg, border: `1px solid ${C.border}`,
+                fontSize: 12, color: "var(--text2)", lineHeight: 1.8,
+                background: "var(--bg)", border: `1px solid var(--border)`,
                 borderRadius: 10, padding: "12px 14px",
                 maxHeight: 240, overflowY: "auto",
                 cursor: "text",
@@ -616,7 +682,7 @@ const EmailSection = ({ name, email }) => {
             </Btn>
           </div>
 
-          <div style={{ fontSize: 11, color: C.text3, marginTop: 8 }}>
+          <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 8 }}>
             Klicke auf den Text oder „Bearbeiten" um die Email anzupassen
           </div>
         </>
@@ -659,14 +725,14 @@ const SimulationSection = ({ name }) => {
   return (
     <Card>
       <SectionTitle>Steuer-Simulation</SectionTitle>
-      <div style={{ fontSize: 12, color: C.text3, marginBottom: 14 }}>
+      <div style={{ fontSize: 12, color: "var(--text3)", marginBottom: 14 }}>
         Was-wäre-wenn Analyse — Steuerlast bei veränderten Parametern
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
         {felder.map(f => (
           <div key={f.key}>
-            <div style={{ fontSize: 11, color: C.text3, marginBottom: 4 }}>{f.label}</div>
+            <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 4 }}>{f.label}</div>
             <Input placeholder="0" value={form[f.key]} type="number"
                    onChange={v => setForm(p => ({ ...p, [f.key]: v }))} />
           </div>
@@ -679,28 +745,28 @@ const SimulationSection = ({ name }) => {
 
       {ergebnis && (
         <div style={{
-          marginTop: 14, background: C.bg, border: `1px solid ${C.border}`,
+          marginTop: 14, background: "var(--bg)", border: `1px solid var(--border)`,
           borderRadius: 10, padding: 14,
         }}>
           {[
-            ["Basis-Gewinn",          ergebnis.basis_gewinn,        C.text2],
-            ["Simulierter Gewinn",    ergebnis.simulierter_gewinn,  C.blue],
-            ["Steuerlast aktuell",    ergebnis.steuerlast_aktuell,  C.orange],
-            ["Steuerlast simuliert",  ergebnis.steuerlast_simuliert,C.green],
+            ["Basis-Gewinn",          ergebnis.basis_gewinn,        "var(--text2)"],
+            ["Simulierter Gewinn",    ergebnis.simulierter_gewinn,  "var(--blue)"],
+            ["Steuerlast aktuell",    ergebnis.steuerlast_aktuell,  "var(--orange)"],
+            ["Steuerlast simuliert",  ergebnis.steuerlast_simuliert,"var(--green)"],
             ["Steuerersparnis",       ergebnis.steuerersparnis,
-             ergebnis.steuerersparnis > 0 ? C.green : C.red],
+             ergebnis.steuerersparnis > 0 ? "var(--green)" : "var(--red)"],
           ].map(([label, wert, farbe]) => (
             <div key={label} style={{
               display: "flex", justifyContent: "space-between", alignItems: "baseline",
-              padding: "6px 0", borderBottom: `1px solid ${C.border}`,
+              padding: "6px 0", borderBottom: `1px solid var(--border)`,
             }}>
-              <span style={{ fontSize: 12, color: C.text3 }}>{label}</span>
+              <span style={{ fontSize: 12, color: "var(--text3)" }}>{label}</span>
               <span style={{ fontSize: 14, fontWeight: 600, color: farbe }}>
                 €{(wert || 0).toLocaleString("de-DE", { minimumFractionDigits: 2 })}
               </span>
             </div>
           ))}
-          <div style={{ fontSize: 11, color: C.text3, marginTop: 10 }}>
+          <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 10 }}>
             {ergebnis.hinweis}
           </div>
         </div>
@@ -726,21 +792,21 @@ const WorkflowSection = ({ name, onRefresh }) => {
       id:    "monatsabschluss",
       label: "Monatsabschluss",
       desc:  `Alle Aufgaben für ${monat}/${jahr} automatisch anlegen`,
-      icon:  "▦", color: C.blue,
+      icon:  "▦", color: "var(--blue)",
       fn:    () => workflowMonatsabschluss(name, monat, jahr),
     },
     {
       id:    "jahresabschluss",
       label: "Jahresabschluss",
       desc:  `Jahresabschluss ${jahr} vorbereiten`,
-      icon:  "◈", color: C.accent,
+      icon:  "◈", color: "var(--accent)",
       fn:    () => workflowJahresabschluss(name, jahr),
     },
     {
       id:    "onboarding",
       label: "Onboarding",
       desc:  "Standard-Erstaufgaben für neuen Mandanten anlegen",
-      icon:  "◉", color: C.green,
+      icon:  "◉", color: "var(--green)",
       fn:    () => workflowOnboarding(name),
     },
   ];
@@ -761,7 +827,7 @@ const WorkflowSection = ({ name, onRefresh }) => {
   return (
     <Card>
       <SectionTitle>One-Click Workflows</SectionTitle>
-      <div style={{ fontSize: 12, color: C.text3, marginBottom: 14 }}>
+      <div style={{ fontSize: 12, color: "var(--text3)", marginBottom: 14 }}>
         Standardaufgaben automatisch anlegen — spart bis zu 30 Minuten pro Workflow
       </div>
 
@@ -769,8 +835,8 @@ const WorkflowSection = ({ name, onRefresh }) => {
         {workflows.map(wf => (
           <div key={wf.id} style={{
             display: "flex", alignItems: "center", justifyContent: "space-between",
-            padding: "12px 14px", background: C.bg,
-            border: `1px solid ${C.border}`, borderRadius: 10,
+            padding: "12px 14px", background: "var(--bg)",
+            border: `1px solid var(--border)`, borderRadius: 10,
           }}>
             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
               <div style={{
@@ -782,8 +848,8 @@ const WorkflowSection = ({ name, onRefresh }) => {
                 {wf.icon}
               </div>
               <div>
-                <div style={{ fontWeight: 600, color: C.text, fontSize: 14 }}>{wf.label}</div>
-                <div style={{ fontSize: 12, color: C.text3, marginTop: 2 }}>{wf.desc}</div>
+                <div style={{ fontWeight: 600, color: "var(--text)", fontSize: 14 }}>{wf.label}</div>
+                <div style={{ fontSize: 12, color: "var(--text3)", marginTop: 2 }}>{wf.desc}</div>
               </div>
             </div>
             <Btn size="sm" variant="subtle" loading={loading === wf.id}
@@ -796,14 +862,14 @@ const WorkflowSection = ({ name, onRefresh }) => {
 
       {result && result.status === "ok" && (
         <div style={{
-          marginTop: 14, background: C.green + "10", border: `1px solid ${C.green}30`,
+          marginTop: 14, background: "var(--green)" + "10", border: `1px solid ${"var(--green)"}30`,
           borderRadius: 10, padding: "12px 14px",
         }}>
-          <div style={{ color: C.green, fontWeight: 600, fontSize: 13, marginBottom: 6 }}>
+          <div style={{ color: "var(--green)", fontWeight: 600, fontSize: 13, marginBottom: 6 }}>
             ✓ {result.aufgaben_erstellt} Aufgaben wurden erstellt
           </div>
           {result.aufgaben?.map((a, i) => (
-            <div key={i} style={{ fontSize: 12, color: C.text3, padding: "2px 0" }}>
+            <div key={i} style={{ fontSize: 12, color: "var(--text3)", padding: "2px 0" }}>
               · {a}
             </div>
           ))}
@@ -823,7 +889,9 @@ export default function MandantDetail() {
   const navigate = useNavigate();
 
   const [mandant,   setMandant]   = useState(null);
-  const [aufgaben,  setAufgaben]  = useState([]);
+  const [aufgaben,       setAufgaben]       = useState([]);
+  const [historieAufgaben, setHistorieAufgaben] = useState([]);
+  const [historieTtl,   setHistorieTtl]    = useState(30);
   const [dokumente, setDokumente] = useState([]);
   const [loading,   setLoading]   = useState(true);
   const [toast,     setToast]     = useState(null);
@@ -851,10 +919,21 @@ export default function MandantDetail() {
 
   const ladeAufgaben = useCallback(async () => {
     try {
-      const d = await getAufgabenMandant(name);
-      setAufgaben(d?.aufgaben || []);
-    } catch { setAufgaben([]); }
-  }, [name]);
+      const [dA, dH] = await Promise.all([
+        getAufgabenMandant(name, { bereich: "aktiv" }),
+        getAufgabenMandant(name, { bereich: "historie" }),
+      ]);
+      setAufgaben(extrahiereAufgabenArray(dA));
+      setHistorieAufgaben(extrahiereAufgabenArray(dH));
+      const ttl = dH?.historie_ttl_tage ?? dA?.historie_ttl_tage ??
+        dH?.data?.historie_ttl_tage ?? dA?.data?.historie_ttl_tage ?? 30;
+      setHistorieTtl(Number(ttl) || 30);
+    } catch (e) {
+      setAufgaben([]);
+      setHistorieAufgaben([]);
+      showToast(e.message || "Aufgaben konnten nicht geladen werden", "error");
+    }
+  }, [name, showToast]);
 
   const ladeDokumente = useCallback(async () => {
     try {
@@ -873,10 +952,10 @@ export default function MandantDetail() {
 
   // ── Aufgaben-Aktionen ──────────────────────────────────
   const handleToggle = async (id) => {
-    setAufgaben(p => p.map(a => a.id === id ? { ...a, erledigt: !a.erledigt } : a));
     try {
       await toggleAufgabeAPI(id);
       showToast("Status geändert");
+      await ladeAufgaben();
     } catch (e) {
       showToast(e.message, "error");
       await ladeAufgaben();
@@ -885,12 +964,43 @@ export default function MandantDetail() {
 
   const handleDelete = async (id) => {
     if (!window.confirm("Aufgabe wirklich löschen?")) return;
-    setAufgaben(p => p.filter(a => a.id !== id));
     try {
       await deleteAufgabeAPI(id);
       showToast("Aufgabe gelöscht", "warn");
+      await ladeAufgaben();
     } catch (e) {
       showToast(e.message, "error");
+      await ladeAufgaben();
+    }
+  };
+
+  const handleEdit = async (a) => {
+    const beschreibungNeu = window.prompt("Beschreibung bearbeiten:", a.beschreibung || "");
+    if (beschreibungNeu === null) return;
+    const fristNeu = window.prompt("Frist (YYYY-MM-DD):", a.frist || "");
+    if (fristNeu === null) return;
+    const uhrzeitNeu = window.prompt("Uhrzeit optional (HH:MM, leer lassen falls keine):", a.frist_uhrzeit || "");
+    if (uhrzeitNeu === null) return;
+    const prioNeu = window.prompt("Priorität (niedrig|normal|hoch|kritisch):", a.prioritaet || "normal");
+    if (prioNeu === null) return;
+
+    const payload = {
+      beschreibung: String(beschreibungNeu || "").trim(),
+      frist: String(fristNeu || "").trim(),
+      frist_uhrzeit: String(uhrzeitNeu || "").trim(),
+      prioritaet: String(prioNeu || "normal").trim().toLowerCase(),
+    };
+    if (!payload.beschreibung || !payload.frist) {
+      showToast("Beschreibung und Frist sind erforderlich", "error");
+      return;
+    }
+
+    setAufgaben((prev) => prev.map((x) => (x.id === a.id ? { ...x, ...payload } : x)));
+    try {
+      await updateAufgabeAPI(a.id, payload);
+      showToast("Aufgabe bearbeitet");
+    } catch (e) {
+      showToast(e.message || "Bearbeiten fehlgeschlagen", "error");
       await ladeAufgaben();
     }
   };
@@ -909,7 +1019,7 @@ export default function MandantDetail() {
   // ── Loading & Not Found ────────────────────────────────
   if (loading) return (
     <div style={{
-      minHeight: "100vh", background: C.bg,
+      minHeight: "100vh", background: "var(--bg)",
       display: "flex", alignItems: "center", justifyContent: "center",
       flexDirection: "column", gap: 16,
     }}>
@@ -919,10 +1029,10 @@ export default function MandantDetail() {
         @keyframes fadeUp { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:translateY(0); } }
         @keyframes slideUp { from { opacity:0; transform:translateY(20px); } to { opacity:1; transform:translateY(0); } }
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-        body { background: #0b0d11; }
+        body { background: var(--bg); color: var(--text); }
       `}</style>
       <Spinner size={36} />
-      <div style={{ color: C.text3, fontFamily: "'DM Sans', sans-serif" }}>
+      <div style={{ color: "var(--text3)", fontFamily: "var(--font-body)" }}>
         Lade Mandantenakte...
       </div>
     </div>
@@ -930,15 +1040,15 @@ export default function MandantDetail() {
 
   if (!mandant) return (
     <div style={{
-      minHeight: "100vh", background: C.bg, padding: 40,
-      fontFamily: "'DM Sans', sans-serif",
+      minHeight: "100vh", background: "var(--bg)", padding: 40,
+      fontFamily: "var(--font-body)",
     }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@300;400;500;600&display=swap');
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-        body { background: #0b0d11; }
+        body { background: var(--bg); color: var(--text); }
       `}</style>
-      <div style={{ color: C.red, fontSize: 18, marginBottom: 12 }}>
+      <div style={{ color: "var(--red)", fontSize: 18, marginBottom: 12 }}>
         Mandant nicht gefunden: „{name}"
       </div>
       <Btn onClick={() => navigate("/")} variant="ghost">← Zurück zum Dashboard</Btn>
@@ -948,11 +1058,11 @@ export default function MandantDetail() {
   // ── Score & Status ─────────────────────────────────────
   const score    = mandant.score_details?.score ?? mandant.score ?? 0;
   const status   = score >= 12000 ? "KRITISCH" : score >= 5000 ? "WICHTIG" : "OK";
-  const statusC  = { KRITISCH: C.red, WICHTIG: C.orange, OK: C.green }[status];
+  const statusC  = { KRITISCH: "var(--red)", WICHTIG: "var(--orange)", OK: "var(--green)" }[status];
   const tage     = mandant.score_details?.tage ?? mandant.tage_ohne_antwort ?? 0;
 
   return (
-    <div style={{ minHeight: "100vh", background: C.bg, fontFamily: "'DM Sans', sans-serif" }}>
+    <div style={{ minHeight: "100vh", background: "var(--bg)", fontFamily: "var(--font-body)" }}>
 
       {/* Fonts + Animations */}
       <style>{`
@@ -963,12 +1073,12 @@ export default function MandantDetail() {
         @keyframes pulse   { 0%,100%{opacity:1} 50%{opacity:.4} }
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
         ::-webkit-scrollbar { width: 4px; }
-        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
+        ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
       `}</style>
 
       {/* ── HEADER ── */}
       <div style={{
-        background: C.bg2, borderBottom: `1px solid ${C.border}`,
+        background: "var(--bg2)", borderBottom: `1px solid var(--border)`,
         padding: "20px 36px", display: "flex", alignItems: "center", gap: 16,
         position: "sticky", top: 0, zIndex: 100,
       }}>
@@ -976,12 +1086,12 @@ export default function MandantDetail() {
 
         <div style={{ flex: 1 }}>
           <div style={{
-            fontFamily: "'DM Serif Display', serif", fontSize: 24, color: C.text,
+            fontFamily: "'DM Serif Display', serif", fontSize: 24, color: "var(--text)",
             letterSpacing: "-0.01em",
           }}>
             {name}
           </div>
-          <div style={{ color: C.text3, fontSize: 12, marginTop: 2, display: "flex", gap: 12 }}>
+          <div style={{ color: "var(--text3)", fontSize: 12, marginTop: 2, display: "flex", gap: 12 }}>
             {mandant.email && <span>✉ {mandant.email}</span>}
             {mandant.telefon && <span>📞 {mandant.telefon}</span>}
             {mandant.branche && <span>◈ {mandant.branche}</span>}
@@ -992,7 +1102,7 @@ export default function MandantDetail() {
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{ textAlign: "right" }}>
             <Badge color={statusC} style={{ fontSize: 11 }}>{status}</Badge>
-            <div style={{ fontSize: 11, color: C.text3, marginTop: 4 }}>
+            <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 4 }}>
               Score: {Math.round(score).toLocaleString("de")}
             </div>
           </div>
@@ -1012,17 +1122,17 @@ export default function MandantDetail() {
         {/* Warnung wenn kein Kontakt seit 7+ Tagen */}
         {tage >= 7 && (
           <div style={{
-            background: C.orange + "12", border: `1px solid ${C.orange}35`,
+            background: "var(--orange)" + "12", border: `1px solid ${"var(--orange)"}35`,
             borderRadius: 12, padding: "12px 18px", marginBottom: 20,
             display: "flex", alignItems: "center", gap: 12,
             animation: "fadeUp 0.3s ease",
           }}>
-            <span style={{ color: C.orange, fontSize: 18 }}>⚠</span>
+            <span style={{ color: "var(--orange)", fontSize: 18 }}>⚠</span>
             <div>
-              <span style={{ color: C.orange, fontWeight: 600, fontSize: 13 }}>
+              <span style={{ color: "var(--orange)", fontWeight: 600, fontSize: 13 }}>
                 Seit {tage} Tagen keine Rückmeldung
               </span>
-              <span style={{ color: C.text3, fontSize: 12, marginLeft: 8 }}>
+              <span style={{ color: "var(--text3)", fontSize: 12, marginLeft: 8 }}>
                 Automatische Erinnerung aktiv
               </span>
             </div>
@@ -1040,8 +1150,14 @@ export default function MandantDetail() {
           <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
             <AufgabenSection
               name={name} aufgaben={aufgaben}
-              onToggle={handleToggle} onDelete={handleDelete}
+              onToggle={handleToggle} onEdit={handleEdit} onDelete={handleDelete}
               onRefresh={ladeAufgaben}
+            />
+            <AufgabenHistorieSection
+              ttlTage={historieTtl}
+              items={historieAufgaben}
+              onWiederherstellen={handleToggle}
+              onPermanentDelete={handleDelete}
             />
             <SimulationSection name={name} />
           </div>
@@ -1053,23 +1169,23 @@ export default function MandantDetail() {
             <Card>
               <SectionTitle>Stammdaten</SectionTitle>
               {[
-                ["Jahresumsatz", `€${(mandant.umsatz || 0).toLocaleString("de-DE")}`, C.accent],
+                ["Jahresumsatz", `€${(mandant.umsatz || 0).toLocaleString("de-DE")}`, "var(--accent)"],
                 ["E-Mail",       mandant.email   || "—", null],
                 ["Telefon",      mandant.telefon || "—", null],
                 ["Branche",      mandant.branche || "—", null],
                 ["Steuer-ID",    mandant.steuer_id || "—", null],
-                ["Aufgaben offen",    mandant.aufgaben_offen ?? aufgaben.filter(a=>!a.erledigt).length, null],
-                ["Aufgaben erledigt", mandant.aufgaben_erledigt ?? aufgaben.filter(a=>a.erledigt).length, C.green],
-                ["Letzter Kontakt",   tage > 0 ? `vor ${tage} Tagen` : "Heute", tage >= 7 ? C.orange : null],
+                ["Aufgaben offen",    mandant.aufgaben_offen ?? aufgaben.filter((a)=>!istErledigt(a)).length, null],
+                ["Aufgaben erledigt (Historie)", mandant.aufgaben_erledigt ?? historieAufgaben.length, "var(--green)"],
+                ["Letzter Kontakt",   tage > 0 ? `vor ${tage} Tagen` : "Heute", tage >= 7 ? "var(--orange)" : null],
               ].map(([label, value, color]) => (
                 <div key={label} style={{
                   display: "flex", justifyContent: "space-between", alignItems: "baseline",
-                  padding: "7px 0", borderBottom: `1px solid ${C.border}`,
+                  padding: "7px 0", borderBottom: `1px solid var(--border)`,
                 }}>
-                  <span style={{ fontSize: 12, color: C.text3, flexShrink: 0 }}>{label}</span>
+                  <span style={{ fontSize: 12, color: "var(--text3)", flexShrink: 0 }}>{label}</span>
                   <span style={{
                     fontSize: 13, fontWeight: 500,
-                    color: color || C.text, textAlign: "right",
+                    color: color || "var(--text)", textAlign: "right",
                     maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis",
                     whiteSpace: "nowrap",
                   }}>
@@ -1079,8 +1195,8 @@ export default function MandantDetail() {
               ))}
 
               {mandant.notizen && (
-                <div style={{ marginTop: 12, fontSize: 12, color: C.text2,
-                              lineHeight: 1.7, borderTop: `1px solid ${C.border}`,
+                <div style={{ marginTop: 12, fontSize: 12, color: "var(--text2)",
+                              lineHeight: 1.7, borderTop: `1px solid var(--border)`,
                               paddingTop: 10 }}>
                   {mandant.notizen}
                 </div>
@@ -1098,7 +1214,7 @@ export default function MandantDetail() {
             {/* Export Section */}
             <Card>
               <SectionTitle>Export & DATEV</SectionTitle>
-              <div style={{ fontSize: 12, color: C.text3, marginBottom: 12 }}>
+              <div style={{ fontSize: 12, color: "var(--text3)", marginBottom: 12 }}>
                 Alle Formate direkt als Download
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -1110,12 +1226,12 @@ export default function MandantDetail() {
                 ].map((ex, i) => (
                   <div key={i} style={{
                     display: "flex", alignItems: "center", justifyContent: "space-between",
-                    padding: "8px 12px", background: C.bg,
-                    border: `1px solid ${C.border}`, borderRadius: 8,
+                    padding: "8px 12px", background: "var(--bg)",
+                    border: `1px solid var(--border)`, borderRadius: 8,
                   }}>
                     <div>
-                      <div style={{ fontSize: 13, color: C.text, fontWeight: 500 }}>{ex.label}</div>
-                      <div style={{ fontSize: 11, color: C.text3 }}>{ex.desc}</div>
+                      <div style={{ fontSize: 13, color: "var(--text)", fontWeight: 500 }}>{ex.label}</div>
+                      <div style={{ fontSize: 11, color: "var(--text3)" }}>{ex.desc}</div>
                     </div>
                     <Btn size="xs" variant="ghost"
                          onClick={() => ex.fn().catch(e => showToast(e.message, "error"))}>
@@ -1129,7 +1245,7 @@ export default function MandantDetail() {
             {/* Portal Token */}
             <Card>
               <SectionTitle>Mandantenportal</SectionTitle>
-              <div style={{ fontSize: 12, color: C.text3, marginBottom: 12 }}>
+              <div style={{ fontSize: 12, color: "var(--text3)", marginBottom: 12 }}>
                 Zugangslink für den Mandanten generieren
               </div>
               {mandant.email ? (
@@ -1147,7 +1263,7 @@ export default function MandantDetail() {
                   🔗 Portal-Link generieren & kopieren
                 </Btn>
               ) : (
-                <div style={{ fontSize: 12, color: C.orange }}>
+                <div style={{ fontSize: 12, color: "var(--orange)" }}>
                   ⚠ E-Mail-Adresse fehlt — bitte ergänzen
                 </div>
               )}

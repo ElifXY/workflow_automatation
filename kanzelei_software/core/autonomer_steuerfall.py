@@ -350,23 +350,67 @@ class AutononerSteuerfall:
         if not fall:
             raise ValueError(f"Steuerfall '{fall_id}' nicht gefunden")
 
-        fall["status"]         = "freigegeben"
-        fall["freigegeben_am"] = datetime.now().isoformat()
-        fall["freigegeben_von"]= freigegeben_von
+        jetzt = datetime.now().isoformat()
+        fall["status"]                 = "freigegeben"
+        fall["freigegeben_am"]         = jetzt
+        fall["freigegeben_von"]        = freigegeben_von
+        fall["historie_eintritt_am"]   = jetzt
         self.ds.steuerfall_speichern(fall_id, fall)
         self.ds.log_eintrag(
             f"STEUERFALL_FREIGABE | {fall['mandant']} | {fall_id[:8]} | {freigegeben_von}"
         )
         return fall
 
-    def faelle_laden(self, mandant: str = None, status: str = None) -> List[Dict]:
-        """Alle Steuerfälle laden — ohne große Daten (KI-Analyse, ELSTER)."""
+    def fall_nach_historie(self, fall_id: str) -> Dict:
+        """Manuell in die Historie legen (ohne Freigabe)."""
+        fall = self.ds.steuerfall_holen(fall_id)
+        if not fall:
+            raise ValueError(f"Steuerfall '{fall_id}' nicht gefunden")
+        jetzt = datetime.now().isoformat()
+        fall["historie_eintritt_am"] = jetzt
+        self.ds.steuerfall_speichern(fall_id, fall)
+        self.ds.log_eintrag(f"STEUERFALL_HISTORIE | {fall.get('mandant')} | {fall_id[:8]}")
+        return fall
+
+    def fall_aus_historie(self, fall_id: str) -> Dict:
+        """Fall wieder unter aktive Bearbeitung führen."""
+        fall = self.ds.steuerfall_holen(fall_id)
+        if not fall:
+            raise ValueError(f"Steuerfall '{fall_id}' nicht gefunden")
+        fall.pop("historie_eintritt_am", None)
+        fall["status"] = "berechnet"
+        fall.pop("freigegeben_am", None)
+        fall.pop("freigegeben_von", None)
+        self.ds.steuerfall_speichern(fall_id, fall)
+        self.ds.log_eintrag(f"STEUERFALL_HISTORIE_WIEDER | {fall.get('mandant')} | {fall_id[:8]}")
+        return fall
+
+    def fall_loeschen(self, fall_id: str) -> Dict:
+        if not self.ds.steuerfall_holen(fall_id):
+            raise ValueError(f"Steuerfall '{fall_id}' nicht gefunden")
+        if not self.ds.steuerfall_loeschen(fall_id):
+            raise RuntimeError("Steuerfall konnte nicht gelöscht werden")
+        self.ds.log_eintrag(f"STEUERFALL_GELOESCHT | {fall_id[:8]}")
+        return {"status": "deleted", "id": fall_id}
+
+    def faelle_laden(self, mandant: str = None, status: str = None, pool: str = None) -> List[Dict]:
+        """Steuerfälle laden — pool=aktiv|historie|alle (Standard alle)."""
+        from core.kanzlei_historie import steuerfaelle_historie_liste, steuerfall_ist_in_historie
+
+        if pool == "historie":
+            arr, _ = steuerfaelle_historie_liste(self.ds, mandant)
+            if status:
+                arr = [f for f in arr if f.get("status") == status]
+            return arr
+
         data   = self._steuerfaelle_daten()
         faelle = list(data.get("steuerfaelle", {}).values())
         if mandant:
             faelle = [f for f in faelle if f.get("mandant") == mandant]
         if status:
             faelle = [f for f in faelle if f.get("status") == status]
+        if pool == "aktiv":
+            faelle = [f for f in faelle if not steuerfall_ist_in_historie(f)]
         # Große Felder für Listings weglassen
         return [
             {k: v for k, v in f.items() if k not in ("ki_analyse", "elster_xml_b64", "mandant_daten")}

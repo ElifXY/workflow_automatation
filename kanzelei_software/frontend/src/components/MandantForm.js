@@ -111,22 +111,25 @@ useEffect(() => {
 
   return (
     <div style={{
-      background: "#fff",
+      background: "var(--bg2)",
+      color: "var(--text)",
       padding: "20px",
       borderRadius: "14px",
-      boxShadow: "0 6px 16px rgba(0,0,0,0.08)",
+      border: "1px solid var(--border)",
+      boxShadow: "var(--shadow-elev)",
       maxWidth: "420px"
     }}>
 
-      <h3 style={{ marginBottom: "15px" }}>
+      <h3 style={{ marginBottom: "15px", color: "var(--accent)", fontFamily: "var(--font-head)" }}>
         {initialData ? "✏️ Mandant bearbeiten" : "➕ Neuer Mandant"}
       </h3>
 
       {/* ERROR */}
       {error && (
         <div style={{
-          background: "#ffebee",
-          color: "#c62828",
+          background: "color-mix(in srgb, var(--red) 12%, var(--bg3))",
+          color: "var(--red)",
+          border: "1px solid color-mix(in srgb, var(--red) 30%, transparent)",
           padding: "10px",
           borderRadius: "8px",
           marginBottom: "10px"
@@ -171,7 +174,8 @@ useEffect(() => {
           disabled={loading}
           style={{
             ...buttonStyle,
-            background: "#4caf50"
+            background: "var(--green)",
+            color: "color-mix(in srgb, white 96%, var(--green))",
           }}
         >
           {loading ? "Speichert..." : "💾 Speichern"}
@@ -182,7 +186,9 @@ useEffect(() => {
             onClick={onCancel}
             style={{
               ...buttonStyle,
-              background: "#9e9e9e",
+              background: "var(--bg3)",
+              color: "var(--text2)",
+              border: "1px solid var(--border2)",
               marginLeft: "10px"
             }}
           >
@@ -204,7 +210,9 @@ const inputStyle = {
   padding: "10px",
   marginBottom: "10px",
   borderRadius: "8px",
-  border: "1px solid #ddd",
+  border: "1px solid var(--border2)",
+  background: "var(--bg)",
+  color: "var(--text)",
   fontSize: "14px",
   outline: "none"
 };
@@ -213,9 +221,9 @@ const buttonStyle = {
   padding: "10px 15px",
   border: "none",
   borderRadius: "8px",
-  color: "#fff",
   cursor: "pointer",
-  fontSize: "14px"
+  fontSize: "14px",
+  fontFamily: "var(--font-body)",
 };
 
 export default MandantForm;

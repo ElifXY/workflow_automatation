@@ -3,13 +3,67 @@
 // Alle Endpunkte passend zur neuen api.py
 // ============================================================
 
-const BASE_URL = process.env.REACT_APP_API_URL || "http://127.0.0.1:8000";
+const BASE_URL = process.env.REACT_APP_API_URL || "/api";
+let _refreshInFlight = null;
+
+const getAccessToken = () =>
+  localStorage.getItem("kanzlei_token") || localStorage.getItem("token") || "";
+const getRefreshToken = () => localStorage.getItem("kanzlei_refresh_token") || "";
+const setAccessToken = (token) => {
+  const v = token || "";
+  localStorage.setItem("kanzlei_token", v);
+  localStorage.setItem("token", v);
+};
+const setRefreshToken = (token) => {
+  if (!token) {
+    localStorage.removeItem("kanzlei_refresh_token");
+    return;
+  }
+  localStorage.setItem("kanzlei_refresh_token", token);
+};
+const clearAuthStorage = () => {
+  localStorage.removeItem("kanzlei_token");
+  localStorage.removeItem("token");
+  localStorage.removeItem("kanzlei_refresh_token");
+  localStorage.removeItem("kanzlei_user");
+  localStorage.removeItem("kanzlei_rolle");
+  localStorage.removeItem("role");
+  try {
+    localStorage.removeItem("kanzlei_view_as_role");
+  } catch {}
+};
+
+const refreshAccessToken = async () => {
+  const refreshToken = getRefreshToken();
+  if (!refreshToken) return "";
+  if (_refreshInFlight) return _refreshInFlight;
+  _refreshInFlight = (async () => {
+    const res = await fetch(`${BASE_URL}/auth/refresh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !body?.access_token) {
+      clearAuthStorage();
+      throw new Error(body?.detail || body?.error || "Session abgelaufen");
+    }
+    setAccessToken(body.access_token);
+    if (body.refresh_token) setRefreshToken(body.refresh_token);
+    return body.access_token;
+  })();
+  try {
+    return await _refreshInFlight;
+  } finally {
+    _refreshInFlight = null;
+  }
+};
 
 // ─── Generic Fetch (Auth Token + Timeout + Error Handling) ──────
-const apiFetch = async (url, options = {}) => {
+export const apiFetch = async (url, options = {}) => {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30000);
-  const token = localStorage.getItem("kanzlei_token");
+  const token = getAccessToken();
 
   try {
     const res = await fetch(BASE_URL + url, {
@@ -29,18 +83,113 @@ const apiFetch = async (url, options = {}) => {
     try { data = await res.json(); } catch { data = null; }
 
     if (!res.ok) {
-      const msg = data?.detail || `Server Fehler (${res.status})`;
-      throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+      if (res.status === 402 && typeof window !== "undefined") {
+        try {
+          window.dispatchEvent(new CustomEvent("billing:paywall", { detail: data || {} }));
+        } catch {}
+      }
+      if (res.status === 401 && !options._retryAfterRefresh && getRefreshToken()) {
+        try {
+          const newToken = await refreshAccessToken();
+          return await apiFetch(url, {
+            ...options,
+            _retryAfterRefresh: true,
+            headers: {
+              ...(options.headers || {}),
+              Authorization: `Bearer ${newToken}`,
+            },
+          });
+        } catch {
+          if (typeof window !== "undefined" && window.location.pathname !== "/login") {
+            window.location.href = "/login";
+          }
+        }
+      }
+      const msg =
+        data?.error ||
+        data?.detail ||
+        data?.message ||
+        `Server Fehler (${res.status})`;
+      const err = new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+      err.status = res.status;
+      err.apiPayload = data;
+      throw err;
+    }
+
+    if (typeof window !== "undefined") {
+      try {
+        const quotaStatus = (res.headers.get("X-Quota-Status") || "").toLowerCase();
+        if (quotaStatus === "warning" || quotaStatus === "critical") {
+          window.dispatchEvent(
+            new CustomEvent("billing:quota-warning", {
+              detail: {
+                metric: res.headers.get("X-Quota-Metric") || "",
+                used: Number(res.headers.get("X-Quota-Used") || "0"),
+                limit: Number(res.headers.get("X-Quota-Limit") || "0"),
+                percent: Number(res.headers.get("X-Quota-Percent") || "0"),
+                status: quotaStatus,
+                plan: res.headers.get("X-Quota-Plan") || "",
+                recommended_plan: res.headers.get("X-Quota-Recommend-Plan") || "",
+                upgrade_url: res.headers.get("X-Quota-Upgrade-Url") || "",
+              },
+            })
+          );
+        }
+      } catch {}
     }
 
     return data;
 
   } catch (err) {
     clearTimeout(timeout);
-    if (err.name === "AbortError") throw new Error("Server Timeout — Backend erreichbar?");
+    if (err.name === "AbortError") throw new Error("Zeitüberschreitung. Bitte erneut versuchen.");
     throw err;
   }
 };
+
+/** Alias: einheitliche ``api(url, opts)``-Schicht für neue Komponenten */
+export const api = apiFetch;
+
+/** GET mit gleichem Auth-Handling wie ``apiFetch`` */
+export const apiGet = (path) => apiFetch(path);
+
+/** Antwort von GET /mandanten/…/aufgaben (ok_compat: top-level oder data.aufgaben) */
+export function extrahiereAufgabenArray(resp) {
+  if (resp == null || typeof resp !== "object") return [];
+  const candidates = [
+    resp.aufgaben,
+    resp.data?.aufgaben,
+    resp.data?.data?.aufgaben,
+    resp.result?.aufgaben,
+    resp.payload?.aufgaben,
+  ];
+  for (const c of candidates) {
+    if (Array.isArray(c)) return c;
+  }
+  return [];
+}
+
+/** Wie ``core.aufgabe_erledigt.aufgabe_ist_erledigt`` (SQLite 0/1, bool, Strings) */
+export function istAufgabeErledigt(a) {
+  const e = a?.erledigt;
+  if (e == null || e === false) return false;
+  if (e === true) return true;
+  if (typeof e === "number" && Number.isFinite(e)) return e !== 0;
+  if (typeof e === "string") {
+    const s = e.trim().toLowerCase();
+    if (["", "0", "false", "nein", "no", "none", "null"].includes(s)) return false;
+    if (["1", "true", "yes", "ja"].includes(s)) return true;
+    return false;
+  }
+  return Boolean(e);
+}
+
+/** GET /heute → ``ok_compat({ eintraege }``) */
+export function extrahiereHeuteEintraege(resp) {
+  if (resp == null || typeof resp !== "object") return [];
+  const arr = resp.eintraege ?? resp.data?.eintraege;
+  return Array.isArray(arr) ? arr : [];
+}
 
 // ═══════════════════════════════════════════════════════════════
 // MANDANTEN
@@ -99,6 +248,12 @@ export const addAufgabenBulkAPI = (name, aufgaben) =>
 
 export const toggleAufgabeAPI = (id) =>
   apiFetch(`/aufgaben/${id}/erledigen`, { method: "POST" });
+
+export const updateAufgabeAPI = (id, data) =>
+  apiFetch(`/aufgaben/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
 
 export const deleteAufgabeAPI = (id) =>
   apiFetch(`/aufgaben/${id}`, { method: "DELETE" });
@@ -293,22 +448,55 @@ export const getSystemInfo         = () => apiFetch("/system/info");
 export const getSystemExport       = () => apiFetch("/system/export");
 export const getPlausibilitaet     = () => apiFetch("/plausibilitaet");
 export const getSaasReadiness      = () => apiFetch("/saas/readiness");
+export const getBillingUsage       = () => apiFetch("/billing/usage");
+export const getBillingMetrics     = () => apiFetch("/billing/metrics");
+export const getBillingFunnel      = (lookback_hours = 24) => apiFetch(`/billing/funnel?lookback_hours=${encodeURIComponent(lookback_hours)}`);
+export const getBillingWeeklyReport = () => apiFetch("/billing/report/weekly");
+export const sendBillingWeeklyReport = () =>
+  apiFetch("/billing/report/weekly/send", { method: "POST" });
+export const trackBillingFunnelEvent = (stage, meta = {}) =>
+  apiFetch("/billing/funnel/event", {
+    method: "POST",
+    body: JSON.stringify({ stage, meta }),
+  });
+export const getStripePublicConfig = () => apiFetch("/billing/stripe/config");
+export const createStripeCheckoutSession = (body) =>
+  apiFetch("/billing/stripe/checkout-session", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+export const createStripePortalSession = (return_url) =>
+  apiFetch("/billing/stripe/portal-session", {
+    method: "POST",
+    body: JSON.stringify({ return_url }),
+  });
 export const getComplianceStatus   = () => apiFetch("/compliance/status");
 
 // ═══════════════════════════════════════════════════════════════
 // AUTH — Login, Sessions, Team
 // ═══════════════════════════════════════════════════════════════
 
-export const authLogin = (benutzername, passwort) =>
-  apiFetch("/auth/login", {
-    method: "POST",
-    body: JSON.stringify({ benutzername, passwort }),
-  });
+export const authLogin = (benutzername, passwort) => {
+  const id = String(benutzername || "").trim();
+  const isEmail = id.includes("@");
+  const path = isEmail ? "/login" : "/auth/login";
+  const body = isEmail
+    ? { email: id, password: passwort }
+    : { benutzername: id, passwort };
+  return apiFetch(path, { method: "POST", body: JSON.stringify(body) });
+};
 
 export const authLogout = () =>
   apiFetch("/auth/logout", { method: "POST" });
 
 export const authMe = () => apiFetch("/auth/me");
+export const meGet = () => apiFetch("/me");
+export const meUpdate = (payload) =>
+  apiFetch("/me", { method: "PUT", body: JSON.stringify(payload) });
+export const mePasswordUpdate = (payload) =>
+  apiFetch("/me/password", { method: "PUT", body: JSON.stringify(payload) });
+export const meLogoutAll = () =>
+  apiFetch("/me/logout-all", { method: "POST" });
 
 export const authRegistrieren = (data) =>
   apiFetch("/auth/registrieren", {
@@ -325,12 +513,37 @@ export const authPasswortAendern = (altes, neues) =>
   });
 
 export const authSetupStatus = () => apiFetch("/auth/setup-status");
+export const authPasswortForgot = (email) =>
+  apiFetch("/auth/password/forgot", {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
+export const authPasswortReset = (payload) =>
+  apiFetch("/auth/password/reset", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+export const authEmailVerify = (token) =>
+  apiFetch("/auth/email/verify", {
+    method: "POST",
+    body: JSON.stringify({ token }),
+  });
+export const authEmailResend = (email) =>
+  apiFetch("/auth/email/resend", {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
 
 // Token-Verwaltung (localStorage)
 export const getToken = ()         => localStorage.getItem("kanzlei_token");
-export const setToken = (token)    => localStorage.setItem("kanzlei_token", token);
-export const removeToken = ()      => localStorage.removeItem("kanzlei_token");
+export const setToken = (token)    => setAccessToken(token);
+export const removeToken = ()      => clearAuthStorage();
 export const isLoggedIn = ()       => !!getToken();
+
+/** JWT ist stateless — Client-Session leeren und zur Login-Seite (Pfad anpassen). */
+export const clearClientAuth = () => {
+  clearAuthStorage();
+};
 
 // ═══════════════════════════════════════════════════════════════
 // BANK IMPORT
@@ -704,10 +917,6 @@ export const getAuditFull        = (limit = 100, suche = null) => {
   return apiFetch(`/audit?${params.toString()}`);
 };
 
-
-// ═══════════════════════════════════════════════════════════════
-// KI-ANALYSE (echte OpenAI-Analyse pro Mandant + Kanzlei)
-// ═══════════════════════════════════════════════════════════════
 
 export const kiMandantAnalyse = (name) =>
   apiFetch(`/ki/mandant-analyse/${encodeURIComponent(name)}`);

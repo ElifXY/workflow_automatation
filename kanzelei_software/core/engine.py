@@ -20,7 +20,6 @@ from typing import Dict, List, Optional, Tuple, Any
 from core.daten_speicher import DatenSpeicher
 from core.decision_engine import analysiere_alle_mandanten as analysiere_alle
 from core.ai_email import generate_ai_email, generiere_email_text
-from modules.settings_manager import setting_holen
 
 log = logging.getLogger("kanzlei_engine")
 
@@ -176,6 +175,11 @@ class Engine:
     def __init__(self, ds: Optional[DatenSpeicher] = None):
         self.ds = ds or DatenSpeicher()
 
+    def _setting(self, key: str, default: Any) -> Any:
+        """Tenant-scoped settings from datastore."""
+        val = self.ds.setting_holen(key, default)
+        return default if val is None else val
+
     # ────────────────────────────────────────────────────────
     # HAUPT-EINSTIEGSPUNKTE
     # ────────────────────────────────────────────────────────
@@ -196,9 +200,9 @@ class Engine:
         log.info("=" * 50)
 
         # Settings laden
-        antwort_grenze = setting_holen("antwort_warnung_tage") or 7
-        frist_grenze   = setting_holen("frist_warnung_tage")   or 3
-        automation_mode = setting_holen("automation_mode")     or "manuell"
+        antwort_grenze = self._setting("antwort_warnung_tage", 7)
+        frist_grenze = self._setting("frist_warnung_tage", 3)
+        automation_mode = self._setting("automation_mode", "manuell")
 
         # Daten laden (BUGFIX: () fehlte)
         mandanten = self.ds.hole_mandanten()

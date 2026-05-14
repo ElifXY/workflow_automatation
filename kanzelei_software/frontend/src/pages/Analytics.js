@@ -17,23 +17,6 @@ import {
   engineBericht,
 } from "../api";
 
-const C = {
-  red: "#e05555",
-  orange: "#e08c45",
-  green: "#5cb87a",
-  blue: "#5b8de8",
-  accent: "#c8a96e",
-  purple: "#9b72e8",
-  text: "#e8eaf0",
-  text2: "#8b91a0",
-  text3: "#555d6e",
-  bg: "#0b0d11",
-  bg2: "#111419",
-  bg3: "#181c24",
-  border: "rgba(255,255,255,0.07)",
-  border2: "rgba(255,255,255,0.14)",
-};
-
 const FONTS = `
   @import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@300;400;500;600&display=swap');
 `;
@@ -61,13 +44,13 @@ const TabBtn = ({ active, onClick, children }) => (
     style={{
       padding: "8px 14px",
       borderRadius: 10,
-      border: `1px solid ${active ? C.accent + "66" : C.border}`,
-      background: active ? C.accent + "22" : "transparent",
-      color: active ? C.accent : C.text2,
+      border: active ? "1px solid color-mix(in srgb, var(--accent) 45%, transparent)" : "1px solid var(--border)",
+      background: active ? "color-mix(in srgb, var(--accent) 18%, var(--bg3))" : "transparent",
+      color: active ? "var(--accent)" : "var(--text2)",
       fontSize: 13,
       fontWeight: 500,
       cursor: "pointer",
-      fontFamily: "'DM Sans',sans-serif",
+      fontFamily: "var(--font-body)",
     }}
   >
     {children}
@@ -77,8 +60,8 @@ const TabBtn = ({ active, onClick, children }) => (
 const Card = ({ title, children, style = {} }) => (
   <div
     style={{
-      background: C.bg2,
-      border: `1px solid ${C.border}`,
+      background: "var(--bg2)",
+      border: "1px solid var(--border)",
       borderRadius: 14,
       padding: 18,
       marginBottom: 14,
@@ -88,9 +71,9 @@ const Card = ({ title, children, style = {} }) => (
     {title && (
       <div
         style={{
-          fontFamily: "'DM Serif Display',serif",
+          fontFamily: "var(--font-head)",
           fontSize: 17,
-          color: C.text,
+          color: "var(--text)",
           marginBottom: 12,
         }}
       >
@@ -110,7 +93,7 @@ function UebersichtTab({ kpis, dashboard, liveData, loading }) {
     <>
       <Card title="Kennzahlen (Dashboard)">
         {loading && !dashboard ? (
-          <div style={{ color: C.text3 }}>Lade …</div>
+          <div style={{ color: "var(--text3)" }}>Lade …</div>
         ) : (
           <div
             style={{
@@ -129,13 +112,13 @@ function UebersichtTab({ kpis, dashboard, liveData, loading }) {
               <div
                 key={k}
                 style={{
-                  background: C.bg3,
+                  background: "var(--bg3)",
                   borderRadius: 10,
                   padding: "12px 14px",
                 }}
               >
-                <div style={{ fontSize: 11, color: C.text3, marginBottom: 4 }}>{k}</div>
-                <div style={{ fontSize: 18, fontWeight: 600, color: C.text }}>{v ?? "—"}</div>
+                <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 4 }}>{k}</div>
+                <div style={{ fontSize: 18, fontWeight: 600, color: "var(--text)" }}>{v ?? "—"}</div>
               </div>
             ))}
           </div>
@@ -144,13 +127,13 @@ function UebersichtTab({ kpis, dashboard, liveData, loading }) {
 
       {liveData && (
         <Card title="Live (WebSocket)">
-          <div style={{ fontSize: 13, color: C.text2, lineHeight: 1.6 }}>
+          <div style={{ fontSize: 13, color: "var(--text2)", lineHeight: 1.6 }}>
             <div>Mandanten: {liveData.mandanten_gesamt ?? "—"}</div>
             <div>Aufgaben offen: {liveData.aufgaben_offen ?? "—"}</div>
             <div>Kritisch (≤2 Tage): {liveData.aufgaben_kritisch ?? "—"}</div>
             <div>Timer aktiv: {liveData.timer_laufend ?? "—"}</div>
             <div>Bot-Fragen offen: {liveData.bot_fragen_offen ?? "—"}</div>
-            <div style={{ fontSize: 11, color: C.text3, marginTop: 8 }}>
+            <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 8 }}>
               {liveData.zeitpunkt || ""}
             </div>
           </div>
@@ -159,14 +142,14 @@ function UebersichtTab({ kpis, dashboard, liveData, loading }) {
 
       <Card title="Mandanten-Risiko (KPIs)">
         {loading && !kpiList.length ? (
-          <div style={{ color: C.text3 }}>Lade …</div>
+          <div style={{ color: "var(--text3)" }}>Lade …</div>
         ) : !kpiList.length ? (
-          <div style={{ color: C.text3 }}>Keine KPI-Daten.</div>
+          <div style={{ color: "var(--text3)" }}>Keine KPI-Daten.</div>
         ) : (
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
               <thead>
-                <tr style={{ color: C.text3, textAlign: "left" }}>
+                <tr style={{ color: "var(--text3)", textAlign: "left" }}>
                   <th style={{ padding: "8px 6px" }}>Mandant</th>
                   <th style={{ padding: "8px 6px" }}>Status</th>
                   <th style={{ padding: "8px 6px" }}>Score</th>
@@ -177,12 +160,12 @@ function UebersichtTab({ kpis, dashboard, liveData, loading }) {
                 {kpiList.slice(0, 25).map((row, i) => (
                   <tr
                     key={i}
-                    style={{ borderTop: `1px solid ${C.border}` }}
+                    style={{ borderTop: `1px solid var(--border)` }}
                   >
-                    <td style={{ padding: "10px 6px", color: C.text }}>
+                    <td style={{ padding: "10px 6px", color: "var(--text)" }}>
                       {row.mandant || row.name || "—"}
                     </td>
-                    <td style={{ padding: "10px 6px", color: C.accent }}>
+                    <td style={{ padding: "10px 6px", color: "var(--accent)" }}>
                       {row.status || "—"}
                     </td>
                     <td style={{ padding: "10px 6px" }}>{row.score ?? "—"}</td>
@@ -233,15 +216,15 @@ function PrognoseTab() {
     };
   }, []);
 
-  if (loading) return <div style={{ color: C.text3 }}>Lade Prognosen …</div>;
-  if (err) return <div style={{ color: C.red }}>{err}</div>;
+  if (loading) return <div style={{ color: "var(--text3)" }}>Lade Prognosen …</div>;
+  if (err) return <div style={{ color: "var(--red)" }}>{err}</div>;
 
   return (
     <>
       <Card title="Fristen-Belastung (30 Tage)">
         <pre
           style={{
-            color: C.text2,
+            color: "var(--text2)",
             fontSize: 12,
             whiteSpace: "pre-wrap",
             wordBreak: "break-word",
@@ -254,7 +237,7 @@ function PrognoseTab() {
       <Card title="Umsatz- & Risiko-Prognose">
         <pre
           style={{
-            color: C.text2,
+            color: "var(--text2)",
             fontSize: 12,
             whiteSpace: "pre-wrap",
             wordBreak: "break-word",
@@ -267,7 +250,7 @@ function PrognoseTab() {
       <Card title="Steuerfristen (Kalender)">
         <pre
           style={{
-            color: C.text2,
+            color: "var(--text2)",
             fontSize: 12,
             whiteSpace: "pre-wrap",
             wordBreak: "break-word",
@@ -317,9 +300,9 @@ function BenchmarkTab() {
             minWidth: 200,
             padding: "10px 12px",
             borderRadius: 10,
-            border: `1px solid ${C.border2}`,
-            background: C.bg3,
-            color: C.text,
+            border: `1px solid var(--border2)`,
+            background: "var(--bg3)",
+            color: "var(--text)",
             fontSize: 14,
           }}
         />
@@ -331,8 +314,8 @@ function BenchmarkTab() {
             padding: "10px 18px",
             borderRadius: 10,
             border: "none",
-            background: C.accent,
-            color: "#1a1200",
+            background: "var(--accent)",
+            color: "var(--on-accent)",
             fontWeight: 600,
             cursor: loading ? "wait" : "pointer",
           }}
@@ -340,10 +323,10 @@ function BenchmarkTab() {
           {loading ? "…" : "Aktualisieren"}
         </button>
       </div>
-      {err && <div style={{ color: C.red, marginBottom: 10 }}>{err}</div>}
+      {err && <div style={{ color: "var(--red)", marginBottom: 10 }}>{err}</div>}
       <pre
         style={{
-          color: C.text2,
+          color: "var(--text2)",
           fontSize: 12,
           whiteSpace: "pre-wrap",
           wordBreak: "break-word",
@@ -394,29 +377,29 @@ function AuditTab() {
           marginBottom: 12,
           padding: "10px 12px",
           borderRadius: 10,
-          border: `1px solid ${C.border2}`,
-          background: C.bg3,
-          color: C.text,
+          border: `1px solid var(--border2)`,
+          background: "var(--bg3)",
+          color: "var(--text)",
           fontSize: 14,
         }}
       />
       {loading ? (
-        <div style={{ color: C.text3 }}>Lade …</div>
+        <div style={{ color: "var(--text3)" }}>Lade …</div>
       ) : (
         <div style={{ maxHeight: 520, overflow: "auto", fontSize: 12 }}>
           {logs.length === 0 ? (
-            <span style={{ color: C.text3 }}>Keine Einträge.</span>
+            <span style={{ color: "var(--text3)" }}>Keine Einträge.</span>
           ) : (
             logs.map((l, i) => (
               <div
                 key={i}
                 style={{
                   padding: "8px 0",
-                  borderBottom: `1px solid ${C.border}`,
-                  color: C.text2,
+                  borderBottom: `1px solid var(--border)`,
+                  color: "var(--text2)",
                 }}
               >
-                <span style={{ color: C.text3 }}>{l.zeit || l.timestamp || ""}</span>{" "}
+                <span style={{ color: "var(--text3)" }}>{l.zeit || l.timestamp || ""}</span>{" "}
                 {l.text || JSON.stringify(l)}
               </div>
             ))
@@ -461,9 +444,9 @@ function EngineTab() {
           style={{
             padding: "10px 16px",
             borderRadius: 10,
-            border: `1px solid ${C.border2}`,
-            background: C.bg3,
-            color: C.text,
+            border: `1px solid var(--border2)`,
+            background: "var(--bg3)",
+            color: "var(--text)",
             cursor: busy ? "wait" : "pointer",
           }}
         >
@@ -479,9 +462,9 @@ function EngineTab() {
           style={{
             padding: "10px 16px",
             borderRadius: 10,
-            border: `1px solid ${C.border2}`,
-            background: C.bg3,
-            color: C.text,
+            border: `1px solid var(--border2)`,
+            background: "var(--bg3)",
+            color: "var(--text)",
             cursor: busy ? "wait" : "pointer",
           }}
         >
@@ -497,22 +480,22 @@ function EngineTab() {
           style={{
             padding: "10px 16px",
             borderRadius: 10,
-            border: `1px solid ${C.border2}`,
-            background: C.bg3,
-            color: C.text,
+            border: `1px solid var(--border2)`,
+            background: "var(--bg3)",
+            color: "var(--text)",
             cursor: busy ? "wait" : "pointer",
           }}
         >
           Tagesbericht laden
         </button>
       </div>
-      {msg && <div style={{ color: C.orange, marginBottom: 10 }}>{msg}</div>}
+      {msg && <div style={{ color: "var(--orange)", marginBottom: 10 }}>{msg}</div>}
       {bericht && (
         <div style={{ marginBottom: 14 }}>
-          <div style={{ color: C.text3, marginBottom: 6 }}>Tagesbericht</div>
+          <div style={{ color: "var(--text3)", marginBottom: 6 }}>Tagesbericht</div>
           <pre
             style={{
-              color: C.text2,
+              color: "var(--text2)",
               fontSize: 12,
               whiteSpace: "pre-wrap",
               maxHeight: 220,
@@ -528,10 +511,10 @@ function EngineTab() {
       )}
       {analyse && (
         <div>
-          <div style={{ color: C.text3, marginBottom: 6 }}>Analyse</div>
+          <div style={{ color: "var(--text3)", marginBottom: 6 }}>Analyse</div>
           <pre
             style={{
-              color: C.text2,
+              color: "var(--text2)",
               fontSize: 11,
               whiteSpace: "pre-wrap",
               maxHeight: 360,
@@ -569,9 +552,17 @@ export default function Analytics() {
   }, []);
 
   useEffect(() => {
-    const wsUrl = (process.env.REACT_APP_API_URL || "http://127.0.0.1:8000")
-      .replace("http://", "ws://")
-      .replace("https://", "wss://");
+    const apiBase = process.env.REACT_APP_API_URL || "/api";
+    let wsUrl;
+    if (apiBase.startsWith("http://") || apiBase.startsWith("https://")) {
+      wsUrl = apiBase
+        .replace(/\/api\/?$/i, "")
+        .replace("http://", "ws://")
+        .replace("https://", "wss://");
+    } else {
+      const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+      wsUrl = `${proto}//${window.location.host}`;
+    }
     const tok = localStorage.getItem("kanzlei_token");
     const ws = new WebSocket(
       `${wsUrl}/ws/live${tok ? `?token=${encodeURIComponent(tok)}` : ""}`
@@ -591,7 +582,7 @@ export default function Analytics() {
     <div
       style={{
         flex: 1,
-        background: C.bg,
+        background: "var(--bg)",
         overflowY: "auto",
         fontFamily: "'DM Sans', sans-serif",
       }}
@@ -602,11 +593,11 @@ export default function Analytics() {
         @keyframes fadeUp { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:translateY(0); } }
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
         ::-webkit-scrollbar { width: 4px; }
-        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
+        ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
       `}</style>
 
       <div style={{ padding: "24px 28px 40px", maxWidth: 1100, margin: "0 auto" }}>
-        <div style={{ marginBottom: 6, fontSize: 11, letterSpacing: "0.12em", color: C.text3 }}>
+        <div style={{ marginBottom: 6, fontSize: 11, letterSpacing: "0.12em", color: "var(--text3)" }}>
           REPORTING
         </div>
         <h1
@@ -614,7 +605,7 @@ export default function Analytics() {
             fontFamily: "'DM Serif Display',serif",
             fontSize: 28,
             fontWeight: 400,
-            color: C.text,
+            color: "var(--text)",
             marginBottom: 18,
           }}
         >

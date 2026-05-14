@@ -49,7 +49,12 @@ class MandantenService:
             "erstellt_am": datetime.now().isoformat(),
             "aktiv": True,
         }
-        self.store.mandant_speichern(data.name, mandant_daten)
+        saved = self.store.mandant_speichern(data.name, mandant_daten)
+        if not saved:
+            raise RuntimeError("Mandant konnte nicht gespeichert werden")
+        created = self.store.hole_mandant(data.name)
+        if not created:
+            raise RuntimeError("Mandant wurde nicht persistiert")
         self.store.log_eintrag(f"MANDANT_ERSTELLT | {data.name} | Umsatz: {data.umsatz}€")
         return {"status": "created", "name": data.name}
 
@@ -59,14 +64,18 @@ class MandantenService:
             raise ValueError(f"Mandant '{name}' nicht gefunden")
         m.update(update_felder)
         m["zuletzt_geaendert"] = datetime.now().isoformat()
-        self.store.mandant_speichern(name, m)
+        saved = self.store.mandant_speichern(name, m)
+        if not saved:
+            raise RuntimeError("Mandant konnte nicht aktualisiert werden")
         self.store.log_eintrag(f"MANDANT_AKTUALISIERT | {name} | {list(update_felder.keys())}")
         return {"status": "updated", "name": name, "geaenderte_felder": list(update_felder.keys())}
 
     def delete_mandant(self, name: str) -> Dict[str, Any]:
         if not self.store.hole_mandant(name):
             raise ValueError(f"Mandant '{name}' nicht gefunden")
-        self.store.mandant_loeschen(name)
+        deleted = self.store.mandant_loeschen(name)
+        if not deleted:
+            raise RuntimeError("Mandant konnte nicht gelöscht werden")
         self.store.log_eintrag(f"MANDANT_GELOESCHT | {name}")
         return {"status": "deleted", "name": name}
 
@@ -75,6 +84,8 @@ class MandantenService:
         if not m:
             raise ValueError(f"Mandant '{name}' nicht gefunden")
         m["letzte_antwort"] = datetime.now().isoformat()
-        self.store.mandant_speichern(name, m)
+        saved = self.store.mandant_speichern(name, m)
+        if not saved:
+            raise RuntimeError("Antwort konnte nicht gespeichert werden")
         self.store.log_eintrag(f"ANTWORT_EMPFANGEN | {name}")
         return {"status": "ok", "letzte_antwort": m["letzte_antwort"]}

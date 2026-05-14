@@ -1,8 +1,6 @@
-import os
-import sys
+"""Alternativer Uvicorn-Pfad: ``uvicorn backend.api.app:app`` — dieselbe Instanz wie ``backend.api:app``."""
+from __future__ import annotations
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
+from backend.application import app  # noqa: F401
 
-from api import app  # noqa: E402,F401
+__all__ = ["app"]
