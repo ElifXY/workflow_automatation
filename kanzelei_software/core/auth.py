@@ -579,8 +579,6 @@ def finde_benutzer_nach_email(email: str) -> Optional[Dict[str, Any]]:
     e = (email or "").strip()
     if not e:
         return None
-    if "@" in e:
-        e = e.lower()
     from core.auth_postgres import auth_pg_enabled
 
     try:
@@ -600,11 +598,7 @@ def finde_benutzer_nach_email(email: str) -> Optional[Dict[str, Any]]:
                     (e,),
                 )
                 row = cur.fetchone()
-            if row:
-                return dict(row)
-            if _auth_sqlite_login_fallback_enabled():
-                return _sqlite_finde_benutzer_nach_email_row(e)
-            return None
+            return dict(row) if row else None
         conn = _get_conn()
         row = conn.execute(
             """
@@ -620,28 +614,6 @@ def finde_benutzer_nach_email(email: str) -> Optional[Dict[str, Any]]:
         return dict(row) if row else None
     except Exception as ex:
         log.error(f"finde_benutzer_nach_email: {ex}")
-        return None
-
-
-def _sqlite_finde_benutzer_nach_email_row(e: str) -> Optional[Dict[str, Any]]:
-    try:
-        from core.daten_speicher import get_connection
-
-        conn = get_connection()
-        row = conn.execute(
-            """
-            SELECT id, benutzername, kanzlei_id, email, rolle, aktiv
-            FROM benutzer
-            WHERE LOWER(TRIM(COALESCE(email, ''))) = LOWER(TRIM(?))
-              AND aktiv = 1
-            ORDER BY id ASC
-            LIMIT 1
-            """,
-            (e,),
-        ).fetchone()
-        return dict(row) if row else None
-    except Exception as ex:
-        log.warning("_sqlite_finde_benutzer_nach_email_row: %s", ex)
         return None
 
 
@@ -664,24 +636,7 @@ def setze_passwort_ohne_altes(benutzername: str, kanzlei_id: str, neues_passwort
                 )
                 changed = cur.rowcount
             cn.commit()
-            if changed > 0:
-                return True
-            if _auth_sqlite_login_fallback_enabled():
-                try:
-                    from core.daten_speicher import get_connection
-
-                    conn = get_connection()
-                    cur = conn.execute(
-                        "UPDATE benutzer SET hash=?, salt=? WHERE kanzlei_id=? AND benutzername=? AND aktiv=1",
-                        (neuer_hash, neuer_salt, kanzlei_id, benutzername),
-                    )
-                    conn.commit()
-                    if cur.rowcount > 0:
-                        log.info("Passwort geändert (SQLite-Fallback): %s in %s", benutzername, kanzlei_id)
-                        return True
-                except Exception as e2:
-                    log.warning("setze_passwort_ohne_altes SQLite-Fallback: %s", e2)
-            return False
+            return changed > 0
         conn = _get_conn()
         cur = conn.execute(
             "UPDATE benutzer SET hash=?, salt=? WHERE kanzlei_id=? AND benutzername=? AND aktiv=1",
@@ -919,8 +874,20 @@ def login(benutzername: str, passwort: str, ip: str = "unknown") -> Optional[Dic
         return None
 
     if not _verifiziere_passwort(passwort, row["hash"], row["salt"]):
-        log.warning(f"Login: Falsches Passwort für '{benutzername}'")
-        return None
+        if auth_pg_enabled() and _auth_sqlite_login_fallback_enabled() and not row_from_sqlite_fb:
+            row_sql = _sqlite_login_fetch_by_username(benutzername)
+            if row_sql and _verifiziere_passwort(passwort, row_sql["hash"], row_sql["salt"]):
+                log.warning(
+                    "Login: Passwort passt nicht in PostgreSQL, erfolgreich über SQLite (Hybrid)."
+                )
+                row = row_sql
+                row_from_sqlite_fb = True
+            else:
+                log.warning("Login: Falsches Passwort für '%s'", benutzername)
+                return None
+        else:
+            log.warning("Login: Falsches Passwort für '%s'", benutzername)
+            return None
 
     kanzlei_id = row["kanzlei_id"] or "default"
     token      = secrets.token_urlsafe(48)
@@ -1067,8 +1034,23 @@ def login_by_email(email: str, passwort: str, ip: str = "unknown") -> Optional[D
 
     benutzername = row["benutzername"]
     if not _verifiziere_passwort(passwort, row["hash"], row["salt"]):
-        log.warning(f"Login-by-email: falsches Passwort für '{benutzername}'")
-        return None
+        if auth_pg_enabled() and _auth_sqlite_login_fallback_enabled() and not row_from_sqlite_fb:
+            row_sql = _sqlite_login_fetch_by_email(email, internal_login)
+            if not row_sql and internal_login:
+                row_sql = _sqlite_login_fetch_by_username(internal_login)
+            if row_sql and _verifiziere_passwort(passwort, row_sql["hash"], row_sql["salt"]):
+                log.warning(
+                    "Login-by-email: Passwort passt nicht in PostgreSQL, erfolgreich über SQLite (Hybrid)."
+                )
+                row = row_sql
+                benutzername = row["benutzername"]
+                row_from_sqlite_fb = True
+            else:
+                log.warning("Login-by-email: falsches Passwort für '%s'", benutzername)
+                return None
+        else:
+            log.warning("Login-by-email: falsches Passwort für '%s'", benutzername)
+            return None
 
     kanzlei_id = row["kanzlei_id"] or "default"
     token = secrets.token_urlsafe(48)
