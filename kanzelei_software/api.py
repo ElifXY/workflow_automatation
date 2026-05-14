@@ -4915,7 +4915,10 @@ async def api_login_email_jwt(data: EmailPasswordLoginRequest, request: Request)
     except ValueError as e:
         raise HTTPException(429, str(e))
     if not result:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid credentials")
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            "E-Mail oder Passwort falsch. Reine Benutzernamen-Zugänge: im Feld ohne @ eintragen.",
+        )
     require_verified = (os.getenv("AUTH_REQUIRE_EMAIL_VERIFIED") or "1").strip().lower() in {"1", "true", "yes", "on"}
     if require_verified:
         mail = str(result.get("email") or "").strip().lower()

@@ -348,7 +348,10 @@ def setup_erstbenutzer(
         pw = (passwort or os.getenv("INITIAL_ADMIN_PASSWORD") or "").strip()
         if len(pw) < 12:
             raise ValueError("INITIAL_ADMIN_PASSWORD fehlt oder zu kurz (>=12)")
-        erstelle_benutzer(benutzername, pw, rolle="owner", kanzlei_id=kanzlei_id)
+        admin_email = (os.getenv("INITIAL_ADMIN_EMAIL") or "").strip().lower()
+        erstelle_benutzer(
+            benutzername, pw, rolle="owner", kanzlei_id=kanzlei_id, email=admin_email
+        )
         log.info(f"Erstbenutzer angelegt: {benutzername} in Kanzlei {kanzlei_id}")
         return True
     except Exception as e:

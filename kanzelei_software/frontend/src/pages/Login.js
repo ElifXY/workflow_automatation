@@ -226,6 +226,10 @@ export default function Login({ onLogin }) {
           </div>
         )}
 
+        <div style={{ fontSize: 12, color: "var(--text3)", marginBottom: 16, lineHeight: 1.45 }}>
+          <strong>E-Mail</strong> mit @ eintragen — oder <strong>Benutzername</strong> ohne @ (interner Login-Name), falls kein Konto mit E-Mail hinterlegt ist.
+        </div>
+
         <form onSubmit={submit}>
           <div
             style={{
