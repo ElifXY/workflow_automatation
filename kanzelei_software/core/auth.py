@@ -117,16 +117,17 @@ def _verifiziere_passwort(passwort: str, hash_gespeichert: Any, salt: Any) -> bo
     if s.lower() == "bcrypt" or h.startswith("$2"):
         if not h:
             return False
-        try:
-            if bcrypt.checkpw(passwort.encode("utf-8"), h.encode("utf-8")):
-                return True
-        except Exception:
-            pass
+        # passlib zuerst: $2y$ und Randfälle, bei denen bcrypt.checkpw scheitert
         try:
             from passlib.context import CryptContext
 
             ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
-            return bool(ctx.verify(passwort, h))
+            if ctx.verify(passwort, h):
+                return True
+        except Exception:
+            pass
+        try:
+            return bool(bcrypt.checkpw(passwort.encode("utf-8"), h.encode("utf-8")))
         except Exception:
             return False
 

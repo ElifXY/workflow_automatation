@@ -3783,18 +3783,43 @@ def plausibilitaetspruefung(_user: dict = Depends(get_current_user)):
 # ============================================================
 
 class LoginRequest(BaseModel):
-    """Legacy + modern Login-Body: Benutzername/Passwort oder E-Mail/Password."""
-    benutzername: Optional[str] = Field(None, min_length=2)
-    passwort: Optional[str] = Field(None, min_length=4)
-    email: Optional[str] = Field(None, min_length=5, max_length=254)
-    password: Optional[str] = Field(None, min_length=8, max_length=500)
+    """Legacy + modern Login-Body: Benutzername/Passwort oder E-Mail/Password.
+
+    Einige Clients senden bei E-Mail-Login ``passwort`` statt ``password`` — wird zusammengeführt.
+    Leere Strings für optionale Felder werden zu ``None`` (sonst scheitert ``min_length``).
+    """
+
+    benutzername: Optional[str] = Field(default=None, min_length=2)
+    passwort: Optional[str] = Field(default=None, min_length=4)
+    email: Optional[str] = Field(default=None, min_length=5, max_length=254)
+    password: Optional[str] = Field(default=None, min_length=8, max_length=500)
+
+    @field_validator("benutzername", "passwort", "email", "password", mode="before")
+    @classmethod
+    def _empty_str_to_none(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
+    @field_validator("email", mode="after")
+    @classmethod
+    def _norm_login_email_field(cls, v: Optional[str]) -> Optional[str]:
+        if not v:
+            return v
+        s = str(v).strip()
+        return s.lower() if "@" in s else s
 
     @model_validator(mode="after")
     def _validate_login_payload(self):
         has_user = bool((self.benutzername or "").strip())
         has_passwort = bool((self.passwort or "").strip())
         has_email = bool((self.email or "").strip())
-        has_password = bool((self.password or "").strip())
+        # E-Mail-Login: Passwort unter ``password`` (SPA) oder ``passwort`` (Legacy)
+        has_password = bool(
+            (self.password or "").strip() or (self.passwort or "").strip()
+        )
         if (has_user and has_passwort) or (has_email and has_password):
             return self
         raise ValueError("Provide benutzername+passwort or email+password")
@@ -4781,7 +4806,8 @@ async def auth_login(data: LoginRequest, request: Request):
     ip = _get_client_ip(request)
     try:
         if (data.email or "").strip():
-            result = login_by_email(str(data.email), str(data.password or ""), ip=ip)
+            pw = str(data.password or data.passwort or "")
+            result = login_by_email(str(data.email), pw, ip=ip)
         else:
             result = login(str(data.benutzername or ""), str(data.passwort or ""), ip=ip)
         if not result:
