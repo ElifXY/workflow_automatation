@@ -893,12 +893,15 @@ def login(benutzername: str, passwort: str, ip: str = "unknown") -> Optional[Dic
     token      = secrets.token_urlsafe(48)
     expires    = datetime.now() + timedelta(seconds=TOKEN_TTL)
 
+    # Nach SQLite-Fallback: kanonischer Benutzername aus der Zeile
+    bname_session = str(row.get("benutzername") or benutzername).strip()
+
     # Session enthält kanzlei_id — das ist der Kern des Multi-Kanzlei-Systems
     uid = row.get("id")
     _session_speichern(
         token,
         {
-            "benutzername": benutzername,
+            "benutzername": bname_session,
             "kanzlei_id": kanzlei_id,
             "tenant_id": kanzlei_id,
             "rolle": row["rolle"],
@@ -911,25 +914,25 @@ def login(benutzername: str, passwort: str, ip: str = "unknown") -> Optional[Dic
 
     try:
         if auth_pg_enabled() and not row_from_sqlite_fb:
-            pg_login_touch(benutzername, kanzlei_id)
+            pg_login_touch(bname_session, kanzlei_id)
         elif not auth_pg_enabled():
             conn = _get_conn()
             conn.execute(
                 "UPDATE benutzer SET letzter_login = datetime('now') WHERE benutzername = ? AND kanzlei_id = ?",
-                (benutzername, kanzlei_id),
+                (bname_session, kanzlei_id),
             )
             conn.commit()
         else:
-            _sqlite_login_touch(benutzername, kanzlei_id)
+            _sqlite_login_touch(bname_session, kanzlei_id)
     except Exception:
         pass
 
     _login_versuche[ip] = []
-    log.info(f"Login: {benutzername} | Kanzlei: {kanzlei_id} | IP: {ip}")
+    log.info("Login: %s | Kanzlei: %s | IP: %s", bname_session, kanzlei_id, ip)
 
     return {
         "token": token,
-        "benutzername": benutzername,
+        "benutzername": bname_session,
         "kanzlei_id": kanzlei_id,
         "tenant_id": kanzlei_id,
         "rolle": row["rolle"],
