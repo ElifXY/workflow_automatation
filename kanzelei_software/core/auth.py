@@ -23,6 +23,25 @@ from collections import defaultdict
 
 log = logging.getLogger("kanzlei_auth")
 
+# Unsichtbare Zeichen (Copy/Paste aus Teams, Word, Browser) — sonst stimmt bcrypt nie
+_ZW_JOINER_RE = re.compile(r"[\u200b-\u200d\ufeff\u2060\u00ad]+")
+
+
+def _sanitize_benutzername_raw(s: str) -> str:
+    return _ZW_JOINER_RE.sub("", str(s or "")).strip()
+
+
+def _sanitize_login_email(email: str) -> str:
+    s = _ZW_JOINER_RE.sub("", str(email or "")).strip()
+    if "@" in s:
+        s = s.lower()
+    return s
+
+
+def _sanitize_login_passwort(pw: str) -> str:
+    return _ZW_JOINER_RE.sub("", str(pw or "")).strip()
+
+
 TOKEN_TTL    = int(os.getenv("SESSION_TIMEOUT_MINUTEN", "60")) * 60
 MAX_VERSUCHE = 5
 SPERRE_DAUER = 300
@@ -113,6 +132,9 @@ def _verifiziere_passwort(passwort: str, hash_gespeichert: Any, salt: Any) -> bo
 
     h = _txt(hash_gespeichert)
     s = _txt(salt)
+    # Manche Importe/Migrationen speichern den bcrypt-String in Anführungszeichen
+    if len(h) >= 2 and h[0] == h[-1] and h[0] in "\"'":
+        h = h[1:-1].strip()
     # Neuer Standard: bcrypt (rohes bcrypt + passlib — gleiche Hashes, unterschiedliche Randfälle)
     if s.lower() == "bcrypt" or h.startswith("$2"):
         if not h:
@@ -707,8 +729,8 @@ def login(benutzername: str, passwort: str, ip: str = "unknown") -> Optional[Dic
     Login. Gibt Session-Dict mit kanzlei_id zurück.
     Die kanzlei_id bestimmt welche Daten der User sieht.
     """
-    benutzername = (benutzername or "").strip()
-    passwort = (passwort or "").strip()
+    benutzername = _sanitize_benutzername_raw(benutzername)
+    passwort = _sanitize_login_passwort(passwort)
     if not _prüfe_rate_limit(ip):
         remaining = max(0, _gesperrte_ips.get(ip, time.time()) - time.time())
         raise ValueError(f"Zu viele Login-Versuche. Bitte {int(remaining)}s warten.")
@@ -798,10 +820,8 @@ def login_by_email(email: str, passwort: str, ip: str = "unknown") -> Optional[D
     Lookup über ``benutzer.email``, identischen ``benutzername`` (selten) oder
     internem Namen ``u``+SHA256 (Standard bei ``registriere_per_email``).
     """
-    email = (email or "").strip()
-    passwort = (passwort or "").strip()
-    if "@" in email:
-        email = email.lower()
+    email = _sanitize_login_email(email)
+    passwort = _sanitize_login_passwort(passwort)
     if not email:
         return None
     if not _prüfe_rate_limit(ip):

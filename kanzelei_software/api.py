@@ -9,7 +9,7 @@ from __future__ import annotations
 from fastapi import HTTPException, BackgroundTasks, Query, status, Depends, Header, Body, Request
 from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse
 from fastapi.exceptions import RequestValidationError
-from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing import Optional, List, Dict, Any
 
 from datetime import datetime, timedelta
@@ -3789,6 +3789,8 @@ class LoginRequest(BaseModel):
     Leere Strings für optionale Felder werden zu ``None`` (sonst scheitert ``min_length``).
     """
 
+    model_config = ConfigDict(str_strip_whitespace=True, extra="ignore")
+
     benutzername: Optional[str] = Field(default=None, min_length=2)
     passwort: Optional[str] = Field(default=None, min_length=4)
     email: Optional[str] = Field(default=None, min_length=5, max_length=254)
@@ -3830,6 +3832,9 @@ _EMAIL_LOGIN_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", re.IGNORECASE)
 
 class EmailPasswordLoginRequest(BaseModel):
     """OAuth-ähnlicher Login per E-Mail (Tabellenfeld ``benutzer.email``)."""
+
+    model_config = ConfigDict(str_strip_whitespace=True, extra="ignore")
+
     email: str = Field(..., min_length=5, max_length=254)
     password: str = Field(
         ...,
@@ -4810,18 +4815,24 @@ def auth_oauth_exchange(data: OAuthExchangeRequest):
 async def auth_login(data: LoginRequest, request: Request):
     """Login mit Rate-Limiting; akzeptiert benutzername/passwort oder email/password."""
 
-    from backend.auth import login, login_by_email, hat_irgendein_benutzer
+    from backend.auth import (
+        hat_irgendein_benutzer,
+        login,
+        login_by_email,
+        _sanitize_benutzername_raw,
+        _sanitize_login_passwort,
+    )
     if not hat_irgendein_benutzer():
         raise HTTPException(503, "System nicht initialisiert: bitte zuerst einen Admin registrieren")
     ip = _get_client_ip(request)
     try:
         if (data.email or "").strip():
-            pw = str(data.password or data.passwort or "").strip()
-            result = login_by_email(str(data.email), pw, ip=ip)
+            pw = _sanitize_login_passwort(str(data.password or data.passwort or ""))
+            result = login_by_email(str(data.email or ""), pw, ip=ip)
         else:
             result = login(
-                str(data.benutzername or "").strip(),
-                str(data.passwort or "").strip(),
+                _sanitize_benutzername_raw(str(data.benutzername or "")),
+                _sanitize_login_passwort(str(data.passwort or "")),
                 ip=ip,
             )
         if not result:
@@ -4947,14 +4958,14 @@ async def api_login_email_jwt(data: EmailPasswordLoginRequest, request: Request)
     Flache JSON-Antwort (``access_token``, ``token_type``) für SPA/curl.
     ``access_token`` ist bei gesetztem ``JWT_SECRET`` ein HS256-JWT; sonst dasselbe Session-Token wie ``token``.
     """
-    from backend.auth import hat_irgendein_benutzer, login_by_email
+    from backend.auth import hat_irgendein_benutzer, login_by_email, _sanitize_login_passwort
     from backend.auth import access_token_ttl_minutes, jwt_secret as jwt_secret_fn
 
     if not hat_irgendein_benutzer():
         raise HTTPException(503, "System nicht initialisiert: bitte zuerst einen Admin registrieren")
     ip = _get_client_ip(request)
     try:
-        result = login_by_email(data.email, (data.password or "").strip(), ip=ip)
+        result = login_by_email(data.email, _sanitize_login_passwort(data.password), ip=ip)
     except ValueError as e:
         raise HTTPException(429, str(e))
     if not result:
