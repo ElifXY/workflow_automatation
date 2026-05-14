@@ -5263,6 +5263,12 @@ async def api_auth_login_alias(data: LoginRequest, request: Request):
     return await auth_login(data, request)
 
 
+@_api_auth_alias.post("/refresh", summary="Token erneuern (SPA unter /api/)")
+def api_auth_refresh_alias(data: RefreshTokenRequest):
+    """Gleiche Logik wie ``POST /auth/refresh`` — Nginx leitet nur ``/api/*`` zum Backend."""
+    return auth_refresh(data)
+
+
 @_api_auth_alias.post("/logout")
 def api_auth_logout_alias(
     authorization: Optional[str] = Header(None),

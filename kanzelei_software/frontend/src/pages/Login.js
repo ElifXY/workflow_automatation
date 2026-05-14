@@ -49,7 +49,7 @@ export default function Login({ onLogin }) {
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok || !data?.access_token) {
-          throw new Error(data?.detail || "OAuth Login fehlgeschlagen");
+          throw new Error(data?.error || data?.detail || "OAuth Login fehlgeschlagen");
         }
         if (!active) return;
         const access = data.access_token || "";
@@ -89,9 +89,13 @@ export default function Login({ onLogin }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const detail = String(data?.detail || "Login fehlgeschlagen");
+        const raw =
+          data?.error ??
+          data?.detail ??
+          (Array.isArray(data?.details) ? data.details.map((x) => x?.msg || x).join(" ") : "");
+        const detail = String(raw || "Login fehlgeschlagen");
         if (detail.toLowerCase().includes("e-mail noch nicht bestätigt")) {
           setResendInfo("verify-pending");
         }

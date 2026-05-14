@@ -22,7 +22,7 @@ def _root():
 
 
 @router.post("/auth/login", summary="Login — Session-Token erhalten")
-async def auth_login(data: Dict[str, Any] = Body(...), request: Request = None):
+async def auth_login(request: Request, data: Dict[str, Any] = Body(...)):
     root = _root()
     payload = root.LoginRequest(**data)
     return await root.auth_login(payload, request)
@@ -30,7 +30,7 @@ async def auth_login(data: Dict[str, Any] = Body(...), request: Request = None):
 
 @router.post("/login", summary="Login per E-Mail — JWT + Session (Nginx: /api/login → /login)")
 @router.post("/api/login", summary="Login per E-Mail — JWT + Session (direkt auf Uvicorn)")
-async def api_login_email_jwt(data: Dict[str, Any] = Body(...), request: Request = None):
+async def api_login_email_jwt(request: Request, data: Dict[str, Any] = Body(...)):
     root = _root()
     payload = root.EmailPasswordLoginRequest(**data)
     return await root.api_login_email_jwt(payload, request)
@@ -53,7 +53,7 @@ def api_me_minimal(current_user: dict = Depends(get_current_user)):
     summary="Registrierung per E-Mail (direkt auf Uvicorn)",
     status_code=201,
 )
-def api_register_email(data: Dict[str, Any] = Body(...), request: Request = None):
+def api_register_email(request: Request, data: Dict[str, Any] = Body(...)):
     root = _root()
     payload = root.EmailPasswordRegisterRequest(**data)
     return root.api_register_email(payload, request)
