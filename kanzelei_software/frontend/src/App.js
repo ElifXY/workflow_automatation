@@ -21,6 +21,7 @@ import {
   trackBillingFunnelEvent,
   apiGet,
   getSettings,
+  clearAuthStorage,
   extrahiereAufgabenArray,
   extrahiereHeuteEintraege,
   istAufgabeErledigt,
@@ -3248,27 +3249,27 @@ export default function App() {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (!meRes.ok) {
-          // Nur echte Auth-Fehler dürfen die Session verwerfen.
-          // Transiente Fehler (429/5xx/Netzwerk) sollen nicht zum Logout-Loop führen.
           if (meRes.status === 401 || meRes.status === 403) {
-            throw new Error("session invalid");
+            clearAuthStorage();
+            setLoggedIn(false);
+            return;
           }
+          // 429/5xx: Session behalten, nicht ausloggen
           setLoggedIn(true);
           return;
         }
         setLoggedIn(true);
-      } catch {
-        // Bei temporären Connectivity-Problemen nicht sofort ausloggen.
-        // Nur löschen, wenn die Session wirklich ungültig ist.
-        try {
-          const current =
-            localStorage.getItem("kanzlei_token") || localStorage.getItem("token") || "";
-          if (!current) {
-            setLoggedIn(false);
-            return;
-          }
-        } catch {}
-        setLoggedIn(true);
+      } catch (err) {
+        if (err instanceof Error && err.message === "session invalid") {
+          clearAuthStorage();
+          setLoggedIn(false);
+          return;
+        }
+        // Netzwerk/Timeout nach Laptop-Sleep: Token behalten, eingeloggt annehmen
+        const current =
+          (typeof localStorage !== "undefined" &&
+            (localStorage.getItem("kanzlei_token") || localStorage.getItem("token"))) || "";
+        setLoggedIn(!!current);
       }
     };
 
@@ -3629,7 +3630,16 @@ export default function App() {
             <Route path="*" element={<Login onLogin={() => setLoggedIn(true)} />} />
           ) : (
             <>
-              <Route path="/login" element={<Login onLogin={() => setLoggedIn(true)} />} />
+              <Route
+                path="/login"
+                element={
+                  loggedIn ? (
+                    <Navigate to="/" replace />
+                  ) : (
+                    <Login onLogin={() => setLoggedIn(true)} />
+                  )
+                }
+              />
               <Route
                 path="/"
                 element={

@@ -21,7 +21,7 @@ const setRefreshToken = (token) => {
   }
   localStorage.setItem("kanzlei_refresh_token", token);
 };
-const clearAuthStorage = () => {
+export const clearAuthStorage = () => {
   localStorage.removeItem("kanzlei_token");
   localStorage.removeItem("token");
   localStorage.removeItem("kanzlei_refresh_token");

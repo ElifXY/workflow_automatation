@@ -3,14 +3,29 @@
 // Datei: src/pages/Login.js
 // ============================================================
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { ThemeQuickSwitch } from "../theme";
 
 const apiBase = (process.env.REACT_APP_API_URL || "/api").replace(/\/$/, "");
+const LOGIN_TIMEOUT_MS = 30000;
+
+/** Session-Token oder JWT — nie kurzen Platzhalter in access_token bevorzugen. */
+function pickAuthToken(payload) {
+  const access = String(payload?.access_token || "").trim();
+  const session = String(payload?.token || "").trim();
+  const isJwt = (t) => t.split(".").length === 3 && t.length > 40;
+  const isSession = (t) => t.length >= 32;
+  if (isJwt(access)) return access;
+  if (isSession(session)) return session;
+  if (isSession(access)) return access;
+  return session || access;
+}
 
 export default function Login({ onLogin }) {
-  const [identity, setIdentity] = useState("");
-  const [pass,    setPass]    = useState("");
+  const navigate = useNavigate();
+  const identityRef = useRef(null);
+  const passRef = useRef(null);
   const [showPass, setShowPass] = useState(false);
   const [expectedRole, setExpectedRole] = useState("");
   const expectedRoleHint =
@@ -23,16 +38,38 @@ export default function Login({ onLogin }) {
   const [error,   setError]   = useState("");
   const [resendInfo, setResendInfo] = useState("");
 
+  const readLoginFields = () => ({
+    idVal: (identityRef.current?.value || "").trim(),
+    passVal: (passRef.current?.value || "").trim(),
+  });
+
   const friendlyAuthError = (msg) => {
     const m = String(msg || "").toLowerCase();
+    if (m.includes("e-mail oder passwort falsch") || m.includes("benutzername oder passwort falsch")) {
+      return "E-Mail oder Passwort falsch. Gespeichertes Passwort im Browser löschen oder Feld leeren und neu eintippen.";
+    }
     if (m.includes("oauth token-fehler (microsoft)")) {
       return "Microsoft-Anmeldung aktuell nicht verfügbar (OAuth-Konfiguration). Das liegt nicht an fehlender Registrierung. Bitte nutze vorübergehend E-Mail/Passwort oder erstelle zuerst ein Konto über 'Konto erstellen'.";
     }
     if (m.includes("e-mail noch nicht bestätigt")) {
       return "E-Mail noch nicht bestätigt. Bitte Verifizierungs-Mail öffnen oder erneut anfordern.";
     }
-    return msg || "OAuth Login fehlgeschlagen";
+    return msg || "Anmeldung fehlgeschlagen";
   };
+
+  // Gespeichertes Browser-Passwort beim Öffnen leeren — Wert kommt direkt aus dem Eingabefeld beim Absenden.
+  useEffect(() => {
+    const id = window.setTimeout(() => {
+      if (passRef.current) passRef.current.value = "";
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, []);
+
+  useEffect(() => {
+    if (passRef.current) {
+      passRef.current.type = showPass ? "text" : "password";
+    }
+  }, [showPass]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search || "");
@@ -48,11 +85,14 @@ export default function Login({ onLogin }) {
           body: JSON.stringify({ code }),
         });
         const data = await res.json().catch(() => ({}));
-        if (!res.ok || !data?.access_token) {
+        if (!res.ok) {
           throw new Error(data?.error || data?.detail || "OAuth Login fehlgeschlagen");
         }
         if (!active) return;
-        const access = data.access_token || "";
+        const access = pickAuthToken(data);
+        if (!access) {
+          throw new Error("OAuth Login fehlgeschlagen (kein Token)");
+        }
         const refresh = data.refresh_token || "";
         const role = data.role || "assistent";
         const email = data.email || "";
@@ -64,6 +104,7 @@ export default function Login({ onLogin }) {
         if (email) localStorage.setItem("kanzlei_user", email);
         window.history.replaceState({}, document.title, window.location.pathname);
         onLogin({ access_token: access, refresh_token: refresh, role, email, oauth: true });
+        navigate("/", { replace: true });
       } catch (err) {
         if (!active) return;
         setError(friendlyAuthError(err?.message));
@@ -72,23 +113,30 @@ export default function Login({ onLogin }) {
     return () => {
       active = false;
     };
-  }, [onLogin]);
+  }, [onLogin, navigate]);
 
   const submit = async (e) => {
     e.preventDefault();
-    if (!identity || !pass) { setError("Bitte alle Felder ausfüllen"); return; }
-    setLoading(true); setError(""); setResendInfo("");
+    const { idVal, passVal } = readLoginFields();
+    if (!idVal || !passVal) {
+      setError("Bitte E-Mail und Passwort eingeben.");
+      return;
+    }
+    setLoading(true);
+    setError("");
+    setResendInfo("");
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), LOGIN_TIMEOUT_MS);
     try {
-      const isEmail = identity.includes("@");
-      const trimmed = identity.trim();
+      const isEmail = idVal.includes("@");
       const body = isEmail
-        ? { email: trimmed.toLowerCase(), password: pass }
-        : { benutzername: trimmed, passwort: pass };
-      // Ein Endpunkt: /api/auth/login (LoginRequest) — gleiche Logik wie Registrierung (E-Mail + Passwort)
+        ? { email: idVal.toLowerCase(), password: passVal }
+        : { benutzername: idVal, passwort: passVal };
       const res = await fetch(`${apiBase}/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
+        signal: controller.signal,
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -100,12 +148,11 @@ export default function Login({ onLogin }) {
         if (detail.toLowerCase().includes("e-mail noch nicht bestätigt")) {
           setResendInfo("verify-pending");
         }
-        setError(detail);
+        setError(friendlyAuthError(detail));
         return;
       }
       const payload = data && data.data && typeof data.data === "object" ? data.data : data;
-      const token =
-        payload.access_token || payload.token || "";
+      const token = pickAuthToken(payload);
       if (!token) {
         setError("Anmeldung fehlgeschlagen. Bitte versuchen Sie es später erneut oder kontaktieren Sie den Support.");
         return;
@@ -113,7 +160,7 @@ export default function Login({ onLogin }) {
       localStorage.setItem("kanzlei_token", token);
       localStorage.setItem("token", token);
       if (payload.refresh_token) localStorage.setItem("kanzlei_refresh_token", payload.refresh_token);
-      localStorage.setItem("kanzlei_user", payload.anzeigename || payload.benutzer || payload.benutzername || identity);
+      localStorage.setItem("kanzlei_user", payload.anzeigename || payload.benutzer || payload.benutzername || idVal);
       const role = payload.role || payload.rolle;
       const normalizedRole = String(role || "").toLowerCase();
       const normalizedExpected = String(expectedRole || "").toLowerCase();
@@ -127,19 +174,27 @@ export default function Login({ onLogin }) {
         localStorage.removeItem("kanzlei_token");
         localStorage.removeItem("token");
         localStorage.removeItem("kanzlei_refresh_token");
-        setError(`Dieses Konto ist als "${role}" angelegt. Bitte den passenden Zugang wählen.`);
+        setError(`Dieses Konto ist als „${role}“ angelegt. Bitte „Überspringen“ wählen oder „Steuerberater“ als Zugangstyp.`);
         return;
       }
       localStorage.setItem("kanzlei_rolle", role);
       localStorage.setItem("role", role);
       onLogin(payload);
+      navigate("/", { replace: true });
     } catch (err) {
-      setError("Server nicht erreichbar. Bitte Internetverbindung prüfen und es später erneut versuchen.");
-    } finally { setLoading(false); }
+      if (err?.name === "AbortError") {
+        setError("Zeitüberschreitung — der Server antwortet nicht. VPN/Netzwerk prüfen oder Seite neu laden.");
+      } else {
+        setError("Server nicht erreichbar. Bitte Internetverbindung prüfen und es später erneut versuchen.");
+      }
+    } finally {
+      clearTimeout(timeoutId);
+      setLoading(false);
+    }
   };
 
   const resendVerification = async () => {
-    const email = (identity || "").trim().toLowerCase();
+    const email = readLoginFields().idVal.toLowerCase();
     if (!email.includes("@")) {
       setError("Bitte eine E-Mail eingeben, um die Verifizierung erneut zu senden.");
       return;
@@ -183,7 +238,6 @@ export default function Login({ onLogin }) {
         boxShadow:"var(--shadow-modal)",
         animation:"fadeUp 0.5s ease",
       }}>
-        {/* Logo */}
         <div style={{marginBottom:36}}>
           <div style={{fontFamily:"var(--font-head)",fontSize:30,
                         color:"var(--accent)",lineHeight:1.1,marginBottom:6}}>
@@ -227,11 +281,7 @@ export default function Login({ onLogin }) {
           </div>
         )}
 
-        <div style={{ fontSize: 12, color: "var(--text3)", marginBottom: 16, lineHeight: 1.45 }}>
-          <strong>E-Mail</strong> mit @ eintragen — oder <strong>Benutzername</strong> ohne @ (interner Login-Name), falls kein Konto mit E-Mail hinterlegt ist.
-        </div>
-
-        <form onSubmit={submit}>
+        <form onSubmit={submit} autoComplete="on">
           <div
             style={{
               marginBottom: 14,
@@ -296,9 +346,16 @@ export default function Login({ onLogin }) {
           </div>
           <div style={{marginBottom:14}}>
             <div style={{fontSize:11,color:"var(--text3)",textTransform:"uppercase",
-                          letterSpacing:"0.07em",marginBottom:5}}>E-Mail oder Benutzername</div>
-            <input type="text" value={identity} placeholder="name@kanzlei.de oder steuerberater"
-              onChange={e => setIdentity(e.target.value)}
+                          letterSpacing:"0.07em",marginBottom:5}}>E-Mail</div>
+            <input
+              ref={identityRef}
+              type="email"
+              name="email"
+              defaultValue=""
+              placeholder="name@kanzlei.de"
+              autoComplete="username"
+              readOnly
+              onFocus={(e) => e.target.removeAttribute("readOnly")}
               style={{width:"100%",background:"var(--bg3)",border:"1px solid var(--border2)",
                 borderRadius:10,color:"var(--text)",padding:"11px 14px",fontSize:14,
                 fontFamily:"var(--font-body)",transition:"border 0.15s"}} />
@@ -308,8 +365,15 @@ export default function Login({ onLogin }) {
             <div style={{fontSize:11,color:"var(--text3)",textTransform:"uppercase",
                           letterSpacing:"0.07em",marginBottom:5}}>Passwort</div>
             <div style={{ position: "relative" }}>
-              <input type={showPass ? "text" : "password"} value={pass} placeholder="••••••••"
-                onChange={e => setPass(e.target.value)}
+              <input
+                ref={passRef}
+                type="password"
+                name="password"
+                defaultValue=""
+                placeholder="Passwort eingeben"
+                autoComplete="current-password"
+                readOnly
+                onFocus={(e) => e.target.removeAttribute("readOnly")}
                 style={{width:"100%",background:"var(--bg3)",border:"1px solid var(--border2)",
                   borderRadius:10,color:"var(--text)",padding:"11px 80px 11px 14px",fontSize:14,
                   fontFamily:"var(--font-body)",transition:"border 0.15s"}} />
@@ -335,30 +399,10 @@ export default function Login({ onLogin }) {
                 aria-label={showPass ? "Passwort ausblenden" : "Passwort anzeigen"}
                 title={showPass ? "Passwort ausblenden" : "Passwort anzeigen"}
               >
-                <svg
-                  width="16"
-                  height="16"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  xmlns="http://www.w3.org/2000/svg"
-                  aria-hidden="true"
-                >
-                  <path
-                    d="M2 12C3.7 8.4 7.3 6 12 6C16.7 6 20.3 8.4 22 12C20.3 15.6 16.7 18 12 18C7.3 18 3.7 15.6 2 12Z"
-                    stroke="currentColor"
-                    strokeWidth="1.8"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                  <path d="M2 12C3.7 8.4 7.3 6 12 6C16.7 6 20.3 8.4 22 12C20.3 15.6 16.7 18 12 18C7.3 18 3.7 15.6 2 12Z" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
                   <circle cx="12" cy="12" r="3.2" stroke="currentColor" strokeWidth="1.8" />
-                  {showPass ? (
-                    <path
-                      d="M4 4L20 20"
-                      stroke="currentColor"
-                      strokeWidth="1.8"
-                      strokeLinecap="round"
-                    />
-                  ) : null}
+                  {showPass ? <path d="M4 4L20 20" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/> : null}
                 </svg>
               </button>
             </div>
@@ -391,14 +435,10 @@ export default function Login({ onLogin }) {
           gap: 12,
         }}>
           <div>
-            <div style={{ fontSize: 13, color: "var(--text2)", fontWeight: 600 }}>
-              Noch kein Konto?
-            </div>
+            <div style={{ fontSize: 13, color: "var(--text2)", fontWeight: 600 }}>Noch kein Konto?</div>
             <div style={{ fontSize: 12, color: "var(--text3)", marginTop: 2 }}>Erstelle ein Konto.</div>
           </div>
-          <a
-            href="/register"
-            style={{
+          <a href="/register" style={{
               background: "var(--accent)",
               color: "var(--on-accent)",
               border: "none",
@@ -408,8 +448,7 @@ export default function Login({ onLogin }) {
               fontWeight: 700,
               textDecoration: "none",
               whiteSpace: "nowrap",
-            }}
-          >
+            }}>
             Jetzt registrieren
           </a>
         </div>
