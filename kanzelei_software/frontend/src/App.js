@@ -125,24 +125,12 @@ function mergeMandantenMitKpis(mandantenRows, kpiRows) {
     });
   });
 
-  // Pending-Aufgaben (lokal) in KPI-Zähler einrechnen, bis der Server nachgezogen hat.
+  // Pending-Aufgaben (lokal) in KPI-Zähler einrechnen — nur für echte Mandanten (keine Phantom-Namen).
   const heute = new Date().toISOString().slice(0, 10);
   for (const p of lesePendingAufgaben()) {
     const name = String(p?.mandant || "").trim();
-    if (!name) continue;
-    const prev = byName.get(name) || {
-      mandant: name,
-      name,
-      email: "",
-      telefon: "",
-      branche: "",
-      umsatz: 0,
-      score: 0,
-      status: "NORMAL",
-      aufgaben_offen: 0,
-      aufgaben_ueberfaellig: 0,
-      tage_ohne_antwort: 0,
-    };
+    if (!name || !byName.has(name)) continue;
+    const prev = byName.get(name);
     const offen = !istAufgabeErledigt(p);
     const ueberfaellig = offen && String(p?.frist || "") < heute;
     byName.set(name, {
@@ -1251,15 +1239,25 @@ function mergeServerMitPending(serverRows, pendingRows) {
   return aufgabenListeDedupeNachId([...server, ...pending]);
 }
 
-function mandantenNamenAusQuellen(liste, kpisRows) {
-  const ausListe = (liste || [])
+function mandantenNamenAusQuellen(liste) {
+  return (liste || [])
     .map((m) => String(m?.name ?? m?.mandant ?? "").trim())
-    .filter(Boolean);
-  const ausKpis = (kpisRows || [])
-    .map((k) => String(k?.mandant ?? k?.name ?? "").trim())
-    .filter(Boolean);
-  const set = new Set([...ausListe, ...ausKpis]);
-  return [...set].sort((a, b) => a.localeCompare(b, "de", { sensitivity: "base" }));
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b, "de", { sensitivity: "base" }));
+}
+
+/** Entfernt lokale Pending-Aufgaben für Mandanten, die es auf dem Server nicht (mehr) gibt. */
+function bereinigePendingFuerUnbekannteMandanten(gueltigeNamen) {
+  const valid = new Set(
+    (gueltigeNamen || []).map((n) => String(n).trim()).filter(Boolean)
+  );
+  if (!valid.size) return lesePendingAufgaben();
+  const pending = lesePendingAufgaben();
+  const bereinigt = pending.filter((x) => valid.has(String(x?.mandant || "").trim()));
+  if (bereinigt.length !== pending.length) {
+    schreibePendingAufgaben(bereinigt);
+  }
+  return bereinigt;
 }
 
 function AufgabenSeite({ kpis, heute, onRefresh, isMobile = false }) {
@@ -1289,16 +1287,8 @@ function AufgabenSeite({ kpis, heute, onRefresh, isMobile = false }) {
     try {
       const raw = await getMandanten();
       const liste = normalisiereMandanten(raw);
-      let namen = mandantenNamenAusQuellen(liste, kpis);
-      const pendingRows = lesePendingAufgaben();
-      const pendingMandanten = pendingRows
-        .map((x) => String(x?.mandant || "").trim())
-        .filter(Boolean);
-      if (pendingMandanten.length) {
-        namen = [...new Set([...namen, ...pendingMandanten])].sort((a, b) =>
-          a.localeCompare(b, "de", { sensitivity: "base" })
-        );
-      }
+      const namen = mandantenNamenAusQuellen(liste);
+      const pendingRows = bereinigePendingFuerUnbekannteMandanten(namen);
       setMandantenNamen(namen);
 
       const aufgabenArrays = await Promise.allSettled(
