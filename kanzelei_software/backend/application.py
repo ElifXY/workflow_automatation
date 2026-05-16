@@ -182,6 +182,34 @@ async def optional_api_gateway(request: Request, call_next):
     )
 
 
+# Pfade, die im Backend bewusst mit /api/… registriert sind (nicht auf /… kürzen).
+_NATIVE_API_PREFIX_PATHS = frozenset(
+    {
+        "/api/health",
+        "/api/ready",
+    }
+)
+
+
+@app.middleware("http")
+async def strip_public_api_prefix(request: Request, call_next):
+    """
+    SPA nutzt REACT_APP_API_URL=/api; Monolith-Routen: /mandanten, /ki/chat, /kpis, …
+
+    Nginx soll ``/api/`` entfernen. Wenn der Upstream ``/api/mandanten`` durchreicht,
+    hier auf ``/mandanten`` normalisieren. ``/api/v1/*`` und native Aliase bleiben.
+    """
+    path = request.scope.get("path") or request.url.path
+    if path == "/api" or path.startswith("/api/"):
+        if path.startswith("/api/v1/") or path in _NATIVE_API_PREFIX_PATHS:
+            return await call_next(request)
+        rest = path[4:] if len(path) > 4 else "/"
+        if not rest.startswith("/"):
+            rest = "/" + rest
+        request.scope["path"] = rest
+    return await call_next(request)
+
+
 import api as _api_routes  # noqa: E402,F401 — registriert alle Routen auf ``app``
 
 __all__ = ["app", "log", "_is_production_api"]
