@@ -160,7 +160,7 @@ const BuchungsKarte = ({ beleg, mandanten, onBestaetigen, onAblehnen, onKorrigie
   const handleBestaetigen = async () => {
     setSaving(true);
     try {
-      await onBestaetigen(beleg.beleg_id, edit ? form : null);
+      await onBestaetigen(readBelegId(beleg), edit ? form : null);
     } finally { setSaving(false); }
   };
 
@@ -286,7 +286,7 @@ const BuchungsKarte = ({ beleg, mandanten, onBestaetigen, onAblehnen, onKorrigie
             <Btn onClick={() => setEdit(true)} variant="ghost" size="sm">
               ✏ Korrigieren
             </Btn>
-            <Btn onClick={() => onAblehnen(beleg.beleg_id)} variant="danger" size="sm">
+            <Btn onClick={() => onAblehnen(readBelegId(beleg))} variant="danger" size="sm">
               ✕
             </Btn>
           </div>
@@ -371,7 +371,7 @@ function belegInPipeline(b) {
   return ["vorschlag", "bestaetigt", "manuell"].includes(belegWorkflowStatus(b));
 }
 
-function belegId(b) {
+function readBelegId(b) {
   return b?.beleg_id || b?.id || b?._id || "";
 }
 
@@ -533,26 +533,45 @@ export default function BelegScanner() {
   };
 
   // ── Bestätigen ─────────────────────────────────────────────
-  const handleBestaetigen = async (belegId, korrekturen = null) => {
-    await apiFetch(`/belege/${belegId}/bestaetigen`, {
-      method: "POST",
-      body: JSON.stringify(korrekturen || {}),
-    });
-    showToast("✓ Buchung bestätigt und unter 'Gebucht' sichtbar");
-      setBelege(prev => prev.map(b => (
-      belegId(b) === belegId ? { ...b, status: "bestaetigt", bestaetigt_am: new Date().toISOString() } : b
-    )));
-    await ladeAlles();
+  const handleBestaetigen = async (bid, korrekturen = null) => {
+    const id = String(bid || "").trim();
+    if (!id) {
+      showToast("Beleg-ID fehlt — bitte Seite neu laden", "error");
+      return;
+    }
+    try {
+      await apiFetch(`/belege/${encodeURIComponent(id)}/bestaetigen`, {
+        method: "POST",
+        body: JSON.stringify(korrekturen || {}),
+      });
+      setBelege((prev) =>
+        prev.map((b) =>
+          readBelegId(b) === id
+            ? { ...b, status: "bestaetigt", bestaetigt_am: new Date().toISOString() }
+            : b
+        )
+      );
+      showToast("✓ Buchung bestätigt und unter 'Gebucht' sichtbar");
+      ladeAlles().catch((e) => console.error(e));
+    } catch (e) {
+      showToast(`Bestätigen fehlgeschlagen: ${e.message}`, "error");
+      throw e;
+    }
   };
 
   // ── Ablehnen ───────────────────────────────────────────────
-  const handleAblehnen = async (belegId) => {
+  const handleAblehnen = async (bid) => {
     if (!window.confirm("Buchungsvorschlag ablehnen?")) return;
+    const id = String(bid || "").trim();
+    if (!id) {
+      showToast("Beleg-ID fehlt — bitte Seite neu laden", "error");
+      return;
+    }
     try {
-      await apiFetch(`/belege/${belegId}/ablehnen`, { method: "POST" });
-      setBelege(prev => prev.filter(b => belegId(b) !== belegId));
+      await apiFetch(`/belege/${encodeURIComponent(id)}/ablehnen`, { method: "POST" });
+      setBelege((prev) => prev.filter((b) => readBelegId(b) !== id));
       showToast("Vorschlag abgelehnt", "warn");
-      await ladeAlles();
+      ladeAlles().catch((e) => console.error(e));
     } catch (e) {
       showToast(`Ablehnen fehlgeschlagen: ${e.message}`, "error");
     }
@@ -659,7 +678,7 @@ export default function BelegScanner() {
                      onClick={async () => {
                        if (!window.confirm(`Alle ${gefiltert.length} Vorschläge bestätigen?`)) return;
                        for (const b of gefiltert.filter(b => b.mandant)) {
-                         const bid = belegId(b);
+                         const bid = readBelegId(b);
                          if (!bid) continue;
                          await handleBestaetigen(bid);
                        }
@@ -672,7 +691,7 @@ export default function BelegScanner() {
             <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
               {gefiltert.map((beleg, idx) => (
                 <BuchungsKarte
-                  key={belegId(beleg) || `${beleg.dateiname || "beleg"}-${idx}`}
+                  key={readBelegId(beleg) || `${beleg.dateiname || "beleg"}-${idx}`}
                   beleg={beleg}
                   mandanten={mandanten}
                   onBestaetigen={handleBestaetigen}
@@ -726,7 +745,7 @@ export default function BelegScanner() {
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 {archivListe.map((b, idx) => {
-                  const bid = belegId(b);
+                  const bid = readBelegId(b);
                   return (
                   <div key={bid || `archiv-${idx}`} style={{
                     background: "var(--bg2)", border: `1px solid var(--border)`,
