@@ -6,8 +6,12 @@
 const BASE_URL = process.env.REACT_APP_API_URL || "/api";
 let _refreshInFlight = null;
 
-const getAccessToken = () =>
-  localStorage.getItem("kanzlei_token") || localStorage.getItem("token") || "";
+const getAccessToken = () => {
+  const t = (localStorage.getItem("kanzlei_token") || localStorage.getItem("token") || "").trim();
+  // Ungültiger Kurz-Platzhalter (z. B. redigiertes „privat“) — nicht senden
+  if (t && t.length < 32 && t.split(".").length !== 3) return "";
+  return t;
+};
 const getRefreshToken = () => localStorage.getItem("kanzlei_refresh_token") || "";
 const setAccessToken = (token) => {
   const v = token || "";
@@ -33,6 +37,17 @@ export const clearAuthStorage = () => {
   } catch {}
 };
 
+const pickBearerFromAuthBody = (body) => {
+  const access = String(body?.access_token || "").trim();
+  const session = String(body?.token || "").trim();
+  const isJwt = (t) => t.split(".").length === 3 && t.length > 40;
+  const isSession = (t) => t.length >= 32;
+  if (isSession(session)) return session;
+  if (isJwt(access)) return access;
+  if (isSession(access)) return access;
+  return session || access;
+};
+
 const refreshAccessToken = async () => {
   const refreshToken = getRefreshToken();
   if (!refreshToken) return "";
@@ -44,13 +59,14 @@ const refreshAccessToken = async () => {
       body: JSON.stringify({ refresh_token: refreshToken }),
     });
     const body = await res.json().catch(() => ({}));
-    if (!res.ok || !body?.access_token) {
+    const bearer = pickBearerFromAuthBody(body);
+    if (!res.ok || !bearer) {
       clearAuthStorage();
       throw new Error(body?.detail || body?.error || "Session abgelaufen");
     }
-    setAccessToken(body.access_token);
+    setAccessToken(bearer);
     if (body.refresh_token) setRefreshToken(body.refresh_token);
-    return body.access_token;
+    return bearer;
   })();
   try {
     return await _refreshInFlight;
@@ -88,21 +104,29 @@ export const apiFetch = async (url, options = {}) => {
           window.dispatchEvent(new CustomEvent("billing:paywall", { detail: data || {} }));
         } catch {}
       }
-      if (res.status === 401 && !options._retryAfterRefresh && getRefreshToken()) {
-        try {
-          const newToken = await refreshAccessToken();
-          return await apiFetch(url, {
-            ...options,
-            _retryAfterRefresh: true,
-            headers: {
-              ...(options.headers || {}),
-              Authorization: `Bearer ${newToken}`,
-            },
-          });
-        } catch {
-          if (typeof window !== "undefined" && window.location.pathname !== "/login") {
-            window.location.href = "/login";
+      if (res.status === 401 && !options._retryAfterRefresh) {
+        const rt = getRefreshToken();
+        const looksJwt = (tok) => tok.split(".").length === 3 && tok.length > 40;
+        if (rt && looksJwt(rt)) {
+          try {
+            const newToken = await refreshAccessToken();
+            return await apiFetch(url, {
+              ...options,
+              _retryAfterRefresh: true,
+              headers: {
+                ...(options.headers || {}),
+                Authorization: `Bearer ${newToken}`,
+              },
+            });
+          } catch {
+            try {
+              window.dispatchEvent(new CustomEvent("auth:session-expired"));
+            } catch {}
           }
+        } else {
+          try {
+            window.dispatchEvent(new CustomEvent("auth:session-expired"));
+          } catch {}
         }
       }
       const msg =

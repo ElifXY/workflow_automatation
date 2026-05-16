@@ -3240,32 +3240,42 @@ export default function App() {
       const token =
         (typeof localStorage !== "undefined" &&
           (localStorage.getItem("kanzlei_token") || localStorage.getItem("token"))) || "";
-      if (!token) {
+      const trimmed = (token || "").trim();
+      if (!trimmed || (trimmed.length < 32 && trimmed.split(".").length !== 3)) {
+        clearAuthStorage();
         setLoggedIn(false);
         return;
       }
       try {
         const meRes = await fetch(`${API_ROOT}/auth/me`, {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: { Authorization: `Bearer ${trimmed}` },
         });
-        if (!meRes.ok) {
-          if (meRes.status === 401 || meRes.status === 403) {
-            clearAuthStorage();
-            setLoggedIn(false);
-            return;
-          }
-          // 429/5xx: Session behalten, nicht ausloggen
+        if (meRes.ok) {
           setLoggedIn(true);
           return;
         }
-        setLoggedIn(true);
-      } catch (err) {
-        if (err instanceof Error && err.message === "session invalid") {
+        if (meRes.status === 401) {
           clearAuthStorage();
           setLoggedIn(false);
           return;
         }
-        // Netzwerk/Timeout nach Laptop-Sleep: Token behalten, eingeloggt annehmen
+        if (meRes.status === 403) {
+          let detail = "";
+          try {
+            const b = await meRes.json();
+            detail = String(b?.error || b?.detail || "");
+          } catch {}
+          if (/2fa|ip/i.test(detail)) {
+            setLoggedIn(true);
+            return;
+          }
+          clearAuthStorage();
+          setLoggedIn(false);
+          return;
+        }
+        // 404/429/5xx: nicht sofort ausloggen
+        setLoggedIn(true);
+      } catch {
         const current =
           (typeof localStorage !== "undefined" &&
             (localStorage.getItem("kanzlei_token") || localStorage.getItem("token"))) || "";
@@ -3387,19 +3397,15 @@ export default function App() {
   const quickUpgradeLabel = ctaVariant === "B" ? "Jetzt upgraden" : "Upgrade";
 
   useEffect(() => {
-    const syncLoginState = () => {
-      try {
-        setLoggedIn(!!(localStorage.getItem("kanzlei_token") || localStorage.getItem("token")));
-      } catch {
-        setLoggedIn(false);
+    const onSessionExpired = () => {
+      clearAuthStorage();
+      setLoggedIn(false);
+      if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
+        window.location.replace("/login");
       }
     };
-    window.addEventListener("storage", syncLoginState);
-    const i = setInterval(syncLoginState, 4000);
-    return () => {
-      window.removeEventListener("storage", syncLoginState);
-      clearInterval(i);
-    };
+    window.addEventListener("auth:session-expired", onSessionExpired);
+    return () => window.removeEventListener("auth:session-expired", onSessionExpired);
   }, []);
 
   useEffect(() => {

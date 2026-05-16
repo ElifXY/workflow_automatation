@@ -10,14 +10,14 @@ import { ThemeQuickSwitch } from "../theme";
 const apiBase = (process.env.REACT_APP_API_URL || "/api").replace(/\/$/, "");
 const LOGIN_TIMEOUT_MS = 30000;
 
-/** Session-Token oder JWT — nie kurzen Platzhalter in access_token bevorzugen. */
+/** Login liefert Session-Token + optional JWT — Session hat Vorrang (Redis), JWT kann fehlschlagen. */
 function pickAuthToken(payload) {
   const access = String(payload?.access_token || "").trim();
   const session = String(payload?.token || "").trim();
   const isJwt = (t) => t.split(".").length === 3 && t.length > 40;
   const isSession = (t) => t.length >= 32;
-  if (isJwt(access)) return access;
   if (isSession(session)) return session;
+  if (isJwt(access)) return access;
   if (isSession(access)) return access;
   return session || access;
 }
