@@ -22,6 +22,7 @@ import {
   apiGet,
   getSettings,
   clearAuthStorage,
+  readAuthed,
   extrahiereAufgabenArray,
   extrahiereHeuteEintraege,
   istAufgabeErledigt,
@@ -3184,14 +3185,7 @@ function AppInner() {
 const API_ROOT = process.env.REACT_APP_API_URL || "/api";
 
 function RequireSession({ children }) {
-  try {
-    const t = typeof localStorage !== "undefined" && (
-      localStorage.getItem("kanzlei_token") || localStorage.getItem("token")
-    );
-    if (!t) return <Navigate to="/login" replace />;
-  } catch {
-    return <Navigate to="/login" replace />;
-  }
+  /* Kein Redirect mehr — App steuert Login nur über isAuthed + Token in localStorage. */
   return children;
 }
 
@@ -3201,7 +3195,7 @@ function RequireRole({ roles, children }) {
 }
 
 export default function App() {
-  const [loggedIn,  setLoggedIn]  = useState(false);
+  const isAuthed = readAuthed();
   const [authAktiv, setAuthAktiv] = useState(false);
   const [checking,  setChecking]  = useState(true);
   const [billingAlert, setBillingAlert] = useState(null);
@@ -3236,59 +3230,11 @@ export default function App() {
   };
 
   useEffect(() => {
-    const verifySession = async () => {
-      const token =
-        (typeof localStorage !== "undefined" &&
-          (localStorage.getItem("kanzlei_token") || localStorage.getItem("token"))) || "";
-      const trimmed = (token || "").trim();
-      if (!trimmed || (trimmed.length < 32 && trimmed.split(".").length !== 3)) {
-        clearAuthStorage();
-        setLoggedIn(false);
-        return;
-      }
-      try {
-        const meRes = await fetch(`${API_ROOT}/auth/me`, {
-          headers: { Authorization: `Bearer ${trimmed}` },
-        });
-        if (meRes.ok) {
-          setLoggedIn(true);
-          return;
-        }
-        if (meRes.status === 401) {
-          clearAuthStorage();
-          setLoggedIn(false);
-          return;
-        }
-        if (meRes.status === 403) {
-          let detail = "";
-          try {
-            const b = await meRes.json();
-            detail = String(b?.error || b?.detail || "");
-          } catch {}
-          if (/2fa|ip/i.test(detail)) {
-            setLoggedIn(true);
-            return;
-          }
-          clearAuthStorage();
-          setLoggedIn(false);
-          return;
-        }
-        // 404/429/5xx: nicht sofort ausloggen
-        setLoggedIn(true);
-      } catch {
-        const current =
-          (typeof localStorage !== "undefined" &&
-            (localStorage.getItem("kanzlei_token") || localStorage.getItem("token"))) || "";
-        setLoggedIn(!!current);
-      }
-    };
-
     fetch(`${API_ROOT}/auth/setup-status`)
       .then(r => r.json())
       .then(d => { if (d.eingerichtet) setAuthAktiv(true); })
       .catch(() => {})
-      .finally(async () => {
-        await verifySession();
+      .finally(() => {
         setChecking(false);
       });
   }, []);
@@ -3397,15 +3343,12 @@ export default function App() {
   const quickUpgradeLabel = ctaVariant === "B" ? "Jetzt upgraden" : "Upgrade";
 
   useEffect(() => {
-    const onSessionExpired = () => {
+    const onLogout = () => {
       clearAuthStorage();
-      setLoggedIn(false);
-      if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
-        window.location.replace("/login");
-      }
+      window.location.replace("/login");
     };
-    window.addEventListener("auth:session-expired", onSessionExpired);
-    return () => window.removeEventListener("auth:session-expired", onSessionExpired);
+    window.addEventListener("auth:logout", onLogout);
+    return () => window.removeEventListener("auth:logout", onLogout);
   }, []);
 
   useEffect(() => {
@@ -3441,7 +3384,7 @@ export default function App() {
   return (
     <ThemeProvider>
       <FontLoader />
-      {loggedIn && billingAlert ? (
+      {isAuthed && billingAlert ? (
         <div
           style={{
             position: "fixed",
@@ -3515,7 +3458,7 @@ export default function App() {
           </button>
         </div>
       ) : null}
-      {loggedIn && showUpgradeModal ? (
+      {isAuthed && showUpgradeModal ? (
         <div
           style={{
             position: "fixed",
@@ -3632,27 +3575,27 @@ export default function App() {
           <Route path="/forgot-password" element={<ForgotPassword />} />
           <Route path="/reset-password" element={<ResetPassword />} />
           <Route path="/verify-email" element={<VerifyEmail />} />
-          {authAktiv && !loggedIn ? (
-            <Route path="*" element={<Login onLogin={() => setLoggedIn(true)} />} />
+          {authAktiv && !isAuthed ? (
+            <Route path="*" element={<Login />} />
           ) : (
             <>
               <Route
                 path="/login"
                 element={
-                  loggedIn ? (
+                  isAuthed ? (
                     <Navigate to="/" replace />
                   ) : (
-                    <Login onLogin={() => setLoggedIn(true)} />
+                    <Login />
                   )
                 }
               />
               <Route
                 path="/"
                 element={
-                  loggedIn ? (
+                  isAuthed ? (
                     <RequireSession><AppInner /></RequireSession>
                   ) : (
-                    <Login onLogin={() => setLoggedIn(true)} />
+                    <Login />
                   )
                 }
               />

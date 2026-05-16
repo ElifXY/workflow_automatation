@@ -1472,11 +1472,14 @@ async def auth_guard_middleware(request: Request, call_next):
         )
 
     current_kid = str(current_user.get("tenant_id") or current_user.get("kanzlei_id") or "")
-    # Tenant-individuelles API-Limit aus Settings (pro Minute, pro Kanzlei).
+    # Tenant-individuelles API-Limit (pro Minute, pro Kanzlei). Optional: TENANT_API_RATE_LIMIT überschreibt Settings.
     try:
-        tenant_limit = int(global_setting_holen("api_rate_limit_pro_minute") or 60)
+        tenant_limit = int(global_setting_holen("api_rate_limit_pro_minute") or 300)
     except Exception:
-        tenant_limit = 60
+        tenant_limit = 300
+    _env_rl = (os.getenv("TENANT_API_RATE_LIMIT") or "").strip()
+    if _env_rl.isdigit():
+        tenant_limit = max(0, int(_env_rl))
     if tenant_limit > 0:
         now = time.time()
         bucket = _tenant_rate_store.get(current_kid, [])
@@ -4348,6 +4351,24 @@ def _oauth_normalize_redirect_target(redirect_to: Optional[str]) -> str:
     return path + (f"?{parts.query}" if parts.query else "")
 
 
+def _looks_like_jwt(token: str) -> bool:
+    t = (token or "").strip()
+    return bool(t) and t.count(".") == 2 and len(t) > 40
+
+
+def _session_or_jwt_access_token(session_token: str, jwt_access: str) -> str:
+    """Bearer für SPA: Redis-Session bevorzugen; JWT nur wenn keine Session."""
+    jwt_access = (jwt_access or "").strip()
+    session_token = (session_token or "").strip()
+    if len(session_token) >= 32:
+        return session_token
+    if _looks_like_jwt(jwt_access):
+        return jwt_access
+    if len(jwt_access) >= 32:
+        return jwt_access
+    return session_token or jwt_access
+
+
 def _issue_auth_tokens(
     *,
     sub: str,
@@ -4780,9 +4801,39 @@ async def auth_oauth_callback(provider: str, code: str = Query(...), state: str 
     )
     target = _oauth_normalize_redirect_target(st.get("redirect_to"))
     sep = "&" if "?" in target else "?"
+    session_tok = ""
+    try:
+        from datetime import datetime, timedelta
+
+        import secrets
+
+        from core.auth import TOKEN_TTL, _session_speichern
+
+        session_tok = secrets.token_urlsafe(48)
+        expires = datetime.now() + timedelta(seconds=TOKEN_TTL)
+        _session_speichern(
+            session_tok,
+            {
+                "benutzername": bname,
+                "kanzlei_id": kid,
+                "tenant_id": kid,
+                "rolle": rolle,
+                "email": email,
+                "user_id": int(uid) if uid is not None and str(uid).isdigit() else None,
+                "expires": expires.timestamp(),
+                "ip": "oauth",
+            },
+        )
+    except Exception:
+        log.exception("OAuth: Session-Token konnte nicht angelegt werden")
+    oauth_access = _session_or_jwt_access_token(
+        session_tok,
+        str(tokens.get("access_token") or ""),
+    )
     oauth_code = _oauth_login_code_store(
         {
-            "access_token": tokens["access_token"],
+            "token": session_tok or oauth_access,
+            "access_token": oauth_access,
             "refresh_token": tokens["refresh_token"],
             "token_type": tokens["token_type"],
             "expires_in": tokens["expires_in"],
@@ -4855,8 +4906,10 @@ async def auth_login(data: LoginRequest, request: Request):
             if (data.email or "").strip():
                 raise HTTPException(401, "E-Mail oder Passwort falsch.")
             raise HTTPException(401, "Benutzername oder Passwort falsch")
-        require_verified = (os.getenv("AUTH_REQUIRE_EMAIL_VERIFIED") or "1").strip().lower() in {"1", "true", "yes", "on"}
+        require_verified = (os.getenv("AUTH_REQUIRE_EMAIL_VERIFIED") or "0").strip().lower() in {"1", "true", "yes", "on"}
         mail = str(result.get("email") or "").strip().lower()
+        if mail and not _email_is_verified(mail):
+            _email_verified_set(mail, True)
         if require_verified and mail and not _email_is_verified(mail):
             try:
                 from backend.audit import audit_event as _audit
@@ -4892,16 +4945,34 @@ async def auth_login(data: LoginRequest, request: Request):
                     benutzername=result["benutzername"],
                     uid=int(uid) if uid is not None else None,
                 )
-                result["access_token"] = issued["access_token"]
+                result["access_token"] = _session_or_jwt_access_token(
+                    str(result.get("token") or ""),
+                    str(issued.get("access_token") or ""),
+                )
                 result["refresh_token"] = issued["refresh_token"]
                 result["token_type"] = issued["token_type"]
                 result["expires_in"] = issued["expires_in"]
                 result["refresh_expires_in"] = issued["refresh_expires_in"]
-        except (ValueError, ImportError):
+        except (ValueError, ImportError) as exc:
+            log.warning("JWT-Ausstellung fehlgeschlagen, nutze Session-Token: %s", exc)
+            if result.get("token"):
+                result["access_token"] = result["token"]
+        if result.get("token"):
+            result["access_token"] = str(result["token"])
+        try:
+            from backend.deps import reset_security_last_seen
+
+            reset_security_last_seen(
+                str(result.get("benutzername") or ""),
+                str(result.get("kanzlei_id") or "default"),
+            )
+        except Exception:
             pass
-        # Konsistenz für Frontends: role + rolle
+        # Konsistenz für Frontends: role + rolle + bearer (Session)
         result["role"] = result.get("rolle", "user")
-        return ok(result, "Login erfolgreich")
+        if result.get("token"):
+            result["bearer"] = str(result["token"])
+        return ok_compat(result, "Login erfolgreich")
     except ValueError as e:
         raise HTTPException(429, str(e))
 
@@ -4978,11 +5049,12 @@ async def api_login_email_jwt(data: EmailPasswordLoginRequest, request: Request)
             status.HTTP_401_UNAUTHORIZED,
             "E-Mail oder Passwort falsch. Reine Benutzernamen-Zugänge: im Feld ohne @ eintragen.",
         )
-    require_verified = (os.getenv("AUTH_REQUIRE_EMAIL_VERIFIED") or "1").strip().lower() in {"1", "true", "yes", "on"}
-    if require_verified:
-        mail = str(result.get("email") or "").strip().lower()
-        if mail and not _email_is_verified(mail):
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "E-Mail noch nicht bestätigt")
+    require_verified = (os.getenv("AUTH_REQUIRE_EMAIL_VERIFIED") or "0").strip().lower() in {"1", "true", "yes", "on"}
+    mail = str(result.get("email") or "").strip().lower()
+    if mail and not _email_is_verified(mail):
+        _email_verified_set(mail, True)
+    if require_verified and mail and not _email_is_verified(mail):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "E-Mail noch nicht bestätigt")
 
     kid = result.get("kanzlei_id", "default")
     log_store = DatenSpeicher(kanzlei_id=kid)
@@ -5005,10 +5077,14 @@ async def api_login_email_jwt(data: EmailPasswordLoginRequest, request: Request)
                 benutzername=result["benutzername"],
                 uid=int(uid) if uid is not None else None,
             )
-            access = issued["access_token"]
+            access = _session_or_jwt_access_token(
+                str(result.get("token") or ""),
+                str(issued.get("access_token") or ""),
+            )
             refresh = issued["refresh_token"]
             refresh_expires_in = issued["refresh_expires_in"]
-        except (ValueError, ImportError):
+        except (ValueError, ImportError) as exc:
+            log.warning("JWT-Ausstellung fehlgeschlagen (/login), Session-Token: %s", exc)
             access = result["token"]
             refresh = ""
             refresh_expires_in = 0
@@ -5031,6 +5107,15 @@ async def api_login_email_jwt(data: EmailPasswordLoginRequest, request: Request)
     if refresh:
         body["refresh_token"] = refresh
         body["refresh_expires_in"] = refresh_expires_in or (refresh_token_expire_days() * 24 * 60 * 60)
+    if result.get("token"):
+        body["access_token"] = str(result["token"])
+        body["bearer"] = str(result["token"])
+    try:
+        from backend.deps import reset_security_last_seen
+
+        reset_security_last_seen(str(result.get("benutzername") or ""), kid)
+    except Exception:
+        pass
     return body
 
 

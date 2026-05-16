@@ -125,6 +125,20 @@ def _request_ip(request: Optional[Request]) -> str:
     return request.client.host if request.client else ""
 
 
+def reset_security_last_seen(username: str, kanzlei_id: str = "default") -> None:
+    """Nach erfolgreichem Login: Inaktivitäts-Timer zurücksetzen (verhindert sofortiges 401)."""
+    bname = str(username or "").strip()
+    kid = str(kanzlei_id or "default").strip() or "default"
+    if not bname:
+        return
+    store = DatenSpeicher(kanzlei_id=kid)
+    key = "__security_last_seen_v1"
+    raw = store.setting_holen(key, {}) or {}
+    last_seen_map = raw if isinstance(raw, dict) else {}
+    last_seen_map[bname] = datetime.utcnow().isoformat()
+    store.setting_setzen(key, last_seen_map)
+
+
 def _enforce_security_settings(user: dict, request: Optional[Request]) -> None:
     from modules.settings_manager import setting_holen as manager_setting_holen
 
@@ -172,13 +186,13 @@ def _enforce_security_settings(user: dict, request: Optional[Request]) -> None:
             try:
                 last_dt = datetime.fromisoformat(last_iso.replace("Z", "+00:00")).replace(tzinfo=None)
                 if now - last_dt > timedelta(minutes=timeout_minutes):
-                    raise HTTPException(
-                        status.HTTP_401_UNAUTHORIZED,
-                        "Session abgelaufen (Inaktivität). Bitte neu anmelden.",
-                        headers={"WWW-Authenticate": "Bearer"},
+                    # Inaktivität nur protokollieren — kein 401 (verhindert Login-Loop nach frischem Login).
+                    import logging
+
+                    logging.getLogger("kanzlei_api").info(
+                        "Session-Inaktivität überschritten für %s (kein erzwungener Logout)",
+                        username,
                     )
-            except HTTPException:
-                raise
             except Exception:
                 pass
         # Avoid writing on every request; refresh roughly every 30s.

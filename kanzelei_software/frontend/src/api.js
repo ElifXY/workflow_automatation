@@ -5,13 +5,45 @@
 
 const BASE_URL = process.env.REACT_APP_API_URL || "/api";
 let _refreshInFlight = null;
+const AUTH_GRACE_KEY = "auth_login_grace_until";
+
+export const markAuthLoginGrace = (ms = 1800000) => {
+  try {
+    sessionStorage.setItem(AUTH_GRACE_KEY, String(Date.now() + ms));
+  } catch {}
+};
+
+export const inAuthLoginGrace = () => {
+  try {
+    const until = Number(sessionStorage.getItem(AUTH_GRACE_KEY) || "0");
+    return until > Date.now();
+  } catch {
+    return false;
+  }
+};
+
+const isJwtShape = (t) => t.split(".").length === 3 && t.length > 40;
+
+/** Liest ob ein gültiges Token in localStorage liegt (kein React-State nötig). */
+export const readAuthed = () => {
+  try {
+    const t = (localStorage.getItem("kanzlei_token") || localStorage.getItem("token") || "").trim();
+    if (!t) return false;
+    if (isJwtShape(t)) return true;
+    return t.length >= 20;
+  } catch {
+    return false;
+  }
+};
 
 const getAccessToken = () => {
   const t = (localStorage.getItem("kanzlei_token") || localStorage.getItem("token") || "").trim();
-  // Ungültiger Kurz-Platzhalter (z. B. redigiertes „privat“) — nicht senden
-  if (t && t.length < 32 && t.split(".").length !== 3) return "";
-  return t;
+  if (!t) return "";
+  if (isJwtShape(t)) return t;
+  if (t.length >= 20) return t;
+  return "";
 };
+
 const getRefreshToken = () => localStorage.getItem("kanzlei_refresh_token") || "";
 const setAccessToken = (token) => {
   const v = token || "";
@@ -34,18 +66,165 @@ export const clearAuthStorage = () => {
   localStorage.removeItem("role");
   try {
     localStorage.removeItem("kanzlei_view_as_role");
+    sessionStorage.removeItem(AUTH_GRACE_KEY);
   } catch {}
 };
 
-const pickBearerFromAuthBody = (body) => {
+/** Nur explizit aufrufen (Abmelden) — kein Auto-Logout bei API-401. */
+export const logoutUser = () => {
+  clearAuthStorage();
+  try {
+    window.dispatchEvent(new CustomEvent("auth:logout"));
+  } catch {}
+};
+
+export const pickBearerFromAuthBody = (body) => {
   const access = String(body?.access_token || "").trim();
-  const session = String(body?.token || "").trim();
-  const isJwt = (t) => t.split(".").length === 3 && t.length > 40;
-  const isSession = (t) => t.length >= 32;
+  const session = String(body?.token || body?.bearer || "").trim();
+  const isSession = (t) => t.length >= 20 && !isJwtShape(t);
   if (isSession(session)) return session;
-  if (isJwt(access)) return access;
   if (isSession(access)) return access;
+  if (isJwtShape(session)) return session;
+  if (isJwtShape(access)) return access;
   return session || access;
+};
+
+/** Login-Antwort (ok/data, ok_compat, flach) → Nutzdaten. */
+export const extractLoginPayload = (raw) => {
+  if (!raw || typeof raw !== "object") return {};
+  let inner = raw;
+  if (raw.data && typeof raw.data === "object") {
+    inner = raw.data;
+    if (inner.data && typeof inner.data === "object") inner = inner.data;
+  }
+  const token = String(raw.token || raw.bearer || inner.token || inner.bearer || "").trim();
+  const access = String(raw.access_token || inner.access_token || "").trim();
+  return {
+    ...inner,
+    ...(token ? { token } : {}),
+    ...(access ? { access_token: access } : {}),
+  };
+};
+
+export const parseAuthApiError = (data, status = 0) => {
+  if (!data || typeof data !== "object") {
+    return status ? `Anmeldung fehlgeschlagen (Fehler ${status})` : "Anmeldung fehlgeschlagen";
+  }
+  if (typeof data.error === "string" && data.error.trim()) return data.error.trim();
+  if (typeof data.message === "string" && data.message.trim()) return data.message.trim();
+  const d = data.detail ?? data.details;
+  if (typeof d === "string" && d.trim()) return d.trim();
+  if (Array.isArray(d)) {
+    const parts = d.map((x) => {
+      if (typeof x === "string") return x;
+      return x?.msg || x?.message || "";
+    }).filter(Boolean);
+    if (parts.length) return parts.join(" ");
+  }
+  return status ? `Anmeldung fehlgeschlagen (Fehler ${status})` : "Anmeldung fehlgeschlagen";
+};
+
+/** Einheitlicher Login — mehrere Endpunkte/Body-Varianten, Session bevorzugt. */
+export const loginUser = async ({ identity, password, signal } = {}) => {
+  const idVal = String(identity || "").trim();
+  const passVal = String(password || "").trim();
+  if (!idVal || !passVal) {
+    throw new Error("Bitte E-Mail und Passwort eingeben.");
+  }
+
+  const isEmail = idVal.includes("@");
+  const bodies = isEmail
+    ? [
+        { email: idVal.toLowerCase(), password: passVal, passwort: passVal },
+        { email: idVal.toLowerCase(), password: passVal },
+      ]
+    : [{ benutzername: idVal, passwort: passVal }];
+
+  const endpoints = [`${BASE_URL}/auth/login`, `${BASE_URL}/login`];
+  let lastMsg = "Anmeldung fehlgeschlagen";
+
+  const confirmSession = async (bearer) => {
+    const meRes = await fetch(`${BASE_URL}/auth/me`, {
+      headers: { Authorization: `Bearer ${bearer}` },
+      signal,
+    });
+    if (meRes.ok) return;
+    const meData = await meRes.json().catch(() => ({}));
+    throw new Error(parseAuthApiError(meData, meRes.status));
+  };
+
+  for (const url of endpoints) {
+    for (const body of bodies) {
+      let res;
+      try {
+        res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          signal,
+        });
+      } catch (e) {
+        if (e?.name === "AbortError") throw e;
+        lastMsg = "Server nicht erreichbar. Bitte später erneut versuchen.";
+        continue;
+      }
+
+      const rawText = await res.text().catch(() => "");
+      let data = {};
+      try {
+        data = rawText ? JSON.parse(rawText) : {};
+      } catch {
+        data = {};
+      }
+
+      if (res.status === 502 || res.status === 503) {
+        lastMsg =
+          res.status === 502
+            ? "Server antwortet nicht (502). Bitte API-Container prüfen: docker compose ps api"
+            : parseAuthApiError(data, res.status) ||
+              "System noch nicht eingerichtet — bitte zuerst Admin anlegen.";
+        continue;
+      }
+
+      if (res.ok) {
+        const payload = extractLoginPayload(data);
+        const bearer = pickBearerFromAuthBody(payload) || pickBearerFromAuthBody(data);
+        if (!bearer) {
+          lastMsg = "Server hat kein gültiges Zugangs-Token geliefert.";
+          continue;
+        }
+        setAccessToken(bearer);
+        try {
+          await confirmSession(bearer);
+        } catch (meErr) {
+          clearAuthStorage();
+          throw meErr;
+        }
+        markAuthLoginGrace();
+        if (payload.refresh_token) setRefreshToken(payload.refresh_token);
+        const role = payload.role || payload.rolle || "";
+        if (role) {
+          localStorage.setItem("kanzlei_rolle", role);
+          localStorage.setItem("role", role);
+        }
+        localStorage.setItem(
+          "kanzlei_user",
+          payload.anzeigename || payload.benutzer || payload.benutzername || idVal
+        );
+        return { ...payload, token: bearer, role };
+      }
+
+      lastMsg = parseAuthApiError(data, res.status);
+      if (res.status === 401 || res.status === 403) {
+        const err = new Error(lastMsg);
+        err.status = res.status;
+        err.verifyPending = /nicht bestätigt/i.test(lastMsg);
+        throw err;
+      }
+    }
+  }
+
+  throw new Error(lastMsg);
 };
 
 const refreshAccessToken = async () => {
@@ -119,14 +298,8 @@ export const apiFetch = async (url, options = {}) => {
               },
             });
           } catch {
-            try {
-              window.dispatchEvent(new CustomEvent("auth:session-expired"));
-            } catch {}
+            /* Kein Auto-Logout — einzelne Requests dürfen 401 liefern ohne Redirect zur Login-Seite. */
           }
-        } else {
-          try {
-            window.dispatchEvent(new CustomEvent("auth:session-expired"));
-          } catch {}
         }
       }
       const msg =
