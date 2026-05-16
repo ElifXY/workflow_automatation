@@ -194,13 +194,12 @@ export const loginUser = async ({ identity, password, signal } = {}) => {
           continue;
         }
         setAccessToken(bearer);
+        markAuthLoginGrace();
         try {
           await confirmSession(bearer);
-        } catch (meErr) {
-          clearAuthStorage();
-          throw meErr;
+        } catch {
+          /* /api/auth/me kann auf alter API 401 (Inaktivität) liefern — Login-Token trotzdem nutzen. */
         }
-        markAuthLoginGrace();
         if (payload.refresh_token) setRefreshToken(payload.refresh_token);
         const role = payload.role || payload.rolle || "";
         if (role) {

@@ -17,7 +17,10 @@
 # ============================================================
 
 import logging
+import ipaddress
+import re
 from typing import Any, Optional, Dict
+from urllib.parse import urlparse
 from core.daten_speicher import DatenSpeicher
 
 log = logging.getLogger(__name__)
@@ -62,6 +65,8 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "auto_workflow_monatsabschluss": True,
     "auto_workflow_lohn":           True,
     "workflow_batch_uhrzeit":       "06:00",
+    "historie_erledigte_aufgaben_tage": 30,
+    "historie_steuerfaelle_tage":       30,
 
     # ── 3. MANDANTEN SELF-SERVICE ─────────────────────────────
     "portal_aktiv":                True,
@@ -107,7 +112,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "server_standort":             "DE",    # DE | EU | CH | US
     "verschluesselung_aktiv":      True,
     "2fa_pflicht":                 False,
-    "session_timeout_minuten":     60,
+    "session_timeout_minuten":     0,
     "ip_whitelist_aktiv":          False,
     "ip_whitelist":                [],
     "rollen_lohn_sichtbar":        ["admin", "steuerberater"],
@@ -115,6 +120,16 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "rollen_mandant_loeschen":     ["admin"],
     "rollen_export_datev":         ["admin", "steuerberater"],
     "rollen_einstellungen":        ["admin"],
+    # Sidebar: welche Hauptbereiche Steuerberater bzw. Mitarbeitende sehen (Owner/Admin konfigurierbar)
+    "rollen_nav_steuerberater": [
+        "dashboard", "mandanten", "aufgaben", "ki", "profit", "steuerbot",
+        "dokumente", "belege", "rechnungen", "automation", "empfehlungen",
+        "analytics", "neu", "settings",
+    ],
+    "rollen_nav_mitarbeiter": [
+        "dashboard", "mandanten", "aufgaben", "ki", "dokumente", "belege",
+        "rechnungen", "empfehlungen",
+    ],
     "backup_aktiv":                True,
     "backup_interval_stunden":     24,
     "backup_anzahl_aufbewahren":   30,
@@ -139,7 +154,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "lexoffice_aktiv":             False,
     "lexoffice_api_key":           "",
     "webhook_url":                 "",      # Outgoing Webhooks
-    "api_rate_limit_pro_minute":   60,
+    "api_rate_limit_pro_minute":   300,
 
     # ── KANZLEI-STAMMDATEN ────────────────────────────────────
     "kanzlei_name":                "Steuerkanzlei",
@@ -173,12 +188,56 @@ ERLAUBTE_WERTE = {
     "sprache":          ["de", "en"],
 }
 
-BEREICHE = {
-    0:   (0, 100),    # ki_autonomie_grad
-    1:   (50, 99),    # konfidenz-Schwellenwerte
-    3:   (1, 365),    # Tage-Einstellungen
-    150: (10, 300),   # stundensatz
+NUMERIC_RANGES = {
+    "ki_autonomie_grad": (0, 100),
+    "ki_auto_buchen_ab_konfidenz": (50, 99),
+    "ki_review_ab_konfidenz": (50, 99),
+    "ki_anomalie_betrag_euro": (0, 1_000_000),
+    "ki_anomalie_abweichung_pct": (1, 100),
+    "historie_erledigte_aufgaben_tage": (1, 3650),
+    "historie_steuerfaelle_tage": (1, 3650),
+    "portal_upload_max_mb": (1, 1024),
+    "billing_pauschal_euro": (0, 1_000_000),
+    "billing_pro_buchung_euro": (0, 10_000),
+    "billing_pro_mitarbeiter_euro": (0, 100_000),
+    "billing_value_tier_1_bis": (1, 100_000_000),
+    "billing_value_tier_2_bis": (1, 100_000_000),
+    "billing_value_tier_1_euro": (0, 1_000_000),
+    "billing_value_tier_2_euro": (0, 1_000_000),
+    "billing_value_tier_3_euro": (0, 1_000_000),
+    "billing_ki_aufschlag_prozent": (0, 100),
+    "billing_zahlungsziel_tage": (1, 365),
+    "session_timeout_minuten": (5, 1440),
+    "api_rate_limit_pro_minute": (1, 100_000),
+    "stundensatz": (1, 10_000),
+    "backup_interval_stunden": (1, 24 * 365),
+    "backup_anzahl_aufbewahren": (1, 36500),
+    "max_email_pro_tag": (0, 10_000),
+    "portal_token_gueltig_stunden": (1, 24 * 365),
 }
+
+ROLE_KEYS = {
+    "rollen_lohn_sichtbar",
+    "rollen_zahlungen_freigabe",
+    "rollen_mandant_loeschen",
+    "rollen_export_datev",
+    "rollen_einstellungen",
+}
+ALLOWED_ROLES = {"owner", "admin", "steuerberater", "mitarbeiter", "assistent"}
+ALLOWED_NAV_TABS = {
+    "dashboard", "mandanten", "aufgaben", "ki", "profit", "steuerbot",
+    "dokumente", "belege", "rechnungen", "automation", "empfehlungen",
+    "analytics", "neu", "settings",
+}
+TIME_PATTERN = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+EMAIL_KEYS = {
+    "eskalation_stufe_1_empfaenger",
+    "eskalation_stufe_2_empfaenger",
+    "datenschutz_beauftragter",
+}
+URL_KEYS = {"webhook_url", "kanzlei_website"}
+NAV_KEYS = {"rollen_nav_steuerberater", "rollen_nav_mitarbeiter"}
 
 
 # ============================================================
@@ -216,6 +275,138 @@ def setting_holen(key: str) -> Optional[Any]:
     return _lade_settings().get(key, DEFAULT_SETTINGS.get(key))
 
 
+def _is_valid_url(value: str) -> bool:
+    try:
+        parsed = urlparse(value)
+        return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+    except Exception:
+        return False
+
+
+def _validate_invariants(settings: Dict[str, Any], key: str) -> bool:
+    auto = int(settings.get("ki_auto_buchen_ab_konfidenz", 92))
+    review = int(settings.get("ki_review_ab_konfidenz", 75))
+    if review >= auto:
+        log.warning(
+            "Ungültige Konfidenz-Schwellenwerte: review (%s) muss kleiner als auto (%s) sein",
+            review,
+            auto,
+        )
+        return False
+    if key == "billing_value_tier_2_bis":
+        tier1 = int(settings.get("billing_value_tier_1_bis", 100000))
+        tier2 = int(settings.get("billing_value_tier_2_bis", 500000))
+        if tier2 <= tier1:
+            log.warning("billing_value_tier_2_bis muss größer als billing_value_tier_1_bis sein")
+            return False
+    if bool(settings.get("ip_whitelist_aktiv")):
+        whitelist = settings.get("ip_whitelist") or []
+        if not isinstance(whitelist, list) or not whitelist:
+            log.warning("ip_whitelist_aktiv benötigt mindestens einen gültigen IP/CIDR-Eintrag")
+            return False
+        for entry in whitelist:
+            try:
+                text = str(entry).strip()
+                if not text:
+                    raise ValueError("empty")
+                if "/" in text:
+                    ipaddress.ip_network(text, strict=False)
+                else:
+                    ipaddress.ip_address(text)
+            except Exception:
+                log.warning("Ungültiger IP-Whitelist-Eintrag: %r", entry)
+                return False
+    if bool(settings.get("elster_direktversand")) and not bool(settings.get("elster_aktiv")):
+        log.warning("elster_direktversand benötigt elster_aktiv=true")
+        return False
+    if bool(settings.get("billing_stripe_aktiv")):
+        if not bool(settings.get("billing_aktiv")):
+            log.warning("billing_stripe_aktiv benötigt billing_aktiv=true")
+            return False
+        if not str(settings.get("billing_stripe_key") or "").strip():
+            log.warning("billing_stripe_aktiv benötigt billing_stripe_key")
+            return False
+    restricted_admin_roles = {"owner", "admin"}
+    settings_roles = {str(r).strip().lower() for r in (settings.get("rollen_einstellungen") or []) if str(r).strip()}
+    if not settings_roles:
+        log.warning("rollen_einstellungen darf nicht leer sein")
+        return False
+    if not settings_roles.issubset(restricted_admin_roles):
+        log.warning("rollen_einstellungen darf nur owner/admin enthalten")
+        return False
+    for critical_key in ("rollen_mandant_loeschen", "rollen_zahlungen_freigabe"):
+        roles = {str(r).strip().lower() for r in (settings.get(critical_key) or []) if str(r).strip()}
+        if not roles:
+            log.warning("%s darf nicht leer sein", critical_key)
+            return False
+        if not roles.issubset(restricted_admin_roles):
+            log.warning("%s darf nur owner/admin enthalten", critical_key)
+            return False
+    return True
+
+
+def _normalize_value(key: str, wert: Any, settings: Dict[str, Any]) -> tuple[bool, Any]:
+    if key in ERLAUBTE_WERTE and wert not in ERLAUBTE_WERTE[key]:
+        return False, wert
+    try:
+        if key in DEFAULT_SETTINGS:
+            expected_type = type(DEFAULT_SETTINGS[key])
+            if expected_type == bool:
+                if isinstance(wert, str):
+                    wert = wert.strip().lower() in ("true", "1", "ja", "yes")
+                else:
+                    wert = bool(wert)
+            elif expected_type == int and not isinstance(wert, bool):
+                wert = int(wert)
+            elif expected_type == float and not isinstance(wert, bool):
+                wert = float(wert)
+            elif expected_type == str:
+                wert = "" if wert is None else str(wert).strip()
+            elif expected_type == list:
+                if not isinstance(wert, list):
+                    return False, wert
+                wert = [str(v).strip() for v in wert if str(v).strip()]
+    except (ValueError, TypeError):
+        return False, wert
+
+    if key in NUMERIC_RANGES:
+        low, high = NUMERIC_RANGES[key]
+        if not (low <= wert <= high):
+            return False, wert
+
+    if key in EMAIL_KEYS and wert and not EMAIL_PATTERN.match(str(wert)):
+        return False, wert
+    if key.endswith("_uhrzeit") and wert and not TIME_PATTERN.match(str(wert)):
+        return False, wert
+    if key in URL_KEYS and wert and not _is_valid_url(str(wert)):
+        return False, wert
+    if key in ROLE_KEYS:
+        uniq = []
+        seen = set()
+        for role in wert:
+            r = str(role).lower()
+            if r in ALLOWED_ROLES and r not in seen:
+                uniq.append(r)
+                seen.add(r)
+        if not uniq:
+            return False, wert
+        wert = uniq
+    if key in NAV_KEYS:
+        uniq = []
+        seen = set()
+        for tab in wert:
+            t = str(tab).lower()
+            if t in ALLOWED_NAV_TABS and t not in seen:
+                uniq.append(t)
+                seen.add(t)
+        if "dashboard" not in seen:
+            uniq.insert(0, "dashboard")
+        if not uniq:
+            return False, wert
+        wert = uniq
+    return True, wert
+
+
 def setting_setzen(key: str, wert: Any) -> bool:
     """
     Setting ändern mit vollständiger Validierung.
@@ -231,33 +422,17 @@ def setting_setzen(key: str, wert: Any) -> bool:
         log.warning(f"Unbekannter Setting-Key: {key}")
         return False
 
-    # Werteliste prüfen
-    if key in ERLAUBTE_WERTE and wert not in ERLAUBTE_WERTE[key]:
+    settings = _lade_settings()
+    ok, normalized = _normalize_value(key, wert, settings)
+    if not ok:
         log.warning(f"Ungültiger Wert '{wert}' für '{key}'")
         return False
-
-    # Typ-Konvertierung
-    try:
-        if key in DEFAULT_SETTINGS:
-            expected_type = type(DEFAULT_SETTINGS[key])
-            if expected_type == bool:
-                if isinstance(wert, str):
-                    wert = wert.lower() in ("true","1","ja","yes")
-                else:
-                    wert = bool(wert)
-            elif expected_type == int and not isinstance(wert, bool):
-                wert = int(wert)
-            elif expected_type == float and not isinstance(wert, bool):
-                wert = float(wert)
-    except (ValueError, TypeError) as e:
-        log.warning(f"Typ-Fehler für '{key}': {e}")
+    settings[key] = normalized
+    if not _validate_invariants(settings, key):
         return False
-
-    settings      = _lade_settings()
-    settings[key] = wert
-    erfolg        = _speichere_settings(settings)
+    erfolg = _speichere_settings(settings)
     if erfolg:
-        log.info(f"Setting: {key} = {wert}")
+        log.info(f"Setting: {key} = {normalized}")
     return erfolg
 
 
@@ -287,7 +462,7 @@ def settings_nach_kategorie() -> Dict[str, Dict]:
     }
     for key, wert in alle.items():
         if key.startswith("ki_"):                kategorien["ki"][key] = wert
-        elif key.startswith(("frist_","eskalation_","antwort_","ustva_","jahres","est_","auto_","max_email","workflow_")): kategorien["workflow"][key] = wert
+        elif key.startswith(("frist_","eskalation_","antwort_","ustva_","jahres","est_","auto_","max_email","workflow_","historie_")): kategorien["workflow"][key] = wert
         elif key.startswith("portal_"):          kategorien["portal"][key] = wert
         elif key.startswith("billing_"):         kategorien["billing"][key] = wert
         elif key.startswith(("gobd_","audit_","dsgvo_","server_","verschlue","2fa","session","ip_","rollen_","backup_","datenschutz")): kategorien["compliance"][key] = wert

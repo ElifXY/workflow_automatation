@@ -175,7 +175,7 @@ def _enforce_security_settings(user: dict, request: Optional[Request]) -> None:
 
     # Session timeout by last activity per user
     username = str(user.get("benutzername") or "").strip()
-    timeout_minutes = int(manager_setting_holen("session_timeout_minuten") or 60)
+    timeout_minutes = int(manager_setting_holen("session_timeout_minuten") or 0)
     if username and timeout_minutes > 0:
         now = datetime.utcnow()
         key = "__security_last_seen_v1"
