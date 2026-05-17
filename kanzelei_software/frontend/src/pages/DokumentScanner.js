@@ -15,31 +15,98 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { apiFetch } from "../api";
 import { useTheme, readCssVar } from "../theme";
 
+/** Typische Dokumenttypen in Steuerkanzleien — label = Anzeige im Dropdown */
 const DOK_TYPEN = {
-  rechnung:       {icon:"🧾",farbe:"var(--accent)", ordner:"Rechnungen/Eingang"},
-  kontoauszug:    {icon:"🏦",farbe:"var(--blue)",   ordner:"Bank/Kontoauszüge"},
-  steuerbescheid: {icon:"⚖", farbe:"var(--orange)", ordner:"Steuerbescheide/Einkommensteuer"},
-  jahresabschluss:{icon:"📊",farbe:"var(--purple)", ordner:"Jahresabschlüsse"},
-  vertrag:        {icon:"📋",farbe:"var(--blue)",   ordner:"Verträge"},
-  lohnabrechnung: {icon:"👤",farbe:"var(--green)",  ordner:"Lohnbuchhaltung"},
-  mahnung:        {icon:"⚠", farbe:"var(--red)",    ordner:"Mahnungen"},
-  korrespondenz:  {icon:"✉", farbe:"var(--text2)",  ordner:"Korrespondenz/Mandant"},
-  sonstiges:      {icon:"📄",farbe:"var(--text3)",  ordner:"Sonstiges"},
+  eingangsrechnung:     { icon: "🧾", label: "Eingangsrechnung",              farbe: "var(--accent)", ordner: "Rechnungen/Eingang" },
+  ausgangsrechnung:     { icon: "📤", label: "Ausgangsrechnung",              farbe: "var(--accent)", ordner: "Rechnungen/Ausgang" },
+  rechnung:             { icon: "🧾", label: "Rechnung (allgemein)",          farbe: "var(--accent)", ordner: "Rechnungen/Eingang" },
+  gutschreibung:        { icon: "↩",  label: "Gutschrift / Gutschreibung",    farbe: "var(--accent)", ordner: "Rechnungen/Eingang" },
+  angebot:              { icon: "📝", label: "Angebot / Kostenvoranschlag",   farbe: "var(--text2)",  ordner: "Rechnungen/Eingang" },
+  lieferschein:         { icon: "📦", label: "Lieferschein",                  farbe: "var(--text2)",  ordner: "Rechnungen/Eingang" },
+  quittung:             { icon: "🧾", label: "Quittung / Kassenbon",          farbe: "var(--accent)", ordner: "Rechnungen/Eingang" },
+  bewirtungsbeleg:      { icon: "🍽", label: "Bewirtungsbeleg",               farbe: "var(--accent)", ordner: "Rechnungen/Eingang" },
+  reisekosten:          { icon: "✈",  label: "Reisekosten / Fahrtkosten",     farbe: "var(--blue)",   ordner: "Rechnungen/Eingang" },
+  kontoauszug:          { icon: "🏦", label: "Kontoauszug",                   farbe: "var(--blue)",   ordner: "Bank/Kontoauszüge" },
+  bankbrief:            { icon: "🏦", label: "Bankbrief / Kredit",            farbe: "var(--blue)",   ordner: "Bank/Kontoauszüge" },
+  steuerbescheid:       { icon: "⚖",  label: "Steuerbescheid (ESt & Co.)",   farbe: "var(--orange)", ordner: "Steuerbescheide/Einkommensteuer" },
+  ust_bescheid:         { icon: "⚖",  label: "Umsatzsteuer-Bescheid / UStVA", farbe: "var(--orange)", ordner: "Steuerbescheide/Umsatzsteuer" },
+  gewerbesteuer:        { icon: "⚖",  label: "Gewerbesteuer-Bescheid",        farbe: "var(--orange)", ordner: "Steuerbescheide/Gewerbesteuer" },
+  finanzamt:            { icon: "🏛", label: "Schreiben Finanzamt",           farbe: "var(--orange)", ordner: "Korrespondenz/Finanzamt" },
+  jahresabschluss:      { icon: "📊", label: "Jahresabschluss",                farbe: "var(--purple)", ordner: "Jahresabschlüsse" },
+  bilanz:               { icon: "📊", label: "Bilanz / Buchführung",          farbe: "var(--purple)", ordner: "Jahresabschlüsse" },
+  vertrag:              { icon: "📋", label: "Vertrag",                       farbe: "var(--blue)",   ordner: "Verträge" },
+  mietvertrag:          { icon: "🏠", label: "Mietvertrag / Immobilie",       farbe: "var(--blue)",   ordner: "Immobilien" },
+  vollmacht:            { icon: "✍",  label: "Vollmacht / Vertretung",        farbe: "var(--blue)",   ordner: "Vollmachten" },
+  gesellschaftsvertrag: { icon: "🏢", label: "Gesellschaftsvertrag / Satzung", farbe: "var(--blue)",   ordner: "Verträge" },
+  handelsregister:      { icon: "🏢", label: "Handelsregisterauszug",         farbe: "var(--blue)",   ordner: "Verträge" },
+  kündigung:            { icon: "✂",  label: "Kündigung",                     farbe: "var(--red)",    ordner: "Verträge" },
+  protokoll:            { icon: "📑", label: "Protokoll / Gesellschafterbeschluss", farbe: "var(--purple)", ordner: "Jahresabschlüsse" },
+  lohnabrechnung:       { icon: "👤", label: "Lohnabrechnung",                farbe: "var(--green)",  ordner: "Lohnbuchhaltung" },
+  lohnsteuerbescheinigung: { icon: "👤", label: "Lohnsteuerbescheinigung",   farbe: "var(--green)",  ordner: "Lohnbuchhaltung" },
+  rentenbescheid:       { icon: "🏛", label: "Rentenbescheid / Rentenanpassung", farbe: "var(--blue)", ordner: "Sozialversicherung/Rente" },
+  sozialversicherung:   { icon: "🩺", label: "Sozialversicherung / Krankenkasse", farbe: "var(--green)", ordner: "Sozialversicherung/Krankenkasse" },
+  versicherung:         { icon: "🛡", label: "Versicherung (Police, Schaden)", farbe: "var(--text2)", ordner: "Versicherungen" },
+  mahnung:              { icon: "⚠",  label: "Mahnung",                       farbe: "var(--red)",    ordner: "Mahnungen" },
+  inkasso:              { icon: "⚠",  label: "Inkasso / Zahlungserinnerung",  farbe: "var(--red)",    ordner: "Mahnungen" },
+  korrespondenz:        { icon: "✉",  label: "Korrespondenz (allgemein)",     farbe: "var(--text2)",  ordner: "Korrespondenz/Mandant" },
+  formular:             { icon: "📃", label: "Formular / Antrag",             farbe: "var(--text2)",  ordner: "Formulare" },
+  sonstiges:            { icon: "📄", label: "Sonstiges",                     farbe: "var(--text3)",  ordner: "Sonstiges" },
+};
+
+const DOK_TYP_ALIASES = {
+  rechnung_eingang: "eingangsrechnung",
+  eingang: "eingangsrechnung",
+  ausgang: "ausgangsrechnung",
+  rechnung_ausgang: "ausgangsrechnung",
+  kassenbon: "quittung",
+  beleg: "quittung",
+  bescheid: "steuerbescheid",
+  est_bescheid: "steuerbescheid",
+  ustva: "ust_bescheid",
+  umsatzsteuer: "ust_bescheid",
+  gewst: "gewerbesteuer",
+  rente: "rentenbescheid",
+  rentenversicherung: "rentenbescheid",
+  rentenanpassung: "rentenbescheid",
+  krankenkasse: "sozialversicherung",
+  kv: "sozialversicherung",
+  police: "versicherung",
+  satzung: "gesellschaftsvertrag",
+  hr: "handelsregister",
+  mahnwesen: "mahnung",
+  antrag: "formular",
+  immobilie: "mietvertrag",
+  grundbuch: "mietvertrag",
 };
 
 const ORDNER = [
-  "Rechnungen/Eingang","Rechnungen/Ausgang",
-  "Bank/Kontoauszüge","Steuerbescheide/Einkommensteuer",
-  "Steuerbescheide/Umsatzsteuer","Steuerbescheide/Gewerbesteuer",
-  "Jahresabschlüsse","Lohnbuchhaltung","Verträge",
-  "Korrespondenz/Finanzamt","Korrespondenz/Mandant",
-  "Mahnungen","Sonstiges",
+  "Rechnungen/Eingang", "Rechnungen/Ausgang",
+  "Bank/Kontoauszüge",
+  "Steuerbescheide/Einkommensteuer", "Steuerbescheide/Umsatzsteuer", "Steuerbescheide/Gewerbesteuer",
+  "Jahresabschlüsse", "Lohnbuchhaltung", "Verträge", "Vollmachten", "Immobilien",
+  "Sozialversicherung/Rente", "Sozialversicherung/Krankenkasse", "Versicherungen",
+  "Korrespondenz/Finanzamt", "Korrespondenz/Mandant",
+  "Mahnungen", "Formulare", "Sonstiges",
 ];
+
+function mapDoktyp(raw) {
+  const t = String(raw || "sonstiges").trim().toLowerCase().replace(/\s+/g, "_");
+  if (DOK_TYPEN[t]) return t;
+  if (DOK_TYP_ALIASES[t]) return DOK_TYP_ALIASES[t];
+  if (/rente|rentenversicherung|rentenanpassung/.test(t)) return "rentenbescheid";
+  if (/finanzamt|fa_|steuerbescheid|einkommensteuer/.test(t)) return t.includes("ust") || t.includes("umsatz") ? "ust_bescheid" : t.includes("gewerbe") ? "gewerbesteuer" : t.includes("finanzamt") ? "finanzamt" : "steuerbescheid";
+  if (/lohnsteuer|lohnsteuerbescheinigung/.test(t)) return "lohnsteuerbescheinigung";
+  if (/lohn|gehalt/.test(t)) return "lohnabrechnung";
+  if (/krankenkasse|sozialversicherung|kv_/.test(t)) return "sozialversicherung";
+  if (/ausgang/.test(t)) return "ausgangsrechnung";
+  if (/eingang|eingangsrechnung/.test(t)) return "eingangsrechnung";
+  return "sonstiges";
+}
 
 /** API liefert dokumenttyp/zusammenfassung — UI nutzt doktyp/ki_zusammenfassung. */
 function normalisiereDokumentScan(raw, mandanten = []) {
   const r = raw && typeof raw === "object" ? raw : {};
-  const doktyp = String(r.doktyp || r.dokumenttyp || "sonstiges").toLowerCase();
+  const doktyp = mapDoktyp(r.doktyp || r.dokumenttyp);
   let ordner = String(r.ordner || r.ordner_kategorie || "").trim();
   if (!ordner || ordner.includes("_")) {
     ordner = (DOK_TYPEN[doktyp] || DOK_TYPEN.sonstiges).ordner;
@@ -223,7 +290,7 @@ const DokumentKarte = ({dok,mandanten,onSpeichern,onAblehnen}) => {
                 {f.type==="select"?(
                   <select value={form[f.k]} onChange={e=>set(f.k,e.target.value)} style={{...inp(),width:"100%",color:form[f.k]?"var(--text)":"var(--text3)"}}>
                     {f.blank&&<option value="">{f.blank}</option>}
-                    {(f.k==="mandant"?mandanten:f.opts).map(o=><option key={o} value={o}>{f.k==="doktyp"?`${DOK_TYPEN[o]?.icon||"📄"} ${o}`:o}</option>)}
+                    {(f.k==="mandant"?mandanten:f.opts).map(o=><option key={o} value={o}>{f.k==="doktyp"?`${DOK_TYPEN[o]?.icon||"📄"} ${DOK_TYPEN[o]?.label||o}`:o}</option>)}
                   </select>
                 ):(
                   <input type={f.type} value={form[f.k]} placeholder={f.ph||""}
@@ -404,7 +471,7 @@ export default function DokumentScanner() {
           <div style={{textAlign:"center",padding:"48px 0",color:"var(--text3)"}}>
             <div style={{fontSize:40,marginBottom:12}}>🗂</div>
             Noch keine Dokumente hochgeladen.<br/>
-            <span style={{fontSize:12,marginTop:8,display:"block"}}>Die KI erkennt: Rechnungen, Bescheide, Verträge, Kontoauszüge und mehr.</span>
+            <span style={{fontSize:12,marginTop:8,display:"block"}}>Die KI erkennt u. a. Rechnungen, Steuer- und Rentenbescheide, Verträge, Lohn, Versicherung, Vollmachten.</span>
           </div>
         )}
       </div>

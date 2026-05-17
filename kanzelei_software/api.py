@@ -7215,12 +7215,12 @@ Analysiere das Dokument und erkenne alle relevanten Informationen.
 Antworte NUR mit validem JSON, ohne Markdown-Backticks:
 
 {
-  "dokumenttyp": "rechnung|eingangsrechnung|vertrag|steuerbescheid|kontoauszug|lohnabrechnung|jahresabschluss|satzung|vollmacht|mahnung|lieferschein|korrespondenz|sonstiges",
+  "dokumenttyp": "eingangsrechnung|ausgangsrechnung|gutschreibung|angebot|lieferschein|quittung|bewirtungsbeleg|reisekosten|kontoauszug|bankbrief|steuerbescheid|ust_bescheid|gewerbesteuer|finanzamt|jahresabschluss|bilanz|vertrag|mietvertrag|vollmacht|gesellschaftsvertrag|handelsregister|kündigung|protokoll|lohnabrechnung|lohnsteuerbescheinigung|rentenbescheid|sozialversicherung|versicherung|mahnung|inkasso|korrespondenz|formular|sonstiges",
   "mandant_hinweis": "Name der Person/Firma die im Dokument erwähnt wird (oder leer)",
   "datum": "YYYY-MM-DD oder leer",
   "frist": "YYYY-MM-DD wenn eine Frist erkennbar ist, sonst leer",
   "lieferant": "Absender/Ersteller des Dokuments",
-  "ordner_kategorie": "Belege|Rechnungen_Eingang|Rechnungen_Ausgang|Verträge|Steuerbescheide|Jahresabschlüsse|Kontoauszüge|Lohnunterlagen|Korrespondenz|Vollmachten|Sonstiges",
+  "ordner_kategorie": "Rechnungen/Eingang|Rechnungen/Ausgang|Bank/Kontoauszüge|Steuerbescheide/Einkommensteuer|Steuerbescheide/Umsatzsteuer|Steuerbescheide/Gewerbesteuer|Jahresabschlüsse|Lohnbuchhaltung|Verträge|Vollmachten|Immobilien|Sozialversicherung/Rente|Sozialversicherung/Krankenkasse|Versicherungen|Korrespondenz/Finanzamt|Korrespondenz/Mandant|Mahnungen|Formulare|Sonstiges",
   "zusammenfassung": "1-2 Sätze: Was ist dieses Dokument? Was steht drin?",
   "naechste_schritte": ["Empfohlene Aktion 1", "Empfohlene Aktion 2"],
   "betrag": 0.0,

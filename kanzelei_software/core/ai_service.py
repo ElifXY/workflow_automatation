@@ -319,11 +319,42 @@ def _normalize_document_parsed(raw: Dict[str, Any]) -> Dict[str, Any]:
         or p.get("dokumenttyp")
         or "sonstiges"
     )
-    doktyp = str(doktyp).strip().lower()
-    if any(x in doktyp for x in ("rente", "rentenversicherung", "rentenanpassung")):
-        doktyp = "korrespondenz"
-    elif doktyp in ("steuerbescheid", "bescheid"):
-        doktyp = "steuerbescheid"
+    doktyp = str(doktyp).strip().lower().replace(" ", "_")
+    _aliases = {
+        "eingangsrechnung": "eingangsrechnung",
+        "rechnung_eingang": "eingangsrechnung",
+        "eingang": "eingangsrechnung",
+        "rechnung": "eingangsrechnung",
+        "ausgangsrechnung": "ausgangsrechnung",
+        "rechnung_ausgang": "ausgangsrechnung",
+        "kassenbon": "quittung",
+        "bewirtung": "bewirtungsbeleg",
+        "reise": "reisekosten",
+        "ustva": "ust_bescheid",
+        "umsatzsteuer": "ust_bescheid",
+        "gewst": "gewerbesteuer",
+        "rentenversicherung": "rentenbescheid",
+        "rentenanpassung": "rentenbescheid",
+        "rente": "rentenbescheid",
+        "krankenkasse": "sozialversicherung",
+        "lohnsteuer": "lohnsteuerbescheinigung",
+        "satzung": "gesellschaftsvertrag",
+        "handelsregisterauszug": "handelsregister",
+        "finanzamt": "finanzamt",
+        "bescheid": "steuerbescheid",
+    }
+    if doktyp in _aliases:
+        doktyp = _aliases[doktyp]
+    elif any(x in doktyp for x in ("rente", "rentenversicherung", "rentenanpassung")):
+        doktyp = "rentenbescheid"
+    elif "finanzamt" in doktyp:
+        doktyp = "finanzamt"
+    elif "ust" in doktyp or "umsatzsteuer" in doktyp:
+        doktyp = "ust_bescheid"
+    elif "gewerbe" in doktyp:
+        doktyp = "gewerbesteuer"
+    elif "lohnsteuer" in doktyp:
+        doktyp = "lohnsteuerbescheinigung"
     p["doktyp"] = doktyp
     p["ki_zusammenfassung"] = (
         p.get("ki_zusammenfassung")
@@ -336,10 +367,39 @@ def _normalize_document_parsed(raw: Dict[str, Any]) -> Dict[str, Any]:
     ordner = p.get("ordner") or p.get("ordner_kategorie") or ""
     if not ordner:
         ordner_map = {
-            "korrespondenz": "Korrespondenz/Mandant",
+            "eingangsrechnung": "Rechnungen/Eingang",
+            "ausgangsrechnung": "Rechnungen/Ausgang",
+            "gutschreibung": "Rechnungen/Eingang",
+            "angebot": "Rechnungen/Eingang",
+            "lieferschein": "Rechnungen/Eingang",
+            "quittung": "Rechnungen/Eingang",
+            "bewirtungsbeleg": "Rechnungen/Eingang",
+            "reisekosten": "Rechnungen/Eingang",
+            "kontoauszug": "Bank/Kontoauszüge",
+            "bankbrief": "Bank/Kontoauszüge",
             "steuerbescheid": "Steuerbescheide/Einkommensteuer",
-            "rechnung": "Rechnungen/Eingang",
+            "ust_bescheid": "Steuerbescheide/Umsatzsteuer",
+            "gewerbesteuer": "Steuerbescheide/Gewerbesteuer",
+            "finanzamt": "Korrespondenz/Finanzamt",
+            "jahresabschluss": "Jahresabschlüsse",
+            "bilanz": "Jahresabschlüsse",
+            "vertrag": "Verträge",
+            "mietvertrag": "Immobilien",
+            "vollmacht": "Vollmachten",
+            "gesellschaftsvertrag": "Verträge",
+            "handelsregister": "Verträge",
+            "kündigung": "Verträge",
+            "protokoll": "Jahresabschlüsse",
             "lohnabrechnung": "Lohnbuchhaltung",
+            "lohnsteuerbescheinigung": "Lohnbuchhaltung",
+            "rentenbescheid": "Sozialversicherung/Rente",
+            "sozialversicherung": "Sozialversicherung/Krankenkasse",
+            "versicherung": "Versicherungen",
+            "mahnung": "Mahnungen",
+            "inkasso": "Mahnungen",
+            "korrespondenz": "Korrespondenz/Mandant",
+            "formular": "Formulare",
+            "sonstiges": "Sonstiges",
         }
         ordner = ordner_map.get(doktyp, "Sonstiges")
     p["ordner"] = str(ordner).replace("_", "/")
@@ -355,8 +415,12 @@ async def analyze_document(*, filename: str, b64_content: str) -> DocumentExtrac
         "Lies den Text im Bild vollständig — auch offizielle Briefe der Deutschen Rentenversicherung, "
         "Finanzamt, Krankenkasse, Versicherungen, Verträge und Rechnungen. "
         "Antworte als valides JSON mit exakt diesen Feldern: "
-        "doktyp (rechnung|kontoauszug|steuerbescheid|jahresabschluss|vertrag|lohnabrechnung|"
-        "mahnung|korrespondenz|sonstiges), ordner (Pfad wie Korrespondenz/Mandant), "
+        "doktyp (eingangsrechnung|ausgangsrechnung|gutschreibung|angebot|lieferschein|quittung|"
+        "bewirtungsbeleg|reisekosten|kontoauszug|bankbrief|steuerbescheid|ust_bescheid|gewerbesteuer|"
+        "finanzamt|jahresabschluss|bilanz|vertrag|mietvertrag|vollmacht|gesellschaftsvertrag|"
+        "handelsregister|kündigung|protokoll|lohnabrechnung|lohnsteuerbescheinigung|rentenbescheid|"
+        "sozialversicherung|versicherung|mahnung|inkasso|korrespondenz|formular|sonstiges), "
+        "ordner (Zielordner-Pfad, z. B. Sozialversicherung/Rente), "
         "datum (YYYY-MM-DD), absender, empfaenger, betrag (Hauptbetrag als Zahl, z. B. monatliche Rente), "
         "mandant (Name des Empfängers im Brief), aufgabe, frist, "
         "ki_zusammenfassung (2–3 Sätze auf Deutsch), konfidenz (0–1), unsichere_felder (Array)."
