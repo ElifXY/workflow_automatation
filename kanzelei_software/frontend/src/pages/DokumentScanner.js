@@ -396,6 +396,7 @@ const DokumentKarte = ({dok,mandanten,onSpeichern,onAblehnen}) => {
 
 // ─── Archiv-Zeile (gespeicherte Dokumente) ─────────────────
 const ArchivZeile = ({ dok, mandanten, papierkorb, onRefresh, showToast }) => {
+  const dokId = dok.dok_id || dok.id;
   const [edit, setEdit] = useState(false);
   const [saving, setSaving] = useState(false);
   const typ = mapDoktyp(dok.dokumenttyp || dok.doktyp);
@@ -462,14 +463,14 @@ const ArchivZeile = ({ dok, mandanten, papierkorb, onRefresh, showToast }) => {
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           {!papierkorb && (
             <>
-              <Btn size="xs" variant="ghost" onClick={() => dokumentDateiDownload(dok.dok_id, dok.dateiname).catch((e) => showToast(e.message, "error"))}>
+              <Btn size="xs" variant="ghost" disabled={!dokId} onClick={() => dokumentDateiDownload(dokId, dok.dateiname).catch((e) => showToast(e.message, "error"))}>
                 ⬇ Öffnen
               </Btn>
-              <Btn size="xs" variant="ghost" onClick={() => setEdit((p) => !p)}>{edit ? "Schließen" : "✏ Bearbeiten"}</Btn>
-              <Btn size="xs" variant="danger" onClick={async () => {
+              <Btn size="xs" variant="ghost" disabled={!dokId} onClick={() => setEdit((p) => !p)}>{edit ? "Schließen" : "✏ Bearbeiten"}</Btn>
+              <Btn size="xs" variant="danger" disabled={!dokId} onClick={async () => {
                 if (!window.confirm("In Papierkorb legen?")) return;
                 try {
-                  await dokumentLoeschen(dok.dok_id, false);
+                  await dokumentLoeschen(dokId, false);
                   showToast("In Papierkorb gelegt", "warn");
                   onRefresh();
                 } catch (e) { showToast(e.message, "error"); }
@@ -618,8 +619,9 @@ export default function DokumentScanner({ tabActive = true }) {
   const handleDateien = async (files) => {
     setLoading(true);
     for(const datei of Array.from(files)){
+      let b64="";
       try{
-        const b64=await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(",")[1]);r.onerror=()=>rej();r.readAsDataURL(datei);});
+        b64=await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(",")[1]);r.onerror=()=>rej();r.readAsDataURL(datei);});
         const result=await apiFetch("/dokumente/analysieren",{method:"POST",body:JSON.stringify({dateiname:datei.name,inhalt_b64:b64,dateityp:datei.type})});
         const norm=normalisiereDokumentScan({dateiname:datei.name,inhalt_b64:b64,...result},mandanten);
         setDokumente(p=>[norm,...p]);
