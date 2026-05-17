@@ -311,13 +311,55 @@ async def assistant_chat(
     )
 
 
+def _normalize_document_parsed(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """KI liefert teils dokumenttyp/zusammenfassung — auf DocumentExtraction-Felder mappen."""
+    p = dict(raw or {})
+    doktyp = (
+        p.get("doktyp")
+        or p.get("dokumenttyp")
+        or "sonstiges"
+    )
+    doktyp = str(doktyp).strip().lower()
+    if any(x in doktyp for x in ("rente", "rentenversicherung", "rentenanpassung")):
+        doktyp = "korrespondenz"
+    elif doktyp in ("steuerbescheid", "bescheid"):
+        doktyp = "steuerbescheid"
+    p["doktyp"] = doktyp
+    p["ki_zusammenfassung"] = (
+        p.get("ki_zusammenfassung")
+        or p.get("zusammenfassung")
+        or ""
+    )
+    p["absender"] = p.get("absender") or p.get("lieferant") or ""
+    p["mandant"] = p.get("mandant") or p.get("mandant_hinweis") or p.get("empfaenger") or ""
+    p["konfidenz"] = p.get("konfidenz", p.get("vertrauens_score", 0.5))
+    ordner = p.get("ordner") or p.get("ordner_kategorie") or ""
+    if not ordner:
+        ordner_map = {
+            "korrespondenz": "Korrespondenz/Mandant",
+            "steuerbescheid": "Steuerbescheide/Einkommensteuer",
+            "rechnung": "Rechnungen/Eingang",
+            "lohnabrechnung": "Lohnbuchhaltung",
+        }
+        ordner = ordner_map.get(doktyp, "Sonstiges")
+    p["ordner"] = str(ordner).replace("_", "/")
+    if p.get("betrag") is None and p.get("nachzahlung_oder_erstattung") is not None:
+        p["betrag"] = p.get("nachzahlung_oder_erstattung")
+    return p
+
+
 async def analyze_document(*, filename: str, b64_content: str) -> DocumentExtraction:
     validate_b64_payload(b64_content)
     prompt = (
-        "Analysiere dieses Dokument für eine deutsche Steuerkanzlei. "
-        "Antworte als valides JSON im Schema mit Feldern: "
-        "doktyp, ordner, datum, absender, empfaenger, betrag, mandant, aufgabe, frist, "
-        "ki_zusammenfassung, konfidenz, unsichere_felder."
+        "Analysiere dieses Dokument für eine deutsche Steuerkanzlei (Bild/PDF-Scan). "
+        "Lies den Text im Bild vollständig — auch offizielle Briefe der Deutschen Rentenversicherung, "
+        "Finanzamt, Krankenkasse, Versicherungen, Verträge und Rechnungen. "
+        "Antworte als valides JSON mit exakt diesen Feldern: "
+        "doktyp (rechnung|kontoauszug|steuerbescheid|jahresabschluss|vertrag|lohnabrechnung|"
+        "mahnung|korrespondenz|sonstiges), ordner (Pfad wie Korrespondenz/Mandant), "
+        "datum (YYYY-MM-DD), absender, empfaenger, betrag (Hauptbetrag als Zahl, z. B. monatliche Rente), "
+        "mandant (Name des Empfängers im Brief), aufgabe, frist, "
+        "ki_zusammenfassung (2–3 Sätze auf Deutsch), konfidenz (0–1), unsichere_felder (Array)."
     )
     messages = [
         {"role": "system", "content": "Du bist ein präziser Dokumentenanalyst. Nur JSON ausgeben."},
@@ -337,8 +379,21 @@ async def analyze_document(*, filename: str, b64_content: str) -> DocumentExtrac
         temperature=0.1,
         response_format={"type": "json_object"},
     )
-    parsed = _safe_json_load(_choice_text(resp))
-    return DocumentExtraction(**parsed)
+    parsed = _normalize_document_parsed(_safe_json_load(_choice_text(resp)))
+    try:
+        return DocumentExtraction.model_validate(parsed)
+    except ValidationError:
+        return DocumentExtraction(
+            doktyp=str(parsed.get("doktyp") or "sonstiges"),
+            ordner=str(parsed.get("ordner") or "Sonstiges"),
+            datum=str(parsed.get("datum") or ""),
+            absender=str(parsed.get("absender") or ""),
+            betrag=float(parsed.get("betrag") or 0),
+            mandant=str(parsed.get("mandant") or ""),
+            ki_zusammenfassung=str(parsed.get("ki_zusammenfassung") or ""),
+            konfidenz=float(parsed.get("konfidenz") or 0.5),
+            unsichere_felder=list(parsed.get("unsichere_felder") or []),
+        )
 
 
 async def analyze_receipt(*, filename: str, b64_content: str, mandant: str = "") -> ReceiptExtraction:

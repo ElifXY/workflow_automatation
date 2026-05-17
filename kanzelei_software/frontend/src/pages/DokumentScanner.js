@@ -18,12 +18,12 @@ import { useTheme, readCssVar } from "../theme";
 const DOK_TYPEN = {
   rechnung:       {icon:"🧾",farbe:"var(--accent)", ordner:"Rechnungen/Eingang"},
   kontoauszug:    {icon:"🏦",farbe:"var(--blue)",   ordner:"Bank/Kontoauszüge"},
-  steuerbescheid: {icon:"⚖", farbe:"var(--orange)", ordner:"Steuerbescheide"},
+  steuerbescheid: {icon:"⚖", farbe:"var(--orange)", ordner:"Steuerbescheide/Einkommensteuer"},
   jahresabschluss:{icon:"📊",farbe:"var(--purple)", ordner:"Jahresabschlüsse"},
   vertrag:        {icon:"📋",farbe:"var(--blue)",   ordner:"Verträge"},
   lohnabrechnung: {icon:"👤",farbe:"var(--green)",  ordner:"Lohnbuchhaltung"},
   mahnung:        {icon:"⚠", farbe:"var(--red)",    ordner:"Mahnungen"},
-  korrespondenz:  {icon:"✉", farbe:"var(--text2)",  ordner:"Korrespondenz"},
+  korrespondenz:  {icon:"✉", farbe:"var(--text2)",  ordner:"Korrespondenz/Mandant"},
   sonstiges:      {icon:"📄",farbe:"var(--text3)",  ordner:"Sonstiges"},
 };
 
@@ -35,6 +35,49 @@ const ORDNER = [
   "Korrespondenz/Finanzamt","Korrespondenz/Mandant",
   "Mahnungen","Sonstiges",
 ];
+
+/** API liefert dokumenttyp/zusammenfassung — UI nutzt doktyp/ki_zusammenfassung. */
+function normalisiereDokumentScan(raw, mandanten = []) {
+  const r = raw && typeof raw === "object" ? raw : {};
+  const doktyp = String(r.doktyp || r.dokumenttyp || "sonstiges").toLowerCase();
+  let ordner = String(r.ordner || r.ordner_kategorie || "").trim();
+  if (!ordner || ordner.includes("_")) {
+    ordner = (DOK_TYPEN[doktyp] || DOK_TYPEN.sonstiges).ordner;
+  }
+  if (!ORDNER.includes(ordner)) {
+    const hit = ORDNER.find((o) => o.toLowerCase().includes(ordner.toLowerCase().split("/")[0]));
+    ordner = hit || ordner || "Sonstiges";
+  }
+  const hinweis = String(r.mandant_hinweis || r.mandant || "").trim();
+  let mandant = "";
+  if (hinweis && hinweis.toLowerCase() !== "unbekannt") {
+    const hit = (mandanten || []).find(
+      (m) => m.toLowerCase() === hinweis.toLowerCase() || hinweis.toLowerCase().includes(m.toLowerCase())
+    );
+    mandant = hit || "";
+  }
+  const konfidenz = r.konfidenz ?? r.vertrauens_score;
+  return {
+    ...r,
+    id: r.id || r.dok_id || `${Date.now()}-${Math.random()}`,
+    dok_id: r.dok_id || r.id,
+    dateiname: r.dateiname || "",
+    doktyp,
+    ordner,
+    mandant,
+    mandant_hinweis: hinweis,
+    datum: r.datum || "",
+    absender: r.absender || r.lieferant || "",
+    betrag: r.betrag != null && r.betrag !== "" ? r.betrag : "",
+    ki_zusammenfassung: r.ki_zusammenfassung || r.zusammenfassung || "",
+    konfidenz: konfidenz != null ? Number(konfidenz) : null,
+    unsichere_felder: Array.isArray(r.unsichere_felder) ? r.unsichere_felder : [],
+    frist: r.frist || "",
+    aufgabe: r.aufgabe || (Array.isArray(r.naechste_schritte) ? r.naechste_schritte[0] : "") || "",
+    inhalt_b64: r.inhalt_b64,
+    ordner_pfad: r.ordner_pfad,
+  };
+}
 
 const Btn = ({children,onClick,variant="primary",size="md",loading=false,disabled=false,style={}}) => {
   const vs={primary:{background:"var(--accent)",color:"var(--on-accent)",border:"none"},
@@ -159,11 +202,17 @@ const DokumentKarte = ({dok,mandanten,onSpeichern,onAblehnen}) => {
               <div style={{fontSize:13,color:"var(--text2)",lineHeight:1.7}}>{dok.ki_zusammenfassung}</div>
             </div>
           )}
+          {dok.mandant_hinweis && !form.mandant && (
+            <div style={{fontSize:12,color:"var(--orange)",marginBottom:12,lineHeight:1.6}}>
+              Im Dokument erkannt: <strong>{dok.mandant_hinweis}</strong> — bitte einen Mandanten aus Ihrer Liste wählen
+              (ggf. zuerst unter „Mandanten“ anlegen).
+            </div>
+          )}
 
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
             {[
               {k:"doktyp",l:"Dokumenttyp",type:"select",opts:Object.keys(DOK_TYPEN)},
-              {k:"mandant",l:"Mandant",type:"select",opts:["..."].concat(mandanten),blank:"— Mandant —"},
+              {k:"mandant",l:"Mandant",type:"select",opts:mandanten,blank:"— Mandant —"},
               {k:"ordner",l:"Ziel-Ordner",type:"select",opts:ORDNER},
               {k:"datum",l:"Datum",type:"date"},
               {k:"absender",l:"Absender",type:"text",ph:"Absender..."},
@@ -250,10 +299,12 @@ export default function DokumentScanner() {
       try{
         const b64=await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(",")[1]);r.onerror=()=>rej();r.readAsDataURL(datei);});
         const result=await apiFetch("/dokumente/analysieren",{method:"POST",body:JSON.stringify({dateiname:datei.name,inhalt_b64:b64,dateityp:datei.type})});
-        setDokumente(p=>[{id:Date.now()+Math.random(),dateiname:datei.name,...result},...p]);
+        const norm=normalisiereDokumentScan({dateiname:datei.name,...result},mandanten);
+        setDokumente(p=>[norm,...p]);
         showToast(`✓ "${datei.name}" analysiert`);
       }catch(e){
-        setDokumente(p=>[{id:Date.now()+Math.random(),dateiname:datei.name,doktyp:"sonstiges",ordner:"Sonstiges",mandant:"",ki_zusammenfassung:`KI nicht verfügbar: ${e.message}. Bitte manuell zuordnen.`,konfidenz:0},...p]);
+        const fallback=normalisiereDokumentScan({dateiname:datei.name,doktyp:"sonstiges",ordner:"Sonstiges",mandant:"",ki_zusammenfassung:`KI nicht verfügbar: ${e.message}. Bitte manuell ausfüllen.`,konfidenz:0},mandanten);
+        setDokumente(p=>[fallback,...p]);
         showToast(`"${datei.name}" ohne KI hinzugefügt`,"warn");
       }
     }
@@ -263,7 +314,23 @@ export default function DokumentScanner() {
 
   const handleSpeichern = async (dok) => {
     try{
-      await apiFetch("/dokumente/speichern",{method:"POST",body:JSON.stringify(dok)});
+      const jahr=(dok.datum||"").slice(0,4)||String(new Date().getFullYear());
+      const ordnerPfad=dok.ordner_pfad||`${dok.mandant}/${jahr}/${dok.ordner||"Sonstiges"}`;
+      await apiFetch("/dokumente/speichern",{method:"POST",body:JSON.stringify({
+        dok_id:String(dok.dok_id||dok.id||Date.now()),
+        dateiname:dok.dateiname,
+        dokumenttyp:dok.doktyp||dok.dokumenttyp||"sonstiges",
+        mandant:dok.mandant,
+        datum:dok.datum||null,
+        frist:dok.frist||null,
+        lieferant:dok.absender||dok.lieferant||"",
+        ordner_pfad:ordnerPfad,
+        ordner_kategorie:dok.ordner||"Sonstiges",
+        jahr:parseInt(jahr,10)||new Date().getFullYear(),
+        notiz:dok.notiz||"",
+        inhalt_b64:dok.inhalt_b64,
+        aufgabe_anlegen:!!(dok.aufgabe&&dok.frist),
+      })});
       if(dok.aufgabe&&dok.mandant&&dok.frist){
         await apiFetch(`/mandanten/${encodeURIComponent(dok.mandant)}/aufgaben`,{
           method:"POST",body:JSON.stringify({beschreibung:dok.aufgabe,frist:dok.frist,prioritaet:"normal",kategorie:dok.doktyp})

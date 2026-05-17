@@ -7241,11 +7241,25 @@ async def dokument_analysieren(data: DokumentAnalyseRequest,
     """
 
     store = get_ds(_user)
+
+    def _mandant_aus_hinweis(hinweis: str) -> str:
+        h = (hinweis or "").strip()
+        if not h or h.lower() in {"unbekannt", "unknown", "—"}:
+            return ""
+        mandanten_map = store.hole_mandanten() or {}
+        if h in mandanten_map:
+            return h
+        hl = h.lower()
+        for name in mandanten_map:
+            if name.lower() == hl or hl in name.lower() or name.lower() in hl:
+                return name
+        return ""
+
     try:
         parsed = await analyze_document(filename=data.dateiname, b64_content=data.inhalt_b64)
         analyse = {
             "dokumenttyp": parsed.doktyp,
-            "mandant_hinweis": parsed.mandant or data.mandant or "",
+            "mandant_hinweis": (parsed.mandant or data.mandant or "").strip(),
             "datum": parsed.datum,
             "frist": parsed.frist,
             "lieferant": parsed.absender,
@@ -7255,44 +7269,63 @@ async def dokument_analysieren(data: DokumentAnalyseRequest,
             "betrag": parsed.betrag,
             "vertrauens_score": parsed.konfidenz,
             "unsichere_felder": parsed.unsichere_felder,
+            "aufgabe": parsed.aufgabe,
         }
     except Exception as e:
         log.warning(f"Dokument-KI-Analyse fehlgeschlagen: {e}")
         analyse = {
             "dokumenttyp": "sonstiges",
-            "mandant_hinweis": data.mandant or "",
+            "mandant_hinweis": (data.mandant or "").strip(),
             "ordner_kategorie": "Sonstiges",
-            "zusammenfassung": "Automatische Analyse nicht verfügbar",
+            "zusammenfassung": f"Automatische Analyse nicht verfügbar ({e}). Bitte Felder manuell ausfüllen.",
             "naechste_schritte": ["Bitte manuell prüfen und kategorisieren"],
             "vertrauens_score": 0.3,
-            "unsichere_felder": ["dokumenttyp", "datum", "betrag"],
+            "unsichere_felder": ["dokumenttyp", "datum", "betrag", "mandant"],
+            "betrag": 0.0,
+            "datum": "",
+            "frist": "",
+            "lieferant": "",
+            "aufgabe": "",
         }
 
-    # Ordner-Pfad vorschlagen
-    mandant = data.mandant or analyse.get("mandant_hinweis", "Unbekannt") or "Unbekannt"
-    jahr    = (analyse.get("datum","") or "")[:4] or str(datetime.now().year)
-    kat     = analyse.get("ordner_kategorie", "Sonstiges")
+    mandant_hinweis = (analyse.get("mandant_hinweis") or "").strip()
+    mandant = _mandant_aus_hinweis(data.mandant or mandant_hinweis)
+    jahr = (analyse.get("datum", "") or "")[:4] or str(datetime.now().year)
+    kat = analyse.get("ordner_kategorie", "Sonstiges")
+    ordner_pfad_name = mandant or "Ohne-Zuordnung"
 
     dok_id = str(uuid.uuid4())
+    doktyp = analyse.get("dokumenttyp", "sonstiges")
+    zusammenfassung = analyse.get("zusammenfassung", "")
+    konfidenz = float(analyse.get("vertrauens_score", 0.5) or 0.5)
+
     result = {
-        "dok_id":          dok_id,
-        "dateiname":       data.dateiname,
-        "dokumenttyp":     analyse.get("dokumenttyp", "sonstiges"),
-        "mandant":         mandant,
-        "datum":           analyse.get("datum", ""),
-        "frist":           analyse.get("frist", ""),
-        "lieferant":       analyse.get("lieferant", ""),
-        "ordner_kategorie":kat,
-        "ordner_pfad":     f"{mandant}/{jahr}/{kat}",
-        "jahr":            int(jahr) if jahr.isdigit() else datetime.now().year,
-        "zusammenfassung": analyse.get("zusammenfassung", ""),
+        "dok_id": dok_id,
+        "dateiname": data.dateiname,
+        "dokumenttyp": doktyp,
+        "doktyp": doktyp,
+        "mandant": mandant,
+        "mandant_hinweis": mandant_hinweis,
+        "datum": analyse.get("datum", ""),
+        "frist": analyse.get("frist", ""),
+        "lieferant": analyse.get("lieferant", ""),
+        "absender": analyse.get("lieferant", ""),
+        "ordner_kategorie": kat,
+        "ordner": kat,
+        "ordner_pfad": f"{ordner_pfad_name}/{jahr}/{kat}",
+        "jahr": int(jahr) if jahr.isdigit() else datetime.now().year,
+        "zusammenfassung": zusammenfassung,
+        "ki_zusammenfassung": zusammenfassung,
         "naechste_schritte": analyse.get("naechste_schritte", []),
-        "betrag":          analyse.get("betrag", 0.0),
-        "vertrauens_score":analyse.get("vertrauens_score", 0.5),
-        "notiz":           "",
-        "inhalt_b64":      data.inhalt_b64,  # Für spätere Speicherung
-        "analysiert_am":   datetime.now().isoformat(),
-        "status":          "vorschlag",
+        "aufgabe": analyse.get("aufgabe", ""),
+        "betrag": analyse.get("betrag", 0.0),
+        "vertrauens_score": konfidenz,
+        "konfidenz": konfidenz,
+        "unsichere_felder": analyse.get("unsichere_felder", []),
+        "notiz": "",
+        "inhalt_b64": data.inhalt_b64,
+        "analysiert_am": datetime.now().isoformat(),
+        "status": "vorschlag",
     }
 
     store.log_eintrag(f"DOKUMENT_ANALYSIERT | {mandant} | {data.dateiname} | {result['dokumenttyp']}")
