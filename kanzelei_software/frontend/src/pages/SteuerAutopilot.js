@@ -68,6 +68,96 @@ const KONFIDENZ_LABEL = (score) =>
 
 const fallId = (f) => f?.id || f?.fall_id || f?._id || "";
 
+/** Zeigt, welche Daten das Backend für die Schätzung verwendet hat (nicht im Formular eingegeben). */
+const DatengrundlageBox = ({ daten, konfidenzScore }) => {
+  if (!daten || typeof daten !== "object") return null;
+  const einnahmen = Number(daten.einnahmen || 0);
+  const ausgaben = Number(daten.ausgaben || 0);
+  const gewinn = Math.max(0, einnahmen - ausgaben);
+  const v = daten.vollstaendigkeit || {};
+  const checks = [
+    { ok: v.hat_einnahmen, label: "Einnahmen (bezahlte Rechnungen oder Feld „Umsatz“ beim Mandanten)" },
+    { ok: v.hat_ausgaben, label: "Ausgaben (bestätigte Belege im Belegscanner)" },
+    { ok: v.hat_belege, label: `Belege im Jahr (${daten.belege_anzahl || 0} Stück)` },
+    { ok: v.hat_steuer_id, label: "Steuer-ID im Mandantenprofil" },
+    { ok: v.hat_keine_offene_docs, label: "Keine fehlenden Pflichtdokumente" },
+    { ok: v.hat_lohndaten, label: "Lohnabrechnungen (falls relevant)" },
+  ];
+  const schwach = Number(konfidenzScore) < 75;
+  return (
+    <div
+      style={{
+        background: "var(--bg3)",
+        border: `1px solid ${schwach ? "color-mix(in srgb, var(--orange) 35%, var(--border))" : "var(--border)"}`,
+        borderRadius: 10,
+        padding: "12px 14px",
+        marginBottom: 14,
+      }}
+    >
+      <div
+        style={{
+          fontSize: 12,
+          fontWeight: 600,
+          color: schwach ? "var(--orange)" : "var(--text2)",
+          marginBottom: 8,
+        }}
+      >
+        Datengrundlage (automatisch aus der Kanzlei-Software)
+      </div>
+      <div style={{ fontSize: 12, color: "var(--text2)", lineHeight: 1.65, marginBottom: 10 }}>
+        Hier geben Sie nur Mandant, Steuerart und Jahr ein. Die Berechnung nutzt vorhandene Daten aus
+        Mandantenprofil, Belegscanner, Rechnungen und Lohn — nicht mehr Eingabefelder in diesem Bildschirm.
+        {schwach && (
+          <span style={{ display: "block", marginTop: 6, color: "var(--orange)" }}>
+            Bei niedriger Konfidenz ist die Nachzahlung oft nur eine grobe Schätzung (z. B. 30 % vom geschätzten Gewinn).
+          </span>
+        )}
+      </div>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(3, 1fr)",
+          gap: 8,
+          marginBottom: 10,
+        }}
+      >
+        {[
+          { l: "Einnahmen", v: fmt(einnahmen) },
+          { l: "Ausgaben", v: fmt(ausgaben) },
+          { l: "Geschätzter Gewinn", v: fmt(gewinn) },
+        ].map((x) => (
+          <div
+            key={x.l}
+            style={{ background: "var(--bg)", borderRadius: 8, padding: "8px 10px" }}
+          >
+            <div style={{ fontSize: 10, color: "var(--text3)", textTransform: "uppercase" }}>{x.l}</div>
+            <div style={{ fontSize: 15, fontWeight: 600, color: "var(--text)" }}>{x.v}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 6 }}>Vollständigkeit der Quelldaten</div>
+      {checks.map((c) => (
+        <div
+          key={c.label}
+          style={{ fontSize: 12, color: c.ok ? "var(--green)" : "var(--text3)", marginBottom: 3 }}
+        >
+          {c.ok ? "✓" : "○"} {c.label}
+        </div>
+      ))}
+      {(daten.fehlende_dokumente || []).length > 0 && (
+        <div style={{ fontSize: 12, color: "var(--orange)", marginTop: 8 }}>
+          Fehlend: {(daten.fehlende_dokumente || []).slice(0, 5).join(", ")}
+          {(daten.fehlende_dokumente || []).length > 5 ? " …" : ""}
+        </div>
+      )}
+      <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 10, lineHeight: 1.5 }}>
+        Daten ergänzen: Mandant bearbeiten (Umsatz, Steuer-ID) · Belegscanner (Belege bestätigen) · Rechnungen/Lohn, falls
+        angebunden.
+      </div>
+    </div>
+  );
+};
+
 // ══════════════════════════════════════════════════════════
 // AUTOPILOT TAB
 // ══════════════════════════════════════════════════════════
@@ -201,8 +291,9 @@ const AutopilotTab = () => {
           🤖 Neuen Steuerfall automatisch verarbeiten
         </div>
         <div style={{fontSize:13,color:"var(--text2)",marginBottom:14,lineHeight:1.7}}>
-          Das System sammelt alle Daten, berechnet die Steuer, erstellt das ELSTER XML
-          und gibt einen Konfidenz-Score. Bei &gt;92%: fast kein manueller Aufwand.
+          Sie wählen nur Mandant, Steuerart und Jahr. Einnahmen, Ausgaben und Belege kommen aus dem
+          Mandantenprofil, Belegscanner und Rechnungen — dort pflegen Sie die eigentlichen Zahlen.
+          Danach: Schätzung, Konfidenz und optional ELSTER-XML. Bei &gt;92 % Konfidenz: wenig Review nötig.
         </div>
         <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:14}}>
           <select value={selectedM} onChange={e=>setSelectedM(e.target.value)} style={inp({flex:2})}>
@@ -249,11 +340,16 @@ const AutopilotTab = () => {
             </div>
           </div>
 
+          <DatengrundlageBox
+            daten={aktiverFall.mandant_daten}
+            konfidenzScore={aktiverFall.konfidenz_score}
+          />
+
           {/* Steuer-Ergebnis */}
           {aktiverFall.ki_analyse?.steuerberechnung&&(
             <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:14}}>
               {[
-                {l:"Nachzahlung/Erstattung",
+                {l:Number(aktiverFall.konfidenz_score)<75?"Nachzahlung/Erstattung (Schätzung)":"Nachzahlung/Erstattung",
                  v:fmt(aktiverFall.ki_analyse.steuerberechnung.nachzahlung_oder_erstattung),
                  c:aktiverFall.ist_nachzahlung?"var(--red)":"var(--green)"},
                 {l:"Einkommensteuer",
@@ -342,8 +438,12 @@ const AutopilotTab = () => {
           {faelleAktiv.map((f,i)=>{
             const kc = KONFIDENZ_FARBE(f.konfidenz_score);
             return (
-              <div key={fallId(f) || `aktiv-${i}`} style={{background:"var(--bg2)",border:`1px solid var(--border)`,
-                borderRadius:12,padding:"12px 16px",
+              <div key={fallId(f) || `aktiv-${i}`} role="button" tabIndex={0}
+                onClick={()=>setAktiverFall(f)}
+                onKeyDown={(e)=>{ if(e.key==="Enter"||e.key===" ") { e.preventDefault(); setAktiverFall(f); } }}
+                style={{background:"var(--bg2)",
+                border:`1px solid ${fallId(f)===fallId(aktiverFall)?"var(--accent)":"var(--border)"}`,
+                borderRadius:12,padding:"12px 16px",cursor:"pointer",
                 display:"flex",alignItems:"center",gap:14,flexWrap:"wrap",
                 animation:`fadeUp 0.3s ease ${i*30}ms both`}}>
                 <div style={{width:52,height:52,borderRadius:"50%",flexShrink:0,
@@ -365,9 +465,11 @@ const AutopilotTab = () => {
                   </div>
                 </div>
                 {f.status!=="freigegeben"&&(
-                  <Btn size="xs" variant="success" disabled={!fallId(f)} onClick={()=>fallId(f) && freigeben(fallId(f))}>Freigeben</Btn>
+                  <Btn size="xs" variant="success" disabled={!fallId(f)}
+                    onClick={(e)=>{ e.stopPropagation(); const id=fallId(f); if(id) freigeben(id); }}>Freigeben</Btn>
                 )}
-                <Btn size="xs" variant="ghost" disabled={!fallId(f)} onClick={()=>fallId(f) && inHistorie(fallId(f))}>📥 In Historie</Btn>
+                <Btn size="xs" variant="ghost" disabled={!fallId(f)}
+                  onClick={(e)=>{ e.stopPropagation(); const id=fallId(f); if(id) inHistorie(id); }}>📥 In Historie</Btn>
               </div>
             );
           })}
