@@ -12,7 +12,15 @@
 // ============================================================
 
 import { useState, useRef, useCallback, useEffect } from "react";
-import { apiFetch } from "../api";
+import {
+  apiFetch,
+  dokumentArchiv,
+  dokumentAktualisieren,
+  dokumentLoeschen,
+  dokumentWiederherstellen,
+  dokumentDateiDownload,
+  extractDokumenteListe,
+} from "../api";
 import { useTheme, readCssVar } from "../theme";
 
 /** Typische Dokumenttypen in Steuerkanzleien — label = Anzeige im Dropdown */
@@ -88,6 +96,55 @@ const ORDNER = [
   "Korrespondenz/Finanzamt", "Korrespondenz/Mandant",
   "Mahnungen", "Formulare", "Sonstiges",
 ];
+
+const ARCHIV_CACHE_KEY = "kanzlei_dokument_archiv_cache_v1";
+const SCANNER_VIEW_KEY = "kanzlei_dokument_scanner_view_v1";
+
+function readArchivCache() {
+  try {
+    const raw =
+      localStorage.getItem(ARCHIV_CACHE_KEY) ||
+      sessionStorage.getItem(ARCHIV_CACHE_KEY);
+    if (!raw) return { gespeichert: [], geloescht: [] };
+    const p = JSON.parse(raw);
+    return {
+      gespeichert: Array.isArray(p.gespeichert) ? p.gespeichert : [],
+      geloescht: Array.isArray(p.geloescht) ? p.geloescht : [],
+    };
+  } catch {
+    return { gespeichert: [], geloescht: [] };
+  }
+}
+
+function writeArchivCache(gespeichert, geloescht) {
+  const payload = JSON.stringify({ gespeichert, geloescht, at: Date.now() });
+  try {
+    localStorage.setItem(ARCHIV_CACHE_KEY, payload);
+    sessionStorage.setItem(ARCHIV_CACHE_KEY, payload);
+  } catch {}
+}
+
+function restoreArchivFromCache(setArchivListe, setPapierkorb, setScannerView) {
+  const c = readArchivCache();
+  if (c.gespeichert.length > 0 || c.geloescht.length > 0) {
+    setArchivListe(c.gespeichert);
+    setPapierkorb(c.geloescht);
+    const saved = readScannerView();
+    if (saved) setScannerView(saved);
+    else if (c.gespeichert.length > 0) setScannerView("archiv");
+    return true;
+  }
+  return false;
+}
+
+function readScannerView() {
+  try {
+    const v = sessionStorage.getItem(SCANNER_VIEW_KEY);
+    return v === "archiv" || v === "papierkorb" || v === "scan" ? v : null;
+  } catch {
+    return null;
+  }
+}
 
 function mapDoktyp(raw) {
   const t = String(raw || "sonstiges").trim().toLowerCase().replace(/\s+/g, "_");
@@ -337,28 +394,226 @@ const DokumentKarte = ({dok,mandanten,onSpeichern,onAblehnen}) => {
   );
 };
 
+// ─── Archiv-Zeile (gespeicherte Dokumente) ─────────────────
+const ArchivZeile = ({ dok, mandanten, papierkorb, onRefresh, showToast }) => {
+  const [edit, setEdit] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const typ = mapDoktyp(dok.dokumenttyp || dok.doktyp);
+  const typInfo = DOK_TYPEN[typ] || DOK_TYPEN.sonstiges;
+  const [form, setForm] = useState({
+    doktyp: typ,
+    mandant: dok.mandant || "",
+    ordner: dok.ordner_kategorie || dok.ordner || typInfo.ordner,
+    datum: dok.datum || "",
+    absender: dok.lieferant || dok.absender || "",
+    betrag: dok.betrag ?? "",
+    notiz: dok.notiz || "",
+    ki_zusammenfassung: dok.ki_zusammenfassung || "",
+  });
+  const set = (k, v) => setForm((p) => ({ ...p, [k]: v }));
+  const inp = (extra = {}) => ({
+    background: "var(--bg)",
+    border: `1px solid var(--border2)`,
+    borderRadius: 8,
+    color: "var(--text)",
+    padding: "7px 11px",
+    fontSize: 13,
+    outline: "none",
+    fontFamily: "var(--font-body)",
+    ...extra,
+  });
+
+  const speichernMeta = async () => {
+    setSaving(true);
+    try {
+      const jahr = (form.datum || "").slice(0, 4) || String(dok.jahr || new Date().getFullYear());
+      await dokumentAktualisieren(dokId, {
+        dokumenttyp: form.doktyp,
+        mandant: form.mandant,
+        datum: form.datum || null,
+        lieferant: form.absender,
+        ordner_kategorie: form.ordner,
+        ordner_pfad: `${form.mandant}/${jahr}/${form.ordner}`,
+        jahr: parseInt(jahr, 10),
+        notiz: form.notiz,
+        betrag: form.betrag === "" ? null : Number(form.betrag),
+        ki_zusammenfassung: form.ki_zusammenfassung,
+      });
+      showToast("Änderungen gespeichert");
+      setEdit(false);
+      onRefresh();
+    } catch (e) {
+      showToast(e.message, "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={{ background: "var(--bg2)", border: `1px solid var(--border)`, borderRadius: 12, padding: "12px 16px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 22 }}>{typInfo.icon}</span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontWeight: 600, color: "var(--text)", fontSize: 14 }}>{dok.dateiname}</div>
+          <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 2 }}>
+            {dok.mandant || "—"} · {DOK_TYPEN[typ]?.label || typ} · {dok.ordner_pfad || form.ordner}
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {!papierkorb && (
+            <>
+              <Btn size="xs" variant="ghost" onClick={() => dokumentDateiDownload(dok.dok_id, dok.dateiname).catch((e) => showToast(e.message, "error"))}>
+                ⬇ Öffnen
+              </Btn>
+              <Btn size="xs" variant="ghost" onClick={() => setEdit((p) => !p)}>{edit ? "Schließen" : "✏ Bearbeiten"}</Btn>
+              <Btn size="xs" variant="danger" onClick={async () => {
+                if (!window.confirm("In Papierkorb legen?")) return;
+                try {
+                  await dokumentLoeschen(dok.dok_id, false);
+                  showToast("In Papierkorb gelegt", "warn");
+                  onRefresh();
+                } catch (e) { showToast(e.message, "error"); }
+              }}>🗑</Btn>
+            </>
+          )}
+          {papierkorb && (
+            <>
+              <Btn size="xs" variant="success" disabled={!dokId} onClick={async () => {
+                try {
+                  await dokumentWiederherstellen(dokId);
+                  showToast("Wiederhergestellt");
+                  onRefresh();
+                } catch (e) { showToast(e.message, "error"); }
+              }}>↩ Wiederherstellen</Btn>
+              <Btn size="xs" variant="danger" onClick={async () => {
+                if (!window.confirm("Endgültig löschen?")) return;
+                try {
+                  await dokumentLoeschen(dokId, true);
+                  showToast("Endgültig gelöscht", "warn");
+                  onRefresh();
+                } catch (e) { showToast(e.message, "error"); }
+              }}>✕ Endgültig</Btn>
+            </>
+          )}
+        </div>
+      </div>
+      {edit && !papierkorb && (
+        <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid var(--border)` }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+            <select value={form.doktyp} onChange={(e) => set("doktyp", e.target.value)} style={{ ...inp(), width: "100%" }}>
+              {Object.keys(DOK_TYPEN).map((o) => (
+                <option key={o} value={o}>{DOK_TYPEN[o].icon} {DOK_TYPEN[o].label}</option>
+              ))}
+            </select>
+            <select value={form.mandant} onChange={(e) => set("mandant", e.target.value)} style={{ ...inp(), width: "100%" }}>
+              <option value="">— Mandant —</option>
+              {mandanten.map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
+            <select value={form.ordner} onChange={(e) => set("ordner", e.target.value)} style={{ ...inp(), width: "100%" }}>
+              {ORDNER.map((o) => <option key={o} value={o}>{o}</option>)}
+            </select>
+            <input type="date" value={form.datum} onChange={(e) => set("datum", e.target.value)} style={{ ...inp(), width: "100%" }} />
+            <input value={form.absender} onChange={(e) => set("absender", e.target.value)} placeholder="Absender" style={{ ...inp(), width: "100%" }} />
+            <input type="number" value={form.betrag} onChange={(e) => set("betrag", e.target.value)} placeholder="Betrag" style={{ ...inp(), width: "100%" }} />
+          </div>
+          <input value={form.notiz} onChange={(e) => set("notiz", e.target.value)} placeholder="Notiz" style={{ ...inp(), width: "100%", marginBottom: 8 }} />
+          <Btn size="sm" variant="success" loading={saving} onClick={speichernMeta}>Speichern</Btn>
+        </div>
+      )}
+    </div>
+  );
+};
+
 // ═══════════════════════════════════════════════════════════
 // HAUPT-COMPONENT
 // ═══════════════════════════════════════════════════════════
 
-export default function DokumentScanner() {
+export default function DokumentScanner({ tabActive = true }) {
+  const archivCache = readArchivCache();
   const [dokumente,  setDokumente]  = useState([]);
-  const [gespeichert,setGespeichert]= useState([]);
+  const [archivListe, setArchivListe] = useState(archivCache.gespeichert);
+  const [papierkorb, setPapierkorb] = useState(archivCache.geloescht);
   const [mandanten,  setMandanten]  = useState([]);
   const [loading,    setLoading]    = useState(false);
+  const [archivLaden, setArchivLaden] = useState(false);
+  const [view,       setView]       = useState(() => {
+    const saved = readScannerView();
+    if (saved) return saved;
+    return archivCache.gespeichert.length > 0 ? "archiv" : "scan";
+  });
+  const [archivSuche, setArchivSuche] = useState("");
   const [toast,      setToast]      = useState(null);
   const fileRef = useRef(null);
+  const archivSucheRef = useRef(archivSuche);
+  archivSucheRef.current = archivSuche;
+
+  const setScannerView = useCallback((next) => {
+    setView(next);
+    try {
+      sessionStorage.setItem(SCANNER_VIEW_KEY, next);
+    } catch {}
+  }, []);
 
   const showToast = useCallback((text,type="success")=>{
     setToast({text,type}); setTimeout(()=>setToast(null),4000);
   },[]);
 
-  useEffect(()=>{
-    apiFetch("/mandanten").then(d=>{
-      const raw=d?.data||[];
-      setMandanten(Array.isArray(raw)?raw.map(x=>x.name):Object.keys(raw));
-    }).catch(()=>{});
-  },[]);
+  const ladeArchiv = useCallback(async (silent = false) => {
+    setArchivLaden(true);
+    const cached = readArchivCache();
+    try {
+      const q = archivSucheRef.current.trim();
+      const [a, p] = await Promise.all([
+        dokumentArchiv(null, null, q || null, "gespeichert"),
+        dokumentArchiv(null, null, q || null, "geloescht"),
+      ]);
+      const gespeichert = extractDokumenteListe(a);
+      const geloescht = extractDokumenteListe(p);
+
+      if (gespeichert.length > 0 || geloescht.length > 0) {
+        setArchivListe(gespeichert);
+        setPapierkorb(geloescht);
+        writeArchivCache(gespeichert, geloescht);
+      } else if (cached.gespeichert.length > 0 || cached.geloescht.length > 0) {
+        setArchivListe(cached.gespeichert);
+        setPapierkorb(cached.geloescht);
+        if (!silent) {
+          showToast(
+            "Server-Archiv leer — zeige zuletzt gespeicherte Dokumente. Bitte API deployen (git pull + docker build).",
+            "warn"
+          );
+        }
+      } else {
+        setArchivListe([]);
+        setPapierkorb([]);
+        writeArchivCache([], []);
+      }
+    } catch (e) {
+      console.error(e);
+      restoreArchivFromCache(setArchivListe, setPapierkorb, setScannerView);
+      if (!silent) {
+        const msg = e?.status === 404
+          ? "Archiv-API nicht gefunden — zeige lokalen Zwischenspeicher."
+          : (e.message || "Archiv konnte nicht geladen werden");
+        showToast(msg, "error");
+      }
+    } finally {
+      setArchivLaden(false);
+    }
+  }, [showToast, setScannerView]);
+
+  useEffect(() => {
+    apiFetch("/mandanten").then(d => {
+      const raw = d?.data || [];
+      setMandanten(Array.isArray(raw) ? raw.map(x => x.name) : Object.keys(raw));
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!tabActive) return;
+    restoreArchivFromCache(setArchivListe, setPapierkorb, setScannerView);
+    ladeArchiv(true);
+  }, [tabActive, ladeArchiv, setScannerView]);
 
   const handleDateien = async (files) => {
     setLoading(true);
@@ -366,11 +621,11 @@ export default function DokumentScanner() {
       try{
         const b64=await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(",")[1]);r.onerror=()=>rej();r.readAsDataURL(datei);});
         const result=await apiFetch("/dokumente/analysieren",{method:"POST",body:JSON.stringify({dateiname:datei.name,inhalt_b64:b64,dateityp:datei.type})});
-        const norm=normalisiereDokumentScan({dateiname:datei.name,...result},mandanten);
+        const norm=normalisiereDokumentScan({dateiname:datei.name,inhalt_b64:b64,...result},mandanten);
         setDokumente(p=>[norm,...p]);
         showToast(`✓ "${datei.name}" analysiert`);
       }catch(e){
-        const fallback=normalisiereDokumentScan({dateiname:datei.name,doktyp:"sonstiges",ordner:"Sonstiges",mandant:"",ki_zusammenfassung:`KI nicht verfügbar: ${e.message}. Bitte manuell ausfüllen.`,konfidenz:0},mandanten);
+        const fallback=normalisiereDokumentScan({dateiname:datei.name,inhalt_b64:b64,doktyp:"sonstiges",ordner:"Sonstiges",mandant:"",ki_zusammenfassung:`KI nicht verfügbar: ${e.message}. Bitte manuell ausfüllen.`,konfidenz:0},mandanten);
         setDokumente(p=>[fallback,...p]);
         showToast(`"${datei.name}" ohne KI hinzugefügt`,"warn");
       }
@@ -383,28 +638,54 @@ export default function DokumentScanner() {
     try{
       const jahr=(dok.datum||"").slice(0,4)||String(new Date().getFullYear());
       const ordnerPfad=dok.ordner_pfad||`${dok.mandant}/${jahr}/${dok.ordner||"Sonstiges"}`;
-      await apiFetch("/dokumente/speichern",{method:"POST",body:JSON.stringify({
-        dok_id:String(dok.dok_id||dok.id||Date.now()),
+      const dokId=String(dok.dok_id||dok.id||`dok-${Date.now()}`);
+      const archivEintrag={
+        dok_id:dokId,
         dateiname:dok.dateiname,
         dokumenttyp:dok.doktyp||dok.dokumenttyp||"sonstiges",
         mandant:dok.mandant,
         datum:dok.datum||null,
-        frist:dok.frist||null,
-        lieferant:dok.absender||dok.lieferant||"",
         ordner_pfad:ordnerPfad,
         ordner_kategorie:dok.ordner||"Sonstiges",
         jahr:parseInt(jahr,10)||new Date().getFullYear(),
+        lieferant:dok.absender||dok.lieferant||"",
+        betrag:dok.betrag===""||dok.betrag==null?null:Number(dok.betrag),
+        notiz:dok.notiz||"",
+        ki_zusammenfassung:dok.ki_zusammenfassung||"",
+        gespeichert_am:new Date().toISOString(),
+        status:"gespeichert",
+      };
+      setArchivListe(prev=>{
+        const next=[archivEintrag,...prev.filter(x=>String(x.dok_id||x.id)!==dokId)];
+        const pb=readArchivCache().geloescht;
+        writeArchivCache(next,pb);
+        return next;
+      });
+      setScannerView("archiv");
+      await apiFetch("/dokumente/speichern",{method:"POST",body:JSON.stringify({
+        dok_id:dokId,
+        dateiname:dok.dateiname,
+        dokumenttyp:archivEintrag.dokumenttyp,
+        mandant:dok.mandant,
+        datum:dok.datum||null,
+        frist:dok.frist||null,
+        lieferant:archivEintrag.lieferant,
+        ordner_pfad:ordnerPfad,
+        ordner_kategorie:archivEintrag.ordner_kategorie,
+        jahr:archivEintrag.jahr,
         notiz:dok.notiz||"",
         inhalt_b64:dok.inhalt_b64,
         aufgabe_anlegen:!!(dok.aufgabe&&dok.frist),
+        ki_zusammenfassung:archivEintrag.ki_zusammenfassung,
+        betrag:archivEintrag.betrag,
       })});
       if(dok.aufgabe&&dok.mandant&&dok.frist){
         await apiFetch(`/mandanten/${encodeURIComponent(dok.mandant)}/aufgaben`,{
           method:"POST",body:JSON.stringify({beschreibung:dok.aufgabe,frist:dok.frist,prioritaet:"normal",kategorie:dok.doktyp})
         }).catch(()=>{});
       }
-      setGespeichert(p=>[dok,...p]);
       setDokumente(p=>p.filter(d=>d.id!==dok.id));
+      await ladeArchiv(true);
       showToast(`✓ "${dok.dateiname}" → ${dok.ordner}`);
     }catch(e){showToast(`Fehler: ${e.message}`,"error");}
   };
@@ -417,12 +698,26 @@ export default function DokumentScanner() {
 
       <div style={{background:"var(--bg2)",borderBottom:`1px solid var(--border)`,padding:"20px 32px",position:"sticky",top:0,zIndex:10}}>
         <div style={{fontFamily:"var(--font-head)",fontSize:22,color:"var(--text)"}}>Dokument-Scanner</div>
-        <div style={{fontSize:12,color:"var(--text3)",marginTop:2}}>KI erkennt Typ · schlägt Ordner vor · alles editierbar vor dem Speichern · digitale Unterschrift</div>
+        <div style={{fontSize:12,color:"var(--text3)",marginTop:2}}>KI erkennt Typ · Archiv: öffnen, bearbeiten, Papierkorb</div>
+        <div style={{display:"flex",gap:6,marginTop:12,flexWrap:"wrap"}}>
+          {[
+            {id:"scan",label:"📥 Scannen"},
+            {id:"archiv",label:`📁 Archiv (${archivListe.length})`},
+            {id:"papierkorb",label:`🗑 Papierkorb (${papierkorb.length})`},
+          ].map(t=>(
+            <button key={t.id} onClick={()=>setScannerView(t.id)} style={{
+              padding:"7px 14px",borderRadius:10,border:"none",cursor:"pointer",fontSize:13,
+              background:view===t.id?"var(--bg3)":"transparent",
+              color:view===t.id?"var(--accent)":"var(--text2)",
+              fontWeight:view===t.id?600:400,fontFamily:"var(--font-body)",
+            }}>{t.label}</button>
+          ))}
+        </div>
       </div>
 
       <div style={{padding:"28px 32px"}}>
         <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:16,marginBottom:24}}>
-          {[{l:"Zu prüfen",v:dokumente.length,c:dokumente.length>0?"var(--orange)":"var(--text3)"},{l:"Gespeichert",v:gespeichert.length,c:"var(--green)"},{l:"Mandanten",v:mandanten.length,c:"var(--blue)"}].map((s,i)=>(
+          {[{l:"Zu prüfen",v:dokumente.length,c:dokumente.length>0?"var(--orange)":"var(--text3)"},{l:"Im Archiv",v:archivListe.length,c:"var(--green)"},{l:"Mandanten",v:mandanten.length,c:"var(--blue)"}].map((s,i)=>(
             <div key={i} style={{background:"var(--bg2)",border:`1px solid var(--border)`,borderRadius:12,padding:"16px 18px"}}>
               <div style={{fontSize:10,color:"var(--text3)",textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:5}}>{s.l}</div>
               <div style={{fontFamily:"var(--font-head)",fontSize:26,color:s.c}}>{s.v}</div>
@@ -430,6 +725,22 @@ export default function DokumentScanner() {
           ))}
         </div>
 
+        {view==="scan"&&archivListe.length>0&&(
+          <div style={{
+            marginBottom:16,padding:"12px 16px",borderRadius:12,
+            background:"color-mix(in srgb, var(--green) 10%, var(--bg3))",
+            border:"1px solid color-mix(in srgb, var(--green) 22%, transparent)",
+            display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,flexWrap:"wrap",
+          }}>
+            <span style={{fontSize:13,color:"var(--text2)"}}>
+              {archivListe.length} gespeicherte{archivListe.length===1?"s":""} Dokument{archivListe.length!==1?"e":""} im Archiv
+              {archivLaden ? " · wird aktualisiert…" : ""}
+            </span>
+            <Btn size="sm" variant="success" onClick={()=>setScannerView("archiv")}>📁 Zum Archiv</Btn>
+          </div>
+        )}
+
+        {view==="scan"&&(
         <div onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();handleDateien(e.dataTransfer.files);}}
           onClick={()=>!loading&&fileRef.current?.click()}
           style={{border:`2px dashed var(--border2)`,borderRadius:16,padding:"48px 32px",textAlign:"center",cursor:loading?"not-allowed":"pointer",background:"var(--bg3)",marginBottom:24}}>
@@ -440,8 +751,9 @@ export default function DokumentScanner() {
             <div style={{color:"var(--text3)",fontSize:13}}>PDF, JPG, PNG, DOCX, XLSX · Mehrere gleichzeitig möglich</div>
           </div>)}
         </div>
+        )}
 
-        {dokumente.length>0&&(
+        {view==="scan"&&dokumente.length>0&&(
           <div style={{marginBottom:24}}>
             <div style={{fontFamily:"var(--font-head)",fontSize:18,color:"var(--text)",marginBottom:14}}>
               {dokumente.length} Dokument{dokumente.length!==1?"e":""} zur Prüfung
@@ -452,22 +764,45 @@ export default function DokumentScanner() {
           </div>
         )}
 
-        {gespeichert.length>0&&(
+        {view==="archiv"&&(
           <div>
-            <div style={{fontFamily:"var(--font-head)",fontSize:18,color:"var(--text)",marginBottom:14}}>✓ Gespeichert ({gespeichert.length})</div>
-            <div style={{display:"flex",flexDirection:"column",gap:8}}>
-              {gespeichert.map((d,i)=>(
-                <div key={i} style={{display:"flex",alignItems:"center",gap:12,padding:"10px 14px",background:"var(--bg2)",border:`1px solid ${"var(--green)"}25`,borderRadius:10}}>
-                  <span style={{fontSize:20}}>{DOK_TYPEN[d.doktyp]?.icon||"📄"}</span>
-                  <div style={{flex:1}}><div style={{fontSize:13,color:"var(--text)",fontWeight:500}}>{d.dateiname}</div><div style={{fontSize:11,color:"var(--text3)"}}>{d.ordner}{d.mandant&&` · ${d.mandant}`}</div></div>
-                  <span style={{fontSize:11,color:"var(--green)"}}>✓</span>
-                </div>
-              ))}
+            <div style={{display:"flex",gap:10,marginBottom:16,flexWrap:"wrap",alignItems:"center"}}>
+              <input
+                value={archivSuche}
+                onChange={e=>setArchivSuche(e.target.value)}
+                onKeyDown={e=>e.key==="Enter"&&ladeArchiv()}
+                placeholder="Suche (Dateiname, Mandant, Absender…)"
+                style={{flex:1,minWidth:200,background:"var(--bg2)",border:`1px solid var(--border)`,borderRadius:10,padding:"10px 14px",color:"var(--text)",fontSize:13,outline:"none"}}
+              />
+              <Btn size="sm" variant="ghost" onClick={ladeArchiv}>Aktualisieren</Btn>
             </div>
+            {archivListe.length===0?(
+              <div style={{textAlign:"center",padding:"40px 0",color:"var(--text3)"}}>Noch keine gespeicherten Dokumente.</div>
+            ):(
+              <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                {archivListe.map(dok=>(
+                  <ArchivZeile key={dok.dok_id||dok.id||dok.dateiname} dok={dok} mandanten={mandanten} papierkorb={false} onRefresh={ladeArchiv} showToast={showToast}/>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
-        {dokumente.length===0&&gespeichert.length===0&&!loading&&(
+        {view==="papierkorb"&&(
+          <div>
+            {papierkorb.length===0?(
+              <div style={{textAlign:"center",padding:"40px 0",color:"var(--text3)"}}>Papierkorb ist leer.</div>
+            ):(
+              <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                {papierkorb.map(dok=>(
+                  <ArchivZeile key={dok.dok_id||dok.id||dok.dateiname} dok={dok} mandanten={mandanten} papierkorb onRefresh={ladeArchiv} showToast={showToast}/>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {view==="scan"&&dokumente.length===0&&!loading&&archivListe.length===0&&!archivLaden&&(
           <div style={{textAlign:"center",padding:"48px 0",color:"var(--text3)"}}>
             <div style={{fontSize:40,marginBottom:12}}>🗂</div>
             Noch keine Dokumente hochgeladen.<br/>

@@ -10,7 +10,7 @@ from fastapi import HTTPException, BackgroundTasks, Query, status, Depends, Head
 from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse
 from fastapi.exceptions import RequestValidationError
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -7209,6 +7209,142 @@ class DokumentSpeichernRequest(BaseModel):
     notiz:            Optional[str] = ""
     inhalt_b64:       Optional[str] = None  # Für Speicherung
     aufgabe_anlegen:  bool = False
+    ki_zusammenfassung: Optional[str] = ""
+    betrag:           Optional[float] = None
+
+
+class DokumentUpdateRequest(BaseModel):
+    dokumenttyp:      Optional[str] = None
+    mandant:          Optional[str] = None
+    datum:            Optional[str] = None
+    frist:            Optional[str] = None
+    lieferant:        Optional[str] = None
+    ordner_pfad:      Optional[str] = None
+    ordner_kategorie: Optional[str] = None
+    jahr:             Optional[int] = None
+    notiz:            Optional[str] = None
+    betrag:           Optional[float] = None
+    ki_zusammenfassung: Optional[str] = None
+
+
+def _dokument_archiv_holen(store) -> Dict[str, Any]:
+    archiv = _kv_get(store, "__dokument_archiv_v1", {})
+    return archiv if isinstance(archiv, dict) else {}
+
+
+def _dokument_datei_pfad(dok: Dict[str, Any]) -> str:
+    import os as _os
+    pfad = (dok.get("pfad") or "").strip()
+    if pfad and _os.path.isfile(pfad):
+        return pfad
+    return _os.path.join(
+        "data",
+        "dokumente",
+        (dok.get("ordner_pfad") or "").replace("\\", "/").strip("/"),
+        dok.get("dateiname") or "",
+    )
+
+
+def _dokument_legacy_zu_archiv(leg: Dict[str, Any], index: int) -> Dict[str, Any]:
+    """Scanner v1 (__gescannte_dokumente_v1) → einheitliches Archiv-Format."""
+    import hashlib as _hashlib
+
+    dateiname = leg.get("dateiname") or "dokument"
+    mandant = leg.get("mandant") or ""
+    ordner = leg.get("ordner") or leg.get("ordner_kategorie") or "Sonstiges"
+    pfad = (leg.get("pfad") or "").strip()
+    ordner_pfad = (leg.get("ordner_pfad") or "").strip()
+    if not ordner_pfad and pfad:
+        ordner_pfad = pfad.replace("\\", "/")
+        if "data/dokumente/" in ordner_pfad:
+            ordner_pfad = ordner_pfad.split("data/dokumente/", 1)[-1]
+        if ordner_pfad.endswith("/" + dateiname):
+            ordner_pfad = ordner_pfad[: -(len(dateiname) + 1)]
+    if not ordner_pfad and mandant:
+        ordner_pfad = f"{mandant}/{ordner}"
+    dok_id = leg.get("dok_id") or _hashlib.sha1(
+        f"{dateiname}|{mandant}|{pfad}|{leg.get('gespeichert_am','')}".encode("utf-8")
+    ).hexdigest()[:16]
+    if not str(dok_id).startswith("legacy-"):
+        dok_id = f"legacy-{dok_id}"
+
+    jahr = leg.get("jahr")
+    if jahr is None and leg.get("datum"):
+        try:
+            jahr = int(str(leg.get("datum"))[:4])
+        except (TypeError, ValueError):
+            jahr = None
+
+    return {
+        "dok_id": dok_id,
+        "dateiname": dateiname,
+        "dokumenttyp": leg.get("dokumenttyp") or leg.get("doktyp") or "sonstiges",
+        "mandant": mandant,
+        "datum": leg.get("datum"),
+        "frist": leg.get("frist"),
+        "lieferant": leg.get("lieferant") or leg.get("absender") or "",
+        "ordner_pfad": ordner_pfad,
+        "ordner_kategorie": ordner,
+        "jahr": jahr,
+        "notiz": leg.get("notiz") or "",
+        "betrag": leg.get("betrag"),
+        "ki_zusammenfassung": leg.get("ki_zusammenfassung") or "",
+        "gespeichert_am": leg.get("gespeichert_am") or "",
+        "status": leg.get("status") or "gespeichert",
+        "geloescht_am": None,
+        "pfad": pfad or None,
+        "legacy_v1": True,
+    }
+
+
+def _dokument_archiv_liste(store) -> List[Dict[str, Any]]:
+    """Neues Archiv (KV-Dict) + ältere Scanner-Liste zusammenführen."""
+    archiv = _dokument_archiv_holen(store)
+    dokumente: List[Dict[str, Any]] = [dict(v) for v in archiv.values() if isinstance(v, dict)]
+
+    seen_ids = {str(d.get("dok_id") or "") for d in dokumente}
+    seen_files = {
+        (
+            (d.get("dateiname") or "").lower(),
+            (d.get("mandant") or "").lower(),
+            (d.get("ordner_pfad") or "").lower(),
+        )
+        for d in dokumente
+    }
+
+    legacy = _kv_get(store, "__gescannte_dokumente_v1", [])
+    if isinstance(legacy, list):
+        for i, leg in enumerate(legacy):
+            if not isinstance(leg, dict):
+                continue
+            mapped = _dokument_legacy_zu_archiv(leg, i)
+            sig = (
+                (mapped.get("dateiname") or "").lower(),
+                (mapped.get("mandant") or "").lower(),
+                (mapped.get("ordner_pfad") or "").lower(),
+            )
+            if mapped.get("dok_id") in seen_ids or sig in seen_files:
+                continue
+            dokumente.append(mapped)
+            seen_ids.add(mapped.get("dok_id") or "")
+            seen_files.add(sig)
+
+    return dokumente
+
+
+def _dokument_archiv_ensure(store, dok_id: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Lädt Dokument aus Archiv-KV; Legacy-Einträge werden einmalig übernommen."""
+    archiv = _dokument_archiv_holen(store)
+    if dok_id in archiv:
+        return archiv, dict(archiv[dok_id])
+    for d in _dokument_archiv_liste(store):
+        if str(d.get("dok_id")) == str(dok_id):
+            entry = {k: v for k, v in d.items() if k != "legacy_v1"}
+            archiv[dok_id] = entry
+            _kv_set(store, "__dokument_archiv_v1", archiv)
+            return archiv, dict(entry)
+    raise HTTPException(404, "Dokument nicht gefunden")
+
 
 DOKUMENT_SYSTEM_PROMPT = """Du bist ein KI-Assistent für eine deutsche Steuerkanzlei.
 Analysiere das Dokument und erkenne alle relevanten Informationen.
@@ -7374,8 +7510,11 @@ def dokument_speichern(data: DokumentSpeichernRequest,
         "ordner_kategorie":data.ordner_kategorie,
         "jahr":            data.jahr,
         "notiz":           data.notiz,
+        "betrag":          data.betrag,
+        "ki_zusammenfassung": (data.ki_zusammenfassung or "").strip(),
         "gespeichert_am":  datetime.now().isoformat(),
         "status":          "gespeichert",
+        "geloescht_am":    None,
     }
     _kv_set(store, "__dokument_archiv_v1", dokument_archiv)
 
@@ -7401,7 +7540,12 @@ def dokument_speichern(data: DokumentSpeichernRequest,
         })
 
     store.log_eintrag(f"DOKUMENT_GESPEICHERT | {data.mandant} | {data.dateiname} | {data.ordner_pfad}")
-    return {"status":"ok","ordner_pfad":data.ordner_pfad,"aufgabe_angelegt":data.aufgabe_anlegen}
+    return {
+        "status": "ok",
+        "dok_id": data.dok_id,
+        "ordner_pfad": data.ordner_pfad,
+        "aufgabe_angelegt": data.aufgabe_anlegen,
+    }
 
 @app.get("/dokumente/archiv", tags=["Dokumente"],
          summary="Alle gespeicherten Dokumente (Archiv)")
@@ -7409,14 +7553,22 @@ def dokumente_archiv(
     mandant: Optional[str] = Query(None),
     typ:     Optional[str] = Query(None),
     suche:   Optional[str] = Query(None),
+    status:  Optional[str] = Query(
+        None,
+        description="gespeichert | geloescht | alle (Standard: gespeichert)",
+    ),
     _user: dict = Depends(get_current_user),
 ):
-    """Alle gespeicherten Dokumente, strukturiert nach Ordner-Pfad."""
+    """Alle gespeicherten Dokumente (neues Archiv + ältere Scanner-Speicherung)."""
     store = get_ds(_user)
-    dokument_archiv = _kv_get(store, "__dokument_archiv_v1", {})
-    if not isinstance(dokument_archiv, dict):
-        dokument_archiv = {}
-    dokumente = list(dokument_archiv.values())
+    dokumente = _dokument_archiv_liste(store)
+
+    st_filter = (status or "gespeichert").strip().lower()
+    if st_filter not in ("alle", "all"):
+        dokumente = [
+            d for d in dokumente
+            if (d.get("status") or "gespeichert") == st_filter
+        ]
 
     if mandant:
         dokumente = [d for d in dokumente if d.get("mandant") == mandant]
@@ -7424,42 +7576,155 @@ def dokumente_archiv(
         dokumente = [d for d in dokumente if d.get("dokumenttyp") == typ]
     if suche:
         sl = suche.lower()
-        dokumente = [d for d in dokumente if
-                     sl in d.get("dateiname","").lower() or
-                     sl in d.get("mandant","").lower() or
-                     sl in d.get("dokumenttyp","").lower()]
+        dokumente = [
+            d for d in dokumente
+            if sl in (d.get("dateiname") or "").lower()
+            or sl in (d.get("mandant") or "").lower()
+            or sl in (d.get("dokumenttyp") or "").lower()
+            or sl in (d.get("lieferant") or "").lower()
+            or sl in (d.get("ki_zusammenfassung") or "").lower()
+            or sl in (d.get("ordner_pfad") or "").lower()
+        ]
 
-    dokumente.sort(key=lambda x: x.get("gespeichert_am",""), reverse=True)
-    return {"dokumente":dokumente,"anzahl":len(dokumente)}
+    dokumente.sort(key=lambda x: x.get("gespeichert_am", ""), reverse=True)
+    return {"dokumente": dokumente, "anzahl": len(dokumente)}
 
-@app.delete("/dokumente/{dok_id}", tags=["Dokumente"],
-            summary="Dokument aus Archiv löschen")
-def dokument_loeschen(dok_id: str,
-    _user: dict = Depends(get_current_user)):
-    """Dokument dauerhaft aus Archiv und Dateisystem löschen."""
+
+@app.get("/dokumente/{dok_id}", tags=["Dokumente"],
+         summary="Einzelnes Archiv-Dokument (Metadaten)")
+def dokument_archiv_einzel(dok_id: str, _user: dict = Depends(get_current_user)):
+    store = get_ds(_user)
+    archiv = _dokument_archiv_holen(store)
+    if dok_id in archiv:
+        dok = dict(archiv[dok_id])
+    else:
+        dok = next(
+            (d for d in _dokument_archiv_liste(store) if str(d.get("dok_id")) == str(dok_id)),
+            None,
+        )
+        if not dok:
+            raise HTTPException(404, "Dokument nicht gefunden")
+    dok["datei_vorhanden"] = Path(_dokument_datei_pfad(dok)).is_file()
+    return dok
+
+
+@app.get("/dokumente/{dok_id}/datei", tags=["Dokumente"],
+         summary="Gespeicherte Datei herunterladen / öffnen")
+def dokument_datei_holen(dok_id: str, _user: dict = Depends(get_current_user)):
+    from fastapi.responses import FileResponse
 
     store = get_ds(_user)
-    archiv = _kv_get(store, "__dokument_archiv_v1", {})
-    if not isinstance(archiv, dict):
-        archiv = {}
+    archiv = _dokument_archiv_holen(store)
+    if dok_id in archiv:
+        dok = archiv[dok_id]
+    else:
+        dok = next(
+            (d for d in _dokument_archiv_liste(store) if str(d.get("dok_id")) == str(dok_id)),
+            None,
+        )
+        if not dok:
+            raise HTTPException(404, "Dokument nicht gefunden")
+    if (dok.get("status") or "") == "geloescht":
+        raise HTTPException(410, "Dokument liegt im Papierkorb — zuerst wiederherstellen")
 
-    if dok_id not in archiv:
-        raise HTTPException(404, "Dokument nicht gefunden")
+    datei_pfad = _dokument_datei_pfad(dok)
+    if not Path(datei_pfad).is_file():
+        raise HTTPException(404, "Datei nicht auf dem Server gefunden")
 
-    dok = archiv[dok_id]
-    # Physische Datei löschen
+    return FileResponse(
+        datei_pfad,
+        filename=dok.get("dateiname") or "dokument",
+        media_type="application/octet-stream",
+    )
+
+
+@app.put("/dokumente/{dok_id}", tags=["Dokumente"],
+         summary="Archiv-Dokument bearbeiten (Metadaten)")
+def dokument_archiv_aktualisieren(
+    dok_id: str,
+    data: DokumentUpdateRequest,
+    _user: dict = Depends(get_current_user),
+):
     import os as _os
-    datei_pfad = _os.path.join("data","dokumente",dok.get("ordner_pfad",""),dok.get("dateiname",""))
-    if _os.path.exists(datei_pfad):
-        try:
-            _os.remove(datei_pfad)
-        except OSError as exc:
-            log.warning("Dokument Datei konnte nicht geloescht werden: %s (%s)", datei_pfad, exc)
+    import shutil as _shutil
 
-    del archiv[dok_id]
+    store = get_ds(_user)
+    archiv, dok = _dokument_archiv_ensure(store, dok_id)
+    if (dok.get("status") or "") == "geloescht":
+        raise HTTPException(400, "Im Papierkorb — zuerst wiederherstellen, dann bearbeiten")
+
+    alt_pfad = _dokument_datei_pfad(dok)
+    updates = data.model_dump(exclude_unset=True)
+    for key, val in updates.items():
+        dok[key] = val
+
+    if data.ordner_pfad or data.mandant or data.jahr is not None:
+        mand = dok.get("mandant") or "Ohne-Zuordnung"
+        jahr = str(dok.get("jahr") or datetime.now().year)
+        kat = dok.get("ordner_kategorie") or "Sonstiges"
+        if data.ordner_pfad:
+            dok["ordner_pfad"] = data.ordner_pfad.strip().replace("\\", "/")
+        else:
+            dok["ordner_pfad"] = f"{mand}/{jahr}/{kat}"
+
+    neu_pfad = _dokument_datei_pfad(dok)
+    if Path(alt_pfad).is_file() and alt_pfad != neu_pfad:
+        _os.makedirs(_os.path.dirname(neu_pfad), exist_ok=True)
+        try:
+            _shutil.move(alt_pfad, neu_pfad)
+        except OSError as exc:
+            log.warning("Dokument verschieben fehlgeschlagen: %s", exc)
+
+    dok["aktualisiert_am"] = datetime.now().isoformat()
+    archiv[dok_id] = dok
     _kv_set(store, "__dokument_archiv_v1", archiv)
-    store.log_eintrag(f"DOKUMENT_GELOESCHT | {dok.get('mandant')} | {dok.get('dateiname')}")
-    return {"status":"geloescht"}
+    store.log_eintrag(f"DOKUMENT_AKTUALISIERT | {dok.get('mandant')} | {dok.get('dateiname')}")
+    return dok
+
+
+@app.delete("/dokumente/{dok_id}", tags=["Dokumente"],
+            summary="Dokument in Papierkorb legen oder endgültig löschen")
+def dokument_loeschen(
+    dok_id: str,
+    endgueltig: bool = Query(False, description="True = Datei und Eintrag dauerhaft entfernen"),
+    _user: dict = Depends(get_current_user),
+):
+    store = get_ds(_user)
+    archiv, dok = _dokument_archiv_ensure(store, dok_id)
+    import os as _os
+
+    if endgueltig or (dok.get("status") or "") == "geloescht":
+        datei_pfad = _dokument_datei_pfad(dok)
+        if _os.path.exists(datei_pfad):
+            try:
+                _os.remove(datei_pfad)
+            except OSError as exc:
+                log.warning("Dokument Datei konnte nicht geloescht werden: %s (%s)", datei_pfad, exc)
+        del archiv[dok_id]
+        _kv_set(store, "__dokument_archiv_v1", archiv)
+        store.log_eintrag(f"DOKUMENT_GELOESCHT | {dok.get('mandant')} | {dok.get('dateiname')}")
+        return {"status": "geloescht", "endgueltig": True}
+
+    dok["status"] = "geloescht"
+    dok["geloescht_am"] = datetime.now().isoformat()
+    archiv[dok_id] = dok
+    _kv_set(store, "__dokument_archiv_v1", archiv)
+    store.log_eintrag(f"DOKUMENT_PAPIERKORB | {dok.get('mandant')} | {dok.get('dateiname')}")
+    return {"status": "geloescht", "endgueltig": False}
+
+
+@app.post("/dokumente/{dok_id}/wiederherstellen", tags=["Dokumente"],
+          summary="Dokument aus Papierkorb wiederherstellen")
+def dokument_wiederherstellen(dok_id: str, _user: dict = Depends(get_current_user)):
+    store = get_ds(_user)
+    archiv, dok = _dokument_archiv_ensure(store, dok_id)
+    dok["status"] = "gespeichert"
+    dok["geloescht_am"] = None
+    dok["wiederhergestellt_am"] = datetime.now().isoformat()
+    archiv[dok_id] = dok
+    _kv_set(store, "__dokument_archiv_v1", archiv)
+    store.log_eintrag(f"DOKUMENT_WIEDERHERGESTELLT | {dok.get('mandant')} | {dok.get('dateiname')}")
+    return dok
 
 
 # ============================================================

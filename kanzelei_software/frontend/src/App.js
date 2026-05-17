@@ -2966,7 +2966,8 @@ function AppInner() {
       case "steuerbot":  return <SteuerAutopilot />;
       case "profit":     return <ProfitMonitor />;
       case "automation": return <WorkflowBaukasten />;
-      case "dokumente":  return <DokumentScanner />;
+      case "dokumente":
+        return null;
       case "belege":     return <BelegScanner />;
       case "rechnungen": return <Rechnungen />;
       case "ki":         return <KIAssistent />;
@@ -3121,7 +3122,16 @@ function AppInner() {
             ) : null}
           </div>
         )}
-        {renderContent()}
+        <div style={{
+          display: activeTab === "dokumente" ? "flex" : "none",
+          flex: 1,
+          flexDirection: "column",
+          minHeight: 0,
+          overflow: "hidden",
+        }}>
+          <DokumentScanner tabActive={activeTab === "dokumente"} />
+        </div>
+        {activeTab !== "dokumente" ? renderContent() : null}
       </main>
       {emailModal && (
         <EmailModal name={emailModal}

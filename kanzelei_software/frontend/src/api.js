@@ -1044,17 +1044,92 @@ export const dokumentAnalysieren = (dateiname, inhaltB64, dateityp = "applicatio
 export const dokumentSpeichern   = (data) =>
   apiFetch("/dokumente/speichern", { method: "POST", body: JSON.stringify(data) });
 
-export const dokumentArchiv      = (mandant = null, typ = null, suche = null) => {
-  const params = new URLSearchParams();
-  if (mandant) params.set("mandant", mandant);
-  if (typ)     params.set("typ",     typ);
-  if (suche)   params.set("suche",   suche);
-  const q = params.toString();
-  return apiFetch(`/dokumente/archiv${q ? "?" + q : ""}`);
+/** API-Antwort → Dokumenten-Array (Archiv / Liste). */
+export const extractDokumenteListe = (resp) => {
+  if (!resp) return [];
+  if (Array.isArray(resp.dokumente)) return resp.dokumente;
+  if (Array.isArray(resp.data?.dokumente)) return resp.data.dokumente;
+  if (Array.isArray(resp.data)) return resp.data;
+  return [];
 };
 
-export const dokumentLoeschen    = (dokId) =>
-  apiFetch(`/dokumente/${dokId}`, { method: "DELETE" });
+export const dokumentArchiv = async (mandant = null, typ = null, suche = null, status = "gespeichert") => {
+  const params = new URLSearchParams();
+  if (mandant) params.set("mandant", mandant);
+  if (typ) params.set("typ", typ);
+  if (suche) params.set("suche", suche);
+  if (status) params.set("status", status);
+  const q = params.toString();
+  try {
+    return await apiFetch(`/dokumente/archiv${q ? "?" + q : ""}`);
+  } catch (e) {
+    if (e?.status !== 404) throw e;
+    const legacy = await apiFetch(`/dokumente/liste${mandant ? `?mandant=${encodeURIComponent(mandant)}` : ""}`);
+    const liste = extractDokumenteListe(legacy).map((d, i) => ({
+      dok_id: d.dok_id || `legacy-${i}-${d.dateiname || "dok"}`,
+      dateiname: d.dateiname,
+      dokumenttyp: d.dokumenttyp || d.doktyp || "sonstiges",
+      mandant: d.mandant,
+      ordner_pfad: d.ordner_pfad || d.ordner,
+      ordner_kategorie: d.ordner_kategorie || d.ordner,
+      lieferant: d.lieferant || d.absender,
+      datum: d.datum,
+      betrag: d.betrag,
+      notiz: d.notiz,
+      ki_zusammenfassung: d.ki_zusammenfassung || "",
+      gespeichert_am: d.gespeichert_am,
+      status: d.status || "gespeichert",
+      pfad: d.pfad,
+    }));
+    const st = (status || "gespeichert").toLowerCase();
+    const gefiltert =
+      st === "alle" || st === "all"
+        ? liste
+        : liste.filter((d) => (d.status || "gespeichert") === st);
+    return { dokumente: gefiltert, anzahl: gefiltert.length, legacy_fallback: true };
+  }
+};
+
+export const dokumentArchivEinzel = (dokId) =>
+  apiFetch(`/dokumente/${encodeURIComponent(dokId)}`);
+
+export const dokumentAktualisieren = (dokId, data) =>
+  apiFetch(`/dokumente/${encodeURIComponent(dokId)}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+
+export const dokumentLoeschen = (dokId, endgueltig = false) =>
+  apiFetch(`/dokumente/${encodeURIComponent(dokId)}?endgueltig=${endgueltig ? "true" : "false"}`, {
+    method: "DELETE",
+  });
+
+export const dokumentWiederherstellen = (dokId) =>
+  apiFetch(`/dokumente/${encodeURIComponent(dokId)}/wiederherstellen`, { method: "POST" });
+
+/** Datei mit Auth-Token herunterladen (Blob). */
+export const dokumentDateiDownload = async (dokId, dateiname = "dokument") => {
+  const base = process.env.REACT_APP_API_URL || "/api";
+  const token = (localStorage.getItem("kanzlei_token") || localStorage.getItem("token") || "").trim();
+  const res = await fetch(`${base}/dokumente/${encodeURIComponent(dokId)}/datei`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) {
+    let msg = `Download fehlgeschlagen (${res.status})`;
+    try {
+      const j = await res.json();
+      msg = j.detail || j.message || msg;
+    } catch {}
+    throw new Error(msg);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = dateiname || "dokument";
+  a.click();
+  URL.revokeObjectURL(url);
+};
 
 // ═══════════════════════════════════════════════════════════════
 // RECHNUNGEN
