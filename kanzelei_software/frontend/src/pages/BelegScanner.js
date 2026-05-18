@@ -381,6 +381,11 @@ const BuchungsKarte = ({ beleg, mandanten, gebucht, defaultMandant = "", onBesta
             <Btn onClick={() => setEdit(true)} variant="ghost" size="sm">
               ✏ Korrigieren
             </Btn>
+            {gebucht && onLoeschen && (
+              <Btn size="sm" variant="danger" onClick={() => onLoeschen(readBelegId(beleg))}>
+                🗑 Löschen
+              </Btn>
+            )}
           </div>
         </div>
       ) : (
@@ -677,14 +682,20 @@ export default function BelegScanner() {
   const handleLoeschenGebucht = async (bid) => {
     const id = String(bid || "").trim();
     if (!id) return;
-    if (!window.confirm("Gebuchten Beleg endgültig löschen?")) return;
+    if (
+      !window.confirm(
+        "Beleg ins Archiv verschieben?\n\nEr verschwindet unter „Gebucht“. Im Archiv können Sie ihn wiederherstellen oder endgültig löschen."
+      )
+    ) {
+      return;
+    }
     try {
-      await apiFetch(`/belege/${encodeURIComponent(id)}?quelle=pipeline`, { method: "DELETE" });
+      await apiFetch(`/belege/${encodeURIComponent(id)}/ablehnen`, { method: "POST" });
       setBelege((prev) => prev.filter((b) => readBelegId(b) !== id));
-      showToast("Beleg gelöscht", "warn");
-      ladeAlles().catch((e) => console.error(e));
+      showToast("Beleg ins Archiv verschoben — unter „Archiv“ verwalten", "warn");
+      await Promise.all([ladeArchiv(), ladeAlles()]);
     } catch (e) {
-      showToast(`Löschen fehlgeschlagen: ${e.message}`, "error");
+      showToast(`Archivieren fehlgeschlagen: ${e.message}`, "error");
     }
   };
 
@@ -699,8 +710,8 @@ export default function BelegScanner() {
     try {
       await apiFetch(`/belege/${encodeURIComponent(id)}/ablehnen`, { method: "POST" });
       setBelege((prev) => prev.filter((b) => readBelegId(b) !== id));
-      showToast("Vorschlag abgelehnt", "warn");
-      ladeAlles().catch((e) => console.error(e));
+      showToast("Ins Archiv verschoben — unter „Archiv“ verwalten", "warn");
+      await Promise.all([ladeArchiv(), ladeAlles()]);
     } catch (e) {
       showToast(`Ablehnen fehlgeschlagen: ${e.message}`, "error");
     }
@@ -887,7 +898,7 @@ export default function BelegScanner() {
             </div>
 
             <div style={{ fontSize: 12, color: "var(--text3)", marginBottom: 14, lineHeight: 1.5 }}>
-              Abgelehnte Buchungsvorschläge. Hier können Sie sie{" "}
+              Abgelehnte oder aus „Gebucht“ entfernte Belege. Hier können Sie sie{" "}
               <strong>wiederherstellen</strong> oder <strong>endgültig löschen</strong>.
             </div>
 

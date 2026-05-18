@@ -393,17 +393,30 @@ def belege_archiv_alle_loeschen(ds, mandant: str = None) -> Dict:
 
 
 def beleg_ablehnen(ds, beleg_id: str) -> Dict:
-    """Beleg als abgelehnt markieren."""
+    """Beleg ins Archiv (abgelehnt) — für offene Vorschläge und gebuchte Belege."""
     beleg = ds.beleg_holen(beleg_id)
     if not beleg:
         raise ValueError(f"Beleg {beleg_id} nicht gefunden")
+    if _beleg_ist_archiviert(beleg):
+        raise ValueError("Beleg ist bereits im Archiv")
+    war_gebucht = _beleg_workflow_status(beleg) == "bestaetigt"
     beleg["status"] = "abgelehnt"
     beleg["abgelehnt_am"] = datetime.now().isoformat()
+    if war_gebucht:
+        beleg.pop("bestaetigt_am", None)
     ok = ds.beleg_speichern(beleg_id, beleg)
     if ok is False:
         raise RuntimeError(f"Speichern fehlgeschlagen (Beleg {beleg_id})")
-    ds.log_eintrag(f"BELEG_ABGELEHNT | {beleg_id}")
-    return {"status": "abgelehnt", "id": beleg_id}
+    ds.log_eintrag(
+        f"BELEG_ARCHIV | {beleg.get('mandant', '?')} | "
+        f"{'gebucht' if war_gebucht else 'vorschlag'} | {beleg_id}"
+    )
+    return {
+        "status": "abgelehnt",
+        "id": beleg_id,
+        "archiviert": True,
+        "war_gebucht": war_gebucht,
+    }
 
 
 def belege_statistiken(ds, mandant: str = None) -> Dict:

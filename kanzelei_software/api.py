@@ -6523,10 +6523,10 @@ def beleg_bestaetigen_ep(beleg_id: str, korrekturen: BelegKorrektur = None,
         raise HTTPException(code, msg)
 
 @app.post("/belege/{beleg_id}/ablehnen", tags=["Belege"],
-          summary="Buchungsvorschlag ablehnen")
+          summary="Beleg ins Archiv verschieben")
 def beleg_ablehnen(beleg_id: str,
     _user: dict = Depends(get_current_user)):
-    """Buchungsvorschlag ablehnen und als 'abgelehnt' markieren."""
+    """Vorschlag ablehnen oder gebuchten Beleg ins Archiv legen (endgültig löschen nur im Archiv)."""
     from core.beleg_service import beleg_ablehnen as beleg_ablehnen_core
     store = get_ds(_user)
     try:
