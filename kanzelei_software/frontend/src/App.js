@@ -10,7 +10,7 @@
 // ============================================================
 
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
-import { BrowserRouter as Router, Routes, Route, Link, Navigate, useNavigate, useParams } from "react-router-dom";
+import { BrowserRouter as Router, Routes, Route, Link, Navigate, useNavigate, useLocation } from "react-router-dom";
 
 import {
   getMandanten, getHeute, getEmpfehlungen, getKpis,
@@ -46,6 +46,7 @@ import Register          from "./pages/Register";
 import ForgotPassword    from "./pages/ForgotPassword";
 import ResetPassword     from "./pages/ResetPassword";
 import VerifyEmail       from "./pages/VerifyEmail";
+import MandantDetail     from "./pages/MandantDetail";
 import { hasRoleReal, getEffectiveRole } from "./components/PermissionGate";
 import { hasNavTab } from "./navAccess";
 import { useContentLayoutWidth, readContentLayoutWidth } from "./useContentLayoutWidth";
@@ -1161,10 +1162,13 @@ const EmailModal = ({ name, onClose, onSend }) => {
                       display:"flex", justifyContent:"space-between", alignItems:"center" }}>
           <div>
             <div style={{ fontFamily:"var(--font-head)", fontSize:18, color:"var(--accent)" }}>
-              Email-Vorschau
+              KI-Email-Vorschau
             </div>
             <div style={{ fontSize:12, color:"var(--text3)", marginTop:2 }}>
               {name}{preview?.empfaenger ? ` · ${preview.empfaenger}` : ""}
+            </div>
+            <div style={{ fontSize:11, color:"var(--text3)", marginTop:6, lineHeight:1.45 }}>
+              Inhalt basiert auf Aufgaben, Dokumenten und Kontakt-Status.
             </div>
           </div>
           <Btn variant="ghost" size="sm" onClick={onClose}>✕</Btn>
@@ -1738,413 +1742,6 @@ function AufgabenSeite({ kpis, heute, onRefresh, isMobile = false }) {
 }
 
 // ═══════════════════════════════════════════════════════════
-// MANDANT DETAIL PAGE (via Router /mandant/:name)
-// Bug-fix: useParams statt window.location
-// ═══════════════════════════════════════════════════════════
-
-function MandantDetailPage() {
-  const { name: encodedName } = useParams();
-  const name    = decodeURIComponent(encodedName || "");
-  const navigate = useNavigate();
-
-  const [viewportW, setViewportW] = useState(() => (typeof window !== "undefined" ? window.innerWidth : 1000));
-  useEffect(() => {
-    const onResize = () => setViewportW(window.innerWidth);
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, []);
-  const detailMobile = viewportW <= 900;
-
-  const [mandant,     setMandant]     = useState(null);
-  const [aufgaben,    setAufgaben]    = useState([]);
-  const [loading,     setLoading]     = useState(true);
-  const [beschreibung,setBeschreibung]= useState("");
-  const [frist,       setFrist]       = useState("");
-  const [fristUhrzeit,setFristUhrzeit]= useState("");
-  const [prioritaet,  setPrio]        = useState("normal");
-  const [addLoading,  setAddLoading]  = useState(false);
-  const [toast,       setToast]       = useState("");
-  const [editAufgabeDetail, setEditAufgabeDetail] = useState(null);
-
-  const showToast = (t) => { setToast(t); setTimeout(() => setToast(""), 3000); };
-
-  const ladeAlles = useCallback(async () => {
-    try {
-      // Mandanten-Daten
-      const raw = await getMandanten();
-      const liste = normalisiereMandanten(raw);
-      const m = liste.find(
-        (x) => String(x?.name ?? x?.mandant ?? x ?? "").trim() === name
-      );
-      setMandant(m || { name });
-
-      // Aufgaben
-      const a = await apiGet(`/mandanten/${encodeURIComponent(name)}/aufgaben`);
-      const serverRows = extrahiereAufgabenArray(a);
-      const pendingRows = lesePendingAufgaben().filter(
-        (x) => String(x?.mandant || "").trim() === String(name || "").trim()
-      );
-      setAufgaben(mergeServerMitPending(serverRows, pendingRows));
-    } catch (e) {
-      console.error(e);
-      setMandant({ name });
-    } finally {
-      setLoading(false);
-    }
-  }, [name]);
-
-  useEffect(() => { ladeAlles(); }, [ladeAlles]);
-
-  const addAufgabe = async () => {
-    if (!beschreibung.trim() || !frist) {
-      showToast("⚠ Beschreibung und Frist erforderlich"); return;
-    }
-    setAddLoading(true);
-    try {
-      const besch = beschreibung.trim();
-      const created = await addAufgabeAPI(name, {
-        beschreibung: besch,
-        frist,
-        frist_uhrzeit: fristUhrzeit || null,
-        prioritaet,
-      });
-      const newId = created?.id ?? created?.data?.id;
-      if (newId) {
-        const optimisticRow = {
-          id: newId,
-          mandant: name,
-          beschreibung: besch,
-          frist,
-          frist_uhrzeit: fristUhrzeit || "",
-          prioritaet,
-          erledigt: 0,
-          kategorie: "allgemein",
-          notiz: "",
-          _pending_local: true,
-        };
-        const prevPending = lesePendingAufgaben().filter((x) => String(x.id) !== String(newId));
-        schreibePendingAufgaben([...prevPending, optimisticRow]);
-        setAufgaben((p) => mergeServerMitPending(p, [optimisticRow]));
-      }
-      setBeschreibung(""); setFrist(""); setFristUhrzeit(""); setPrio("normal");
-      showToast("✓ Aufgabe hinzugefügt");
-      await ladeAlles();
-    } catch (e) { showToast("⚠ " + e.message); }
-    finally { setAddLoading(false); }
-  };
-
-  const toggleAufgabeRow = async (row) => {
-    const id = row?.id;
-    if (!id) return;
-    if (row?._pending_local) {
-      const nextErledigt = istAufgabeErledigt(row) ? 0 : 1;
-      setAufgaben((p) =>
-        p.map((a) =>
-          a.id === id ? { ...a, erledigt: nextErledigt, _pending_local: true } : a
-        )
-      );
-      const nextPending = lesePendingAufgaben().map((x) =>
-        String(x.id) === String(id) ? { ...x, erledigt: nextErledigt } : x
-      );
-      schreibePendingAufgaben(nextPending);
-      showToast(nextErledigt ? "✓ Aufgabe als erledigt markiert" : "✓ Aufgabe wieder geöffnet");
-      return;
-    }
-    setAufgaben((p) =>
-      p.map((a) =>
-        a.id === id ? { ...a, erledigt: istAufgabeErledigt(a) ? 0 : 1 } : a
-      )
-    );
-    try {
-      await toggleAufgabeAPI(id);
-      showToast(istAufgabeErledigt(row) ? "✓ Aufgabe wieder geöffnet" : "✓ Aufgabe als erledigt markiert");
-    } catch {
-      await ladeAlles();
-    }
-  };
-
-  const deleteAufgabeRow = async (row) => {
-    const id = row?.id;
-    if (!id) return;
-    if (!window.confirm("Aufgabe löschen?")) return;
-    setAufgaben((p) => p.filter((a) => a.id !== id));
-    if (row?._pending_local) {
-      const nextPending = lesePendingAufgaben().filter((x) => String(x.id) !== String(id));
-      schreibePendingAufgaben(nextPending);
-      showToast("✓ Aufgabe gelöscht");
-      return;
-    }
-    try {
-      await deleteAufgabeAPI(id);
-      showToast("✓ Aufgabe gelöscht");
-    } catch {
-      await ladeAlles();
-    }
-  };
-
-  const editAufgabe = (a) => {
-    setEditAufgabeDetail({ ...a, mandant: a.mandant || name });
-  };
-
-  const speichereDetailAufgabeEdit = async (payload) => {
-    if (!editAufgabeDetail?.id) return;
-    try {
-      if (editAufgabeDetail?._pending_local) {
-        const nextPending = lesePendingAufgaben().map((x) =>
-          String(x.id) === String(editAufgabeDetail.id)
-            ? { ...x, ...payload, mandant: payload.mandant || x.mandant }
-            : x
-        );
-        schreibePendingAufgaben(nextPending);
-        setAufgaben((p) =>
-          p.map((a) =>
-            a.id === editAufgabeDetail.id
-              ? { ...a, ...payload, mandant: payload.mandant || a.mandant, _pending_local: true }
-              : a
-          )
-        );
-        showToast("✓ Aufgabe bearbeitet");
-        setEditAufgabeDetail(null);
-        return;
-      }
-      await updateAufgabeAPI(editAufgabeDetail.id, payload);
-      showToast("✓ Aufgabe bearbeitet");
-      setEditAufgabeDetail(null);
-      await ladeAlles();
-    } catch (e) {
-      showToast("⚠ " + (e.message || "Bearbeiten fehlgeschlagen"));
-      await ladeAlles();
-      throw e;
-    }
-  };
-
-  const PRIO_C = { kritisch:"var(--red)", hoch:"var(--orange)", normal:"var(--blue)", niedrig:"var(--text3)" };
-
-  if (loading) return (
-    <div style={{ flex:1, display:"flex", alignItems:"center",
-                  justifyContent:"center", background:"var(--bg)" }}>
-      <Spinner size={36} />
-    </div>
-  );
-
-  const offen    = aufgaben.filter((a) => !istAufgabeErledigt(a));
-  const erledigt = aufgaben.filter((a) => istAufgabeErledigt(a));
-
-  return (
-    <div style={{ flex:1, background:"var(--bg)", overflowY:"auto",
-                  minHeight:"100vh", maxWidth:"100%", minWidth:0, boxSizing:"border-box" }}>
-      <FontLoader />
-
-      {/* Toast */}
-      {toast && (
-        <div style={{ position:"fixed", top:20, right:12, zIndex:9999,
-                      maxWidth:"min(340px, calc(100vw - 24px))",
-                      background:"var(--bg3)", border:"1px solid color-mix(in srgb, var(--accent) 30%, transparent)",
-                      borderLeft:"3px solid var(--accent)",
-                      borderRadius:"var(--radius)", padding:"12px 16px",
-                      color:"var(--text)", fontSize:13, fontWeight:500, wordBreak:"break-word" }}>
-          {toast}
-        </div>
-      )}
-
-      {/* Header */}
-      <div style={{ background:"var(--bg2)", borderBottom:"1px solid var(--border)",
-                    padding:detailMobile ? "16px 14px" : "24px 36px",
-                    display:"flex", alignItems:"center", gap:16, flexWrap:"wrap" }}>
-        <button onClick={() => navigate("/")} style={{
-          background:"var(--bg3)", border:"1px solid var(--border2)",
-          borderRadius:"var(--radius)", padding:"7px 14px", color:"var(--text2)",
-          fontSize:13, cursor:"pointer",
-        }}>← Zurück</button>
-        <div>
-          <div style={{ fontFamily:"var(--font-head)", fontSize:24, color:"var(--text)" }}>{name}</div>
-          <div style={{ color:"var(--text3)", fontSize:13, marginTop:2 }}>
-            {mandant?.email || "Keine E-Mail"} · {mandant?.branche || "Keine Branche"}
-          </div>
-        </div>
-        <div style={{ marginLeft:detailMobile ? 0 : "auto" }}>
-          <Badge color={"var(--accent)"}>€{(mandant?.umsatz || 0).toLocaleString("de")}</Badge>
-        </div>
-      </div>
-
-      <div style={{ padding:"clamp(12px, 3vw, 28px) clamp(12px, 4vw, 36px)", display:"grid",
-                    gridTemplateColumns:"repeat(auto-fit, minmax(min(100%, 280px), 1fr))", gap:16,
-                    maxWidth:"100%", minWidth:0, boxSizing:"border-box" }}>
-        {/* Links: Aufgaben */}
-        <div>
-          <div style={{ fontFamily:"var(--font-head)", fontSize:20, color:"var(--text)", marginBottom:16 }}>
-            Aufgaben & Fristen
-          </div>
-
-          {/* Neue Aufgabe */}
-          <Card style={{ marginBottom:20, padding:"16px 18px" }}>
-            <div style={{ fontSize:11, color:"var(--text3)", marginBottom:10,
-                          textTransform:"uppercase", letterSpacing:"0.07em" }}>
-              Neue Aufgabe
-            </div>
-            <div style={detailMobile ? {
-              display:"flex", flexDirection:"column", gap:10, alignItems:"stretch",
-            } : {
-              display:"grid", gridTemplateColumns:"1fr auto auto auto", gap:10, alignItems:"end",
-            }}>
-              <Input placeholder="Beschreibung..." value={beschreibung}
-                     onChange={setBeschreibung}
-                     onKeyDown={e => e.key === "Enter" && addAufgabe()} />
-              <input type="date" value={frist} onChange={e => setFrist(e.target.value)}
-                     style={{ background:"var(--bg)", border:"1px solid var(--border2)",
-                              borderRadius:"var(--radius)", color:"var(--text)",
-                              padding:"9px 11px", fontSize:14, outline:"none", width:detailMobile ? "100%" : undefined,
-                              boxSizing:"border-box" }} />
-              <input type="time" value={fristUhrzeit} onChange={e => setFristUhrzeit(e.target.value)}
-                     style={{ background:"var(--bg)", border:"1px solid var(--border2)",
-                              borderRadius:"var(--radius)", color:"var(--text)",
-                              padding:"9px 11px", fontSize:14, outline:"none", width:detailMobile ? "100%" : undefined,
-                              boxSizing:"border-box" }} />
-              <Btn onClick={addAufgabe} loading={addLoading} variant="primary">Hinzufügen</Btn>
-            </div>
-            <div style={{ display:"flex", gap:6, marginTop:10, flexWrap:"wrap" }}>
-              {["niedrig","normal","hoch","kritisch"].map(p => (
-                <Btn key={p} size="xs"
-                     variant={prioritaet===p?"subtle":"ghost"}
-                     onClick={() => setPrio(p)}
-                     style={{ color:PRIO_C[p] }}>
-                  {p}
-                </Btn>
-              ))}
-            </div>
-          </Card>
-
-          {/* Offene Aufgaben */}
-          {offen.length === 0 ? (
-            <div style={{ color:"var(--text3)", padding:"20px 0", textAlign:"center" }}>
-              Keine offenen Aufgaben ✓
-            </div>
-          ) : offen.map((a, i) => {
-            const fristDt = a.frist ? new Date(a.frist + "T12:00:00") : null;
-            const tage    = fristDt ? Math.round((fristDt - new Date()) / 86400000) : null;
-            const c = tage === null ? "var(--border2)" : tage < 0 ? "var(--red)" : tage <= 2 ? "var(--orange)" : "var(--border2)";
-            return (
-              <div key={a.id || i} style={{
-                display:"flex", alignItems:"flex-start", gap:12, flexWrap:"wrap",
-                padding:"14px 16px", marginBottom:8,
-                background:"var(--bg2)", border:`1px solid ${c}`,
-                borderRadius:"var(--radius)",
-                animation:`fadeUp 0.3s ease ${i*40}ms both`,
-              }}>
-                <input type="checkbox" checked={istAufgabeErledigt(a)} onChange={() => toggleAufgabeRow(a)}
-                       style={{ marginTop:3, cursor:"pointer", accentColor:"var(--accent)", flexShrink:0 }} />
-                <div style={{ flex:"1 1 200px", minWidth:0 }}>
-                  <div style={{ fontWeight:500, color:"var(--text)", wordBreak:"break-word" }}>{a.beschreibung}</div>
-                  <div style={{ display:"flex", gap:8, marginTop:4, flexWrap:"wrap" }}>
-                    {a.frist && <span style={{ fontSize:12, color:"var(--text3)" }}>📅 {a.frist}</span>}
-                    {a.frist_uhrzeit && <span style={{ fontSize:12, color:"var(--text3)" }}>🕒 {a.frist_uhrzeit}</span>}
-                    {tage !== null && (
-                      <Badge color={tage<0?"var(--red)":tage<=2?"var(--orange)":"var(--blue)"}>
-                        {tage<0?`${Math.abs(tage)}d überfällig`:tage===0?"Heute":`in ${tage}d`}
-                      </Badge>
-                    )}
-                    {a.prioritaet && a.prioritaet !== "normal" && (
-                      <Badge color={PRIO_C[a.prioritaet]||"var(--text3)"}>{a.prioritaet}</Badge>
-                    )}
-                  </div>
-                </div>
-                <div style={{ display:"flex", gap:8, flexWrap:"wrap", ...(detailMobile ? { flex:"1 1 100%" } : { marginLeft:"auto" }) }}>
-                  <Btn size="xs" variant="ghost" onClick={() => editAufgabe(a)}>Bearb.</Btn>
-                  <Btn size="xs" variant="danger" onClick={() => deleteAufgabeRow(a)}>✕</Btn>
-                </div>
-              </div>
-            );
-          })}
-
-          {/* Erledigte */}
-          {erledigt.length > 0 && (
-            <div style={{ marginTop:24 }}>
-              <div style={{ fontSize:12, color:"var(--text3)", textTransform:"uppercase",
-                            letterSpacing:"0.07em", marginBottom:10 }}>
-                Erledigt ({erledigt.length})
-              </div>
-              {erledigt.slice(0, 5).map((a, i) => (
-                <div key={a.id || i} style={{
-                  display:"flex", alignItems:"center", gap:12, flexWrap:"wrap",
-                  padding:"10px 16px", marginBottom:6,
-                  background:"var(--bg2)", border:"1px solid var(--border)",
-                  borderRadius:"var(--radius)", opacity:0.55,
-                }}>
-                  <input type="checkbox" checked onChange={() => toggleAufgabeRow(a)}
-                         style={{ cursor:"pointer", accentColor:"var(--green)" }} />
-                  <span style={{ textDecoration:"line-through", fontSize:13, color:"var(--text2)",
-                                 wordBreak:"break-word", flex:"1 1 160px", minWidth:0 }}>
-                    {a.beschreibung}
-                  </span>
-                  <span style={{ marginLeft:detailMobile ? 0 : "auto", fontSize:11, color:"var(--text3)" }}>
-                    {a.frist}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Rechts: Stammdaten */}
-        <div>
-          <Card style={{ marginBottom:16 }}>
-            <div style={{ fontFamily:"var(--font-head)", fontSize:16, marginBottom:14, color:"var(--accent)" }}>
-              Stammdaten
-            </div>
-            {[
-              ["E-Mail",    mandant?.email      || "—"],
-              ["Telefon",   mandant?.telefon    || "—"],
-              ["Branche",   mandant?.branche    || "—"],
-              ["Steuer-ID", mandant?.steuer_id  || "—"],
-              ["Umsatz",    `€${(mandant?.umsatz||0).toLocaleString("de")}`],
-            ].map(([label, value]) => (
-              <div key={label} style={{ display:"flex", justifyContent:"space-between",
-                                        padding:"6px 0", borderBottom:"1px solid var(--border)",
-                                        gap:10, flexWrap:"wrap" }}>
-                <span style={{ fontSize:12, color:"var(--text3)" }}>{label}</span>
-                <span style={{ fontSize:13, color:"var(--text)", fontWeight:500,
-                               maxWidth:detailMobile ? "100%" : 180, textAlign:detailMobile ? "left" : "right",
-                               wordBreak:"break-word", minWidth:0 }}>
-                  {value}
-                </span>
-              </div>
-            ))}
-          </Card>
-
-          {mandant?.notizen && (
-            <Card>
-              <div style={{ fontSize:11, color:"var(--text3)", marginBottom:8,
-                            textTransform:"uppercase", letterSpacing:"0.07em" }}>Notizen</div>
-              <div style={{ fontSize:13, color:"var(--text2)", lineHeight:1.7 }}>
-                {mandant.notizen}
-              </div>
-            </Card>
-          )}
-
-          <Card style={{ marginTop:16 }}>
-            <div style={{ fontSize:11, color:"var(--text3)", marginBottom:8,
-                          textTransform:"uppercase", letterSpacing:"0.07em" }}>Aufgaben</div>
-            <div style={{ fontSize:24, fontFamily:"var(--font-head)", color:"var(--accent)" }}>
-              {offen.length}
-            </div>
-            <div style={{ fontSize:12, color:"var(--text3)" }}>offen · {erledigt.length} erledigt</div>
-          </Card>
-        </div>
-      </div>
-
-      <AufgabeEditModal
-        open={Boolean(editAufgabeDetail)}
-        task={editAufgabeDetail}
-        mandantenListe={[name]}
-        allowMandantChange={false}
-        onClose={() => setEditAufgabeDetail(null)}
-        onSave={speichereDetailAufgabeEdit}
-      />
-    </div>
-  );
-}
-
-// ═══════════════════════════════════════════════════════════
 // RISIKO-DASHBOARD — Das Killer Feature
 // Mandanten-Risiko- & Umsatz-AI auf einen Blick
 // ═══════════════════════════════════════════════════════════
@@ -2640,6 +2237,7 @@ function RisikoDashboard({ kpis, heute, onEmail, onTab, onRefresh, isMobile = fa
 
 
 function AppInner() {
+  const location = useLocation();
   const [accessRev, setAccessRev] = useState(0);
   const [navSettings, setNavSettings] = useState(null);
   // accessRev: erneutes Lesen von Vorschau-Rolle (localStorage) nach View-as-Wechsel
@@ -2673,6 +2271,13 @@ function AppInner() {
     return clamp(Number.isFinite(stored) ? stored : fallback, initialMin, initialMax);
   });
   const [activeTab,    setActiveTab]    = useState("dashboard");
+  useEffect(() => {
+    const tab = location.state?.tab;
+    if (tab && hasNavTab(appRole, tab, navSettings)) {
+      setActiveTab(tab);
+      window.history.replaceState({}, document.title);
+    }
+  }, [location.state?.tab, appRole, navSettings]);
   const [kpis,         setKpis]         = useState([]);
   const [heute,        setHeute]        = useState([]);
   const [empfehlungen, setEmpfehlungen] = useState([]);
@@ -2919,6 +2524,18 @@ function AppInner() {
       case "mandanten":
         return (
           <div style={{ padding:contentPad, flex:1, overflowY:"auto" }}>
+            <div style={{
+              background:"color-mix(in srgb, var(--accent) 8%, transparent)",
+              border:"1px solid color-mix(in srgb, var(--accent) 22%, transparent)",
+              borderRadius:12, padding:"12px 16px", marginBottom:16, fontSize:13,
+              color:"var(--text2)", lineHeight:1.55,
+            }}>
+              <strong style={{ color:"var(--text)" }}>KI-Email & Mandantenportal:</strong>{" "}
+              Mandant in der Liste anklicken (Name) → in der Akte{" "}
+              <em style={{ color:"var(--accent)", fontStyle:"normal" }}>KI-Email</em> und{" "}
+              <em style={{ color:"var(--accent)", fontStyle:"normal" }}>Mandantenportal</em> rechts.
+              Portal-URL auch unter Einstellungen → Mandanten-Portal.
+            </div>
             {selectedName && (
               <div style={{ marginBottom:20 }}>
                 <MandantFormPanel
@@ -3599,7 +3216,7 @@ export default function App() {
                   )
                 }
               />
-              <Route path="/mandant/:name" element={<RequireSession><MandantDetailPage /></RequireSession>} />
+              <Route path="/mandant/:name" element={<RequireSession><MandantDetail /></RequireSession>} />
               <Route
                 path="/admin/users"
                 element={<RequireSession><RequireRole roles={["owner", "admin"]}><AdminUsers /></RequireRole></RequireSession>}

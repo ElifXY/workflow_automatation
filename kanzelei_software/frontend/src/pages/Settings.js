@@ -452,8 +452,40 @@ const WorkflowTab = ({s, save}) => {
 // 3. MANDANTEN-PORTAL
 // ═══════════════════════════════════════════════════════════
 
-const PortalTab = ({s, save}) => (
+const PortalTab = ({s, save}) => {
+  const portalUrl = typeof window !== "undefined"
+    ? `${window.location.origin}/portal`
+    : "/portal";
+
+  return (
   <div>
+    <div style={{ background:"var(--bg3)", border:`1px solid var(--border)`,
+      borderRadius:14, padding:"14px 18px", marginBottom:20 }}>
+      <div style={{ fontSize:11, color:"var(--text3)", textTransform:"uppercase",
+        letterSpacing:"0.07em", marginBottom:8 }}>
+        Portal-Adresse für Mandanten
+      </div>
+      <code style={{
+        display:"block", fontSize:13, color:"var(--accent)", wordBreak:"break-all",
+        marginBottom:12, padding:"10px 12px", background:"var(--bg)",
+        borderRadius:8, border:"1px solid var(--border2)",
+      }}>
+        {portalUrl}
+      </code>
+      <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:10 }}>
+        <Btn size="sm" variant="ghost" onClick={() => navigator.clipboard.writeText(portalUrl)}>
+          URL kopieren
+        </Btn>
+        <Btn size="sm" variant="subtle" onClick={() => window.open(portalUrl, "_blank", "noopener")}>
+          Portal öffnen
+        </Btn>
+      </div>
+      <div style={{ fontSize:12, color:"var(--text3)", lineHeight:1.55 }}>
+        Persönliche Zugangslinks:{" "}
+        <strong style={{ color:"var(--text2)" }}>Mandanten → Mandant öffnen → Mandantenportal</strong>
+      </div>
+    </div>
+
     <div style={{background:"linear-gradient(135deg, color-mix(in srgb, var(--blue) 8%, transparent), color-mix(in srgb, var(--purple) 4%, transparent))",
       border:"1px solid color-mix(in srgb, var(--blue) 22%, transparent)",borderRadius:14,padding:"14px 18px",marginBottom:20}}>
       <div style={{fontWeight:600,color:"var(--blue)",fontSize:14,marginBottom:4}}>
@@ -516,7 +548,8 @@ const PortalTab = ({s, save}) => (
       </Row>
     </div>
   </div>
-);
+  );
+};
 
 // ═══════════════════════════════════════════════════════════
 // 4. MONETARISIERUNG
@@ -1262,7 +1295,7 @@ const SchnittstellenTab = ({s, save}) => {
 
       <Row label="API Rate Limit" description="Max. Anfragen pro Minute an Kanzlei AI API">
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
-          <input type="number" defaultValue={s.api_rate_limit_pro_minute||60} min={10} max={1000}
+          <input type="number" defaultValue={s.api_rate_limit_pro_minute||300} min={10} max={1000}
             onBlur={e=>save("api_rate_limit_pro_minute",parseInt(e.target.value))}
             style={{width:70,background:"var(--bg)",border:`1px solid var(--border2)`,borderRadius:8,
               color:"var(--text)",padding:"7px 10px",fontSize:14,textAlign:"center",

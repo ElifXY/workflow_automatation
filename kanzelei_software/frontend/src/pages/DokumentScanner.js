@@ -399,50 +399,57 @@ const DokumentKarte = ({dok,mandanten,onSpeichern,onAblehnen}) => {
 };
 
 // ─── Datei-Vorschau (in der App, mit Zurück) ───────────────
-const DateiVorschauModal = ({ preview, onClose }) => {
+const DateiVorschauAnsicht = ({ preview, loading, onClose }) => {
   useEffect(() => {
-    if (!preview) return undefined;
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [preview, onClose]);
+  }, [onClose]);
 
-  if (!preview) return null;
-
-  const ct = (preview.contentType || "").toLowerCase();
+  const ct = (preview?.contentType || "").toLowerCase();
   const isPdf = ct.includes("pdf");
   const isImage = ct.startsWith("image/");
 
   return (
-    <div
-      style={{
-        position: "fixed", inset: 0, zIndex: 10000,
-        background: "rgba(0,0,0,0.88)", display: "flex", flexDirection: "column",
-      }}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
-    >
+    <div style={{
+      background: "var(--bg2)", border: "1px solid var(--border)",
+      borderRadius: 14, overflow: "hidden", marginBottom: 24,
+    }}>
       <div style={{
         display: "flex", alignItems: "center", gap: 12, padding: "12px 16px",
         background: "var(--bg2)", borderBottom: "1px solid var(--border)", flexShrink: 0,
       }}>
-        <Btn size="sm" variant="primary" onClick={onClose}>← Zurück</Btn>
+        <Btn size="md" variant="primary" onClick={onClose}>← Zurück zur Liste</Btn>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontWeight: 600, color: "var(--text)", fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {preview.name}
+            {preview?.name || "Dokument"}
           </div>
-          <div style={{ fontSize: 11, color: "var(--text3)" }}>Vorschau — Esc oder Zurück schließt</div>
+          <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 2 }}>
+            Sie bleiben im Dokument-Scanner
+          </div>
         </div>
         <Btn size="sm" variant="ghost" onClick={() => window.open(preview.url, "_blank", "noopener")}>
           Neuer Tab
         </Btn>
       </div>
-      <div style={{ flex: 1, minHeight: 0, padding: 12, display: "flex", justifyContent: "center" }}>
-        {isImage ? (
-          <img src={preview.url} alt={preview.name} style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: 8 }} />
-        ) : isPdf ? (
-          <iframe title={preview.name} src={preview.url} style={{ width: "100%", height: "100%", border: "none", borderRadius: 8, background: "#fff" }} />
+      <div style={{
+        minHeight: "min(72vh, 720px)", background: "var(--bg)",
+        display: "flex", alignItems: "center", justifyContent: "center", padding: 12,
+      }}>
+        {loading ? (
+          <div style={{ color: "var(--text3)", fontSize: 14 }}>Datei wird geladen…</div>
+        ) : preview?.url ? (
+          isImage ? (
+            <img src={preview.url} alt={preview.name}
+              style={{ maxWidth: "100%", maxHeight: "min(70vh, 680px)", objectFit: "contain", borderRadius: 8 }} />
+          ) : (
+            <embed src={preview.url}
+              type={isPdf ? "application/pdf" : (preview.contentType || "application/octet-stream")}
+              title={preview.name}
+              style={{ width: "100%", height: "min(70vh, 680px)", border: "none", borderRadius: 8, background: "#fff" }} />
+          )
         ) : (
-          <iframe title={preview.name} src={preview.url} style={{ width: "100%", height: "100%", border: "none", borderRadius: 8, background: "#fff" }} />
+          <div style={{ color: "var(--text3)" }}>Vorschau nicht verfügbar.</div>
         )}
       </div>
     </div>
@@ -623,6 +630,7 @@ export default function DokumentScanner({ tabActive = true }) {
   const [archivBusy, setArchivBusy] = useState(false);
   const [toast,      setToast]      = useState(null);
   const [filePreview, setFilePreview] = useState(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
   const fileRef = useRef(null);
   const archivSucheRef = useRef(archivSuche);
   archivSucheRef.current = archivSuche;
@@ -646,6 +654,8 @@ export default function DokumentScanner({ tabActive = true }) {
   }, []);
 
   const oeffneDateiVorschau = useCallback(async (dokId, dateiname) => {
+    setPreviewLoading(true);
+    setFilePreview({ name: dateiname || "Dokument", url: null, contentType: null });
     try {
       const { url, contentType } = await dokumentDateiBlobUrl(dokId);
       setFilePreview((prev) => {
@@ -653,13 +663,12 @@ export default function DokumentScanner({ tabActive = true }) {
         return { url, contentType, name: dateiname || "Dokument" };
       });
     } catch (e) {
+      setFilePreview(null);
       showToast(e.message, "error");
+    } finally {
+      setPreviewLoading(false);
     }
   }, [showToast]);
-
-  useEffect(() => () => {
-    if (filePreview?.url) URL.revokeObjectURL(filePreview.url);
-  }, [filePreview?.url]);
 
   const ladeArchiv = useCallback(async (silent = false) => {
     setArchivLaden(true);
@@ -821,6 +830,11 @@ export default function DokumentScanner({ tabActive = true }) {
       </div>
 
       <div style={{padding:"28px 32px"}}>
+        {filePreview && (
+          <DateiVorschauAnsicht preview={filePreview} loading={previewLoading} onClose={schliesseVorschau} />
+        )}
+        {!filePreview && (
+        <>
         <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:16,marginBottom:24}}>
           {[{l:"Zu prüfen",v:dokumente.length,c:dokumente.length>0?"var(--orange)":"var(--text3)"},{l:"Im Archiv",v:archivListe.length,c:"var(--green)"},{l:"Mandanten",v:mandanten.length,c:"var(--blue)"}].map((s,i)=>(
             <div key={i} style={{background:"var(--bg2)",border:`1px solid var(--border)`,borderRadius:12,padding:"16px 18px"}}>
@@ -972,8 +986,9 @@ export default function DokumentScanner({ tabActive = true }) {
             <span style={{fontSize:12,marginTop:8,display:"block"}}>Die KI erkennt u. a. Rechnungen, Steuer- und Rentenbescheide, Verträge, Lohn, Versicherung, Vollmachten.</span>
           </div>
         )}
+        </>
+        )}
       </div>
-      <DateiVorschauModal preview={filePreview} onClose={schliesseVorschau} />
     </div>
   );
 }

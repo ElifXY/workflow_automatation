@@ -7,6 +7,7 @@
 // ============================================================
 
 import { useState, useEffect, useCallback } from "react";
+import DecimalInput from "../components/DecimalInput";
 
 const BASE = process.env.REACT_APP_API_URL || "/api";
 const api  = async (url, opts={}) => {
@@ -116,8 +117,8 @@ const RegelEditor = ({ onSave, verfuegbar }) => {
           </select>
           {verfuegbar?.trigger?.[trigger.typ]?.parameter && (
             <div style={{display:"flex",gap:6,alignItems:"center"}}>
-              <input type="number" value={trigger.parameter || ""}
-                onChange={e=>setTrigger(t=>({...t,parameter:parseInt(e.target.value)||0}))}
+              <DecimalInput integer value={trigger.parameter ?? 0} emptyValue={7}
+                onChange={v=>setTrigger(t=>({...t,parameter:v}))}
                 style={{...inp(),width:80}} />
               <span style={{fontSize:12,color:"var(--text3)"}}>
                 {trigger.typ.includes("tage")?"Tage":""}
@@ -549,8 +550,8 @@ const LohnTab = () => {
             </div>
             <div>
               <div style={{fontSize:11,color:"var(--text3)",marginBottom:4}}>Brutto/Monat (€) *</div>
-              <input type="number" value={form.brutto_monat}
-                onChange={e=>setForm(f=>({...f,brutto_monat:parseFloat(e.target.value)||0}))}
+              <DecimalInput value={form.brutto_monat} emptyValue={0}
+                onChange={v=>setForm(f=>({...f,brutto_monat:v}))}
                 style={inp()}/>
             </div>
             <div>
@@ -563,8 +564,8 @@ const LohnTab = () => {
             </div>
             <div>
               <div style={{fontSize:11,color:"var(--text3)",marginBottom:4}}>Wochenstunden</div>
-              <input type="number" value={form.wochenstunden}
-                onChange={e=>setForm(f=>({...f,wochenstunden:parseFloat(e.target.value)||40}))}
+              <DecimalInput value={form.wochenstunden} emptyValue={40}
+                onChange={v=>setForm(f=>({...f,wochenstunden:v}))}
                 style={inp()}/>
             </div>
           </div>

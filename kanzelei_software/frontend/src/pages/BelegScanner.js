@@ -10,6 +10,7 @@
 // ============================================================
 
 import { useState, useRef, useCallback, useEffect } from "react";
+import DecimalInput from "../components/DecimalInput";
 
 const BASE = process.env.REACT_APP_API_URL || "/api";
 
@@ -407,13 +408,25 @@ const BuchungsKarte = ({ beleg, mandanten, gebucht, defaultMandant = "", onBesta
               <div key={f.k}>
                 <div style={{ fontSize: 10, color: "var(--text3)", textTransform: "uppercase",
                                letterSpacing: "0.06em", marginBottom: 3 }}>{f.l}</div>
-                <input type={f.type} value={form[f.k] || ""}
-                       onChange={e => set(f.k, f.type === "number" ? parseFloat(e.target.value) || 0 : e.target.value)}
-                       style={{
-                         width: "100%", background: "var(--bg)", border: `1px solid var(--border2)`,
-                         borderRadius: 8, color: "var(--text)", padding: "7px 10px",
-                         fontSize: 13, outline: "none", fontFamily: "'DM Sans', sans-serif",
-                       }} />
+                {f.type === "number" ? (
+                  <DecimalInput
+                    value={form[f.k] ?? 0}
+                    onChange={(v) => set(f.k, v)}
+                    style={{
+                      width: "100%", background: "var(--bg)", border: `1px solid var(--border2)`,
+                      borderRadius: 8, color: "var(--text)", padding: "7px 10px",
+                      fontSize: 13, outline: "none", fontFamily: "'DM Sans', sans-serif",
+                    }}
+                  />
+                ) : (
+                  <input type={f.type} value={form[f.k] || ""}
+                         onChange={e => set(f.k, e.target.value)}
+                         style={{
+                           width: "100%", background: "var(--bg)", border: `1px solid var(--border2)`,
+                           borderRadius: 8, color: "var(--text)", padding: "7px 10px",
+                           fontSize: 13, outline: "none", fontFamily: "'DM Sans', sans-serif",
+                         }} />
+                )}
               </div>
             ))}
             <div>

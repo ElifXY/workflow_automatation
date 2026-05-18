@@ -9,6 +9,7 @@
 // ============================================================
 
 import { useState, useEffect, useCallback } from "react";
+import DecimalInput from "../components/DecimalInput";
 
 const BASE = process.env.REACT_APP_API_URL || "/api";
 const api  = async (url, opts={}) => {
@@ -303,9 +304,8 @@ const AutopilotTab = () => {
           <select value={steuerart} onChange={e=>setSteuerart(e.target.value)} style={inp()}>
             {["ESt","USt","GewSt","KSt"].map(s=><option key={s} value={s}>{s}</option>)}
           </select>
-          <input type="number" value={jahr}
-            onChange={e=>setJahr(parseInt(e.target.value))}
-            min={2020} max={2026} style={inp({width:90})} />
+          <DecimalInput integer value={jahr} min={2020} max={2026} emptyValue={new Date().getFullYear()}
+            onChange={setJahr} style={inp({width:90})} />
         </div>
         <Btn onClick={starte} loading={processing} variant="primary" size="lg">
           🤖 Steuerfall automatisch verarbeiten

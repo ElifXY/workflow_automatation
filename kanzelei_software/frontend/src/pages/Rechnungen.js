@@ -6,6 +6,42 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useContentLayoutWidth } from "../useContentLayoutWidth";
+import DecimalInput from "../components/DecimalInput";
+
+const DECIMAL_TYPING_RE = /^-?\d*[.,]?\d*$/;
+
+const parsePosNumber = (raw, fallback = 0) => {
+  const s = String(raw ?? "").trim().replace(",", ".");
+  if (s === "" || s === "-") return fallback;
+  const n = parseFloat(s);
+  return Number.isFinite(n) ? n : fallback;
+};
+
+const normalizeTyping = (raw) => {
+  if (raw === "" || raw === "-" || raw === "," || raw === ".") return raw;
+  if (/^0[.,]\d*$/.test(raw)) return raw;
+  if (/^0+[1-9]/.test(raw)) return raw.replace(/^0+/, "");
+  return raw;
+};
+
+const PosNumberInput = ({ value, onChange, placeholder, style }) => (
+  <input
+    type="text"
+    inputMode="decimal"
+    placeholder={placeholder}
+    value={value ?? ""}
+    style={style}
+    onFocus={(e) => {
+      requestAnimationFrame(() => { try { e.target.select(); } catch { /* ignore */ } });
+    }}
+    onChange={(e) => {
+      let v = e.target.value;
+      if (!DECIMAL_TYPING_RE.test(v)) return;
+      v = normalizeTyping(v);
+      onChange(v);
+    }}
+  />
+);
 
 const BASE   = process.env.REACT_APP_API_URL || "/api";
 const apiFetch = async (url, opts={}) => {
@@ -71,14 +107,14 @@ const STBVV_POSITIONEN_LISTE = [
 function NeueRechnungForm({ mandanten, onErstellt, onClose, compact = false }) {
   const [mandant, setMandant]     = useState("");
   const [positionen, setPositionen] = useState([{
-    bezeichnung:"", menge:1, einzelpreis:0, mwst_satz:19, einheit:"pauschal"
+    bezeichnung:"", menge:"1", einzelpreis:"", mwst_satz:19, einheit:"pauschal"
   }]);
   const [faelligTage, setFaelligTage] = useState(14);
   const [notiz, setNotiz]         = useState("");
   const [loading, setLoading]     = useState(false);
 
   const addPos = () => setPositionen(p => [...p, {
-    bezeichnung:"",menge:1,einzelpreis:0,mwst_satz:19,einheit:"pauschal"
+    bezeichnung:"", menge:"1", einzelpreis:"", mwst_satz:19, einheit:"pauschal"
   }]);
 
   const updatePos = (i, field, val) => setPositionen(p =>
@@ -87,24 +123,34 @@ function NeueRechnungForm({ mandanten, onErstellt, onClose, compact = false }) {
   const removePos = (i) => setPositionen(p => p.filter((_,idx)=>idx!==i));
 
   const addStbvv = (pos) => setPositionen(p => [...p, {
-    bezeichnung: pos.label, menge:1, einzelpreis:pos.preis,
-    mwst_satz:19, einheit:"pauschal",
+    bezeichnung: pos.label,
+    menge: "1",
+    einzelpreis: pos.preis > 0 ? String(pos.preis) : "",
+    mwst_satz: 19,
+    einheit: "pauschal",
   }]);
 
-  const gesamt = positionen.reduce((s,p) => {
-    const n = p.menge*p.einzelpreis;
-    return s + n + n*p.mwst_satz/100;
+  const gesamt = positionen.reduce((s, p) => {
+    const menge = parsePosNumber(p.menge, 1);
+    const preis = parsePosNumber(p.einzelpreis, 0);
+    const n = menge * preis;
+    return s + n + n * (p.mwst_satz || 0) / 100;
   }, 0);
 
   const submit = async () => {
-    if(!mandant || positionen.some(p=>!p.bezeichnung||p.einzelpreis<=0)) {
+    const positionenApi = positionen.map((p) => ({
+      ...p,
+      menge: parsePosNumber(p.menge, 1),
+      einzelpreis: parsePosNumber(p.einzelpreis, 0),
+    }));
+    if (!mandant || positionenApi.some((p) => !p.bezeichnung || p.einzelpreis <= 0)) {
       alert("Bitte alle Felder ausfüllen"); return;
     }
     setLoading(true);
     try {
       const r = await apiFetch("/rechnungen", {
         method:"POST",
-        body:JSON.stringify({mandant, positionen, faellig_tage:faelligTage, notiz}),
+        body:JSON.stringify({ mandant, positionen: positionenApi, faellig_tage: faelligTage, notiz }),
       });
       onErstellt(r);
     } catch(e){alert(e.message);}
@@ -143,8 +189,8 @@ function NeueRechnungForm({ mandanten, onErstellt, onClose, compact = false }) {
             </div>
             <div>
               <div style={{fontSize:11,color:"var(--text3)",marginBottom:4,textTransform:"uppercase",letterSpacing:"0.06em"}}>Zahlungsziel (Tage)</div>
-              <input type="number" value={faelligTage} min={1} max={90}
-                onChange={e=>setFaelligTage(parseInt(e.target.value))}
+              <DecimalInput integer value={faelligTage} min={1} max={90} emptyValue={14}
+                onChange={setFaelligTage}
                 style={{...inp(),width:"100%"}} />
             </div>
           </div>
@@ -177,11 +223,11 @@ function NeueRechnungForm({ mandanten, onErstellt, onClose, compact = false }) {
                 <input placeholder="Bezeichnung" value={pos.bezeichnung}
                   onChange={e=>updatePos(i,"bezeichnung",e.target.value)}
                   style={{...inp(),width:compact?"100%":undefined}} />
-                <input type="number" placeholder="Menge" value={pos.menge} min={0.5} step={0.5}
-                  onChange={e=>updatePos(i,"menge",parseFloat(e.target.value)||1)}
+                <PosNumberInput placeholder="Menge" value={pos.menge}
+                  onChange={(v) => updatePos(i, "menge", v)}
                   style={{...inp(),width:compact?"100%":undefined}} />
-                <input type="number" placeholder="€/Einheit" value={pos.einzelpreis} min={0}
-                  onChange={e=>updatePos(i,"einzelpreis",parseFloat(e.target.value)||0)}
+                <PosNumberInput placeholder="€/Einheit" value={pos.einzelpreis}
+                  onChange={(v) => updatePos(i, "einzelpreis", v)}
                   style={{...inp(),width:compact?"100%":undefined}} />
                 <select value={pos.mwst_satz} onChange={e=>updatePos(i,"mwst_satz",parseInt(e.target.value))}
                   style={{...inp(),width:compact?"100%":undefined}}>

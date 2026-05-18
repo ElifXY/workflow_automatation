@@ -527,6 +527,122 @@ const DokumenteSection = ({ name, dokumente, onRefresh }) => {
 };
 
 // ═══════════════════════════════════════════════════════════
+// PORTAL SECTION
+// ═══════════════════════════════════════════════════════════
+
+const PORTAL_ADMIN_KEY_STORAGE = "kanzlei_portal_admin_key";
+
+const PortalSection = ({ name, showToast }) => {
+  const portalBasis = typeof window !== "undefined"
+    ? `${window.location.origin}/portal`
+    : "/portal";
+  const [adminKey, setAdminKey] = useState(
+    () => (typeof sessionStorage !== "undefined"
+      ? sessionStorage.getItem(PORTAL_ADMIN_KEY_STORAGE) || ""
+      : "")
+  );
+  const [lastLink, setLastLink] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const speichereKey = (key) => {
+    const k = (key || "").trim();
+    if (!k) return;
+    setAdminKey(k);
+    try { sessionStorage.setItem(PORTAL_ADMIN_KEY_STORAGE, k); } catch { /* ignore */ }
+  };
+
+  const generiereLink = async () => {
+    let key = adminKey.trim();
+    if (!key) {
+      const eingegeben = window.prompt(
+        "Portal-Admin-Key (in .env: PORTAL_ADMIN_KEY, Standard oft „kanzlei-admin-2024“):",
+        ""
+      );
+      if (!eingegeben) return;
+      key = eingegeben.trim();
+      speichereKey(key);
+    }
+    setLoading(true);
+    try {
+      const d = await generierePortalToken(name, key);
+      setLastLink(d.link || "");
+      if (d.link) await navigator.clipboard.writeText(d.link);
+      showToast("✓ Zugangslink kopiert (7 Tage gültig)", "success");
+    } catch (e) {
+      showToast(e.message || "Link konnte nicht erstellt werden", "error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Card>
+      <SectionTitle>Mandantenportal</SectionTitle>
+      <div style={{ fontSize: 12, color: "var(--text2)", lineHeight: 1.6, marginBottom: 12 }}>
+        Separate Oberfläche für Ihre Mandanten: Dokumente hochladen, Fragen beantworten,
+        Unterschrift. Aktivierung unter <strong style={{ color: "var(--text)" }}>Einstellungen → Mandanten-Portal</strong>.
+      </div>
+      <div>
+        <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 4,
+          textTransform: "uppercase", letterSpacing: "0.06em" }}>
+          Portal-Adresse (allgemein)
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+          <code style={{
+            flex: "1 1 160px", fontSize: 12, color: "var(--accent)", wordBreak: "break-all",
+            background: "var(--bg)", padding: "8px 10px", borderRadius: 8,
+            border: "1px solid var(--border)",
+          }}>
+            {portalBasis}
+          </code>
+          <Btn size="xs" variant="ghost" onClick={() => {
+            navigator.clipboard.writeText(portalBasis);
+            showToast("Portal-URL kopiert", "success");
+          }}>
+            URL kopieren
+          </Btn>
+          <Btn size="xs" variant="subtle" onClick={() => window.open(portalBasis, "_blank", "noopener")}>
+            Portal öffnen
+          </Btn>
+        </div>
+      </div>
+      <div style={{ marginBottom: 10 }}>
+        <div>
+          <div>
+            <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 4 }}>
+              Admin-Key (einmalig, wird lokal gespeichert)
+            </div>
+            <Input
+              placeholder="PORTAL_ADMIN_KEY aus .env"
+              value={adminKey}
+              onChange={setAdminKey}
+              type="password"
+            />
+          </div>
+        </div>
+      </div>
+      <Btn variant="primary" size="sm" loading={loading} onClick={generiereLink}
+           style={{ width: "100%", justifyContent: "center", marginBottom: lastLink ? 10 : 0 }}>
+        🔗 Persönlichen Zugangslink für „{name}" erstellen
+      </Btn>
+      {lastLink && (
+        <div style={{
+          fontSize: 11, color: "var(--text3)", wordBreak: "break-all",
+          background: "var(--bg)", padding: "8px 10px", borderRadius: 8,
+          border: "1px solid var(--border)",
+        }}>
+          <div style={{ marginBottom: 6 }}>Letzter Link:</div>
+          <a href={lastLink} target="_blank" rel="noopener noreferrer"
+             style={{ color: "var(--accent)", fontSize: 12 }}>
+            {lastLink}
+          </a>
+        </div>
+      )}
+    </Card>
+  );
+};
+
+// ═══════════════════════════════════════════════════════════
 // EMAIL SECTION
 // ═══════════════════════════════════════════════════════════
 
@@ -582,6 +698,10 @@ const EmailSection = ({ name, email }) => {
   return (
     <Card>
       <SectionTitle>KI-Email</SectionTitle>
+      <div style={{ fontSize: 12, color: "var(--text3)", lineHeight: 1.55, marginBottom: 12 }}>
+        Text wird aus Mandanten-Status erstellt: offene Aufgaben, fehlende Dokumente,
+        Tage ohne Antwort und Risiko-Score.
+      </div>
 
       {!email && (
         <div style={{
@@ -733,7 +853,7 @@ const SimulationSection = ({ name }) => {
         {felder.map(f => (
           <div key={f.key}>
             <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 4 }}>{f.label}</div>
-            <Input placeholder="0" value={form[f.key]} type="number"
+            <Input placeholder="0" value={form[f.key]}
                    onChange={v => setForm(p => ({ ...p, [f.key]: v }))} />
           </div>
         ))}
@@ -1051,7 +1171,9 @@ export default function MandantDetail() {
       <div style={{ color: "var(--red)", fontSize: 18, marginBottom: 12 }}>
         Mandant nicht gefunden: „{name}"
       </div>
-      <Btn onClick={() => navigate("/")} variant="ghost">← Zurück zum Dashboard</Btn>
+      <Btn onClick={() => navigate("/", { state: { tab: "mandanten" } })} variant="ghost">
+        ← Zurück zu Mandanten
+      </Btn>
     </div>
   );
 
@@ -1082,7 +1204,9 @@ export default function MandantDetail() {
         padding: "20px 36px", display: "flex", alignItems: "center", gap: 16,
         position: "sticky", top: 0, zIndex: 100,
       }}>
-        <Btn onClick={() => navigate("/")} variant="ghost" size="sm">← Dashboard</Btn>
+        <Btn onClick={() => navigate("/", { state: { tab: "mandanten" } })} variant="ghost" size="sm">
+          ← Mandanten
+        </Btn>
 
         <div style={{ flex: 1 }}>
           <div style={{
@@ -1242,32 +1366,7 @@ export default function MandantDetail() {
               </div>
             </Card>
 
-            {/* Portal Token */}
-            <Card>
-              <SectionTitle>Mandantenportal</SectionTitle>
-              <div style={{ fontSize: 12, color: "var(--text3)", marginBottom: 12 }}>
-                Zugangslink für den Mandanten generieren
-              </div>
-              {mandant.email ? (
-                <Btn variant="subtle" size="sm"
-                     onClick={async () => {
-                       const key = prompt("Admin-Key eingeben:");
-                       if (!key) return;
-                       try {
-                         const d = await generierePortalToken(name, key);
-                         await navigator.clipboard.writeText(d.link);
-                         showToast("✓ Link in Zwischenablage kopiert", "success");
-                       } catch (e) { showToast(e.message, "error"); }
-                     }}
-                     style={{ width: "100%", justifyContent: "center" }}>
-                  🔗 Portal-Link generieren & kopieren
-                </Btn>
-              ) : (
-                <div style={{ fontSize: 12, color: "var(--orange)" }}>
-                  ⚠ E-Mail-Adresse fehlt — bitte ergänzen
-                </div>
-              )}
-            </Card>
+            <PortalSection name={name} showToast={showToast} />
 
           </div>
         </div>

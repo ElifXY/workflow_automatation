@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import PermissionGate, { hasRoleReal } from "../components/PermissionGate";
+import DecimalInput from "../components/DecimalInput";
 
 const API_ROOT = process.env.REACT_APP_API_URL || "/api";
 
@@ -259,12 +260,13 @@ export default function TeamUsers() {
             </div>
             <div>
               <label style={{ display: "block", fontSize: 11, color: "var(--text2)", marginBottom: 6 }}>Gültig (Std.)</label>
-              <input
+              <DecimalInput
+                integer
                 value={inviteHours}
-                onChange={(e) => setInviteHours(Math.max(1, Math.min(720, Number(e.target.value) || 168)))}
-                type="number"
                 min={1}
                 max={720}
+                emptyValue={168}
+                onChange={setInviteHours}
                 style={inputStyle}
               />
             </div>
