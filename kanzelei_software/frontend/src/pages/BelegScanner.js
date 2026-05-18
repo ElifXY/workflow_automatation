@@ -80,6 +80,57 @@ const KATEGORIEN = [
   "einnahme", "einnahme_7", "sonstiges",
 ];
 
+const SKR03_FALLBACK = {
+  buero: { soll: "4930", haben: "1200" },
+  porto: { soll: "4910", haben: "1200" },
+  telefon: { soll: "4920", haben: "1200" },
+  software: { soll: "0680", haben: "1200" },
+  hardware: { soll: "0680", haben: "1200" },
+  miete: { soll: "4210", haben: "1200" },
+  strom: { soll: "4240", haben: "1200" },
+  reise: { soll: "4670", haben: "1200" },
+  bewirtung: { soll: "4650", haben: "1200" },
+  kfz: { soll: "4520", haben: "1200" },
+  benzin: { soll: "4530", haben: "1200" },
+  personal: { soll: "4120", haben: "1700" },
+  versicherung: { soll: "4360", haben: "1200" },
+  werbung: { soll: "4600", haben: "1200" },
+  weiterbildung: { soll: "4900", haben: "1200" },
+  material: { soll: "3200", haben: "1200" },
+  einnahme: { soll: "1200", haben: "8400" },
+  einnahme_7: { soll: "1200", haben: "8300" },
+  sonstiges: { soll: "4980", haben: "1200" },
+};
+
+function skr03Anzeige(beleg) {
+  const kat = (beleg.kategorie || "sonstiges").toLowerCase();
+  const fb = SKR03_FALLBACK[kat] || SKR03_FALLBACK.sonstiges;
+  return {
+    soll: beleg.skr03_soll || fb.soll,
+    haben: beleg.skr03_haben || fb.haben,
+  };
+}
+
+function korrekturPayload(form) {
+  const p = {};
+  const keys = [
+    "mandant", "betrag_brutto", "betrag_netto", "mwst_betrag", "mwst_satz",
+    "datum", "lieferant", "rechnungsnummer", "kategorie",
+    "skr03_soll", "skr03_haben", "buchungstext", "vorsteuer_abzugsfaehig",
+  ];
+  for (const k of keys) {
+    if (form[k] === undefined || form[k] === null || form[k] === "") continue;
+    if (["betrag_brutto", "betrag_netto", "mwst_betrag"].includes(k)) {
+      p[k] = Number(form[k]);
+    } else if (k === "mwst_satz") {
+      p[k] = parseInt(form[k], 10);
+    } else {
+      p[k] = form[k];
+    }
+  }
+  return p;
+}
+
 // ═══════════════════════════════════════════════════════════
 // UPLOAD ZONE
 // ═══════════════════════════════════════════════════════════
@@ -148,19 +199,30 @@ const UploadZone = ({ onDatei, loading }) => {
 // BUCHUNGS-VORSCHLAG KARTE
 // ═══════════════════════════════════════════════════════════
 
-const BuchungsKarte = ({ beleg, mandanten, onBestaetigen, onAblehnen, onKorrigieren }) => {
+const BuchungsKarte = ({ beleg, mandanten, gebucht, defaultMandant = "", onBestaetigen, onAblehnen, onLoeschen }) => {
   const [edit, setEdit]     = useState(false);
   const [form, setForm]     = useState({ ...beleg });
   const [saving, setSaving] = useState(false);
 
+  useEffect(() => {
+    setForm({
+      ...beleg,
+      mandant: beleg.mandant || defaultMandant || "",
+    });
+    setEdit(false);
+  }, [beleg.beleg_id, beleg.id, beleg.status, beleg.mandant, beleg.bestaetigt_am, defaultMandant]);
+
   const score       = beleg.vertrauens_score || 0;
   const scoreColor  = score >= 0.8 ? "var(--green)" : score >= 0.6 ? "var(--orange)" : "var(--red)";
   const scoreLabel  = score >= 0.8 ? "Sicher" : score >= 0.6 ? "Prüfen" : "Unsicher";
+  const skr = skr03Anzeige(beleg);
 
-  const handleBestaetigen = async () => {
+  const handleSpeichern = async () => {
+    if (!gebucht && !form.mandant) return;
     setSaving(true);
     try {
-      await onBestaetigen(readBelegId(beleg), edit ? form : null);
+      await onBestaetigen(readBelegId(beleg), korrekturPayload(form));
+      if (!gebucht) setEdit(false);
     } finally { setSaving(false); }
   };
 
@@ -187,14 +249,22 @@ const BuchungsKarte = ({ beleg, mandanten, onBestaetigen, onAblehnen, onKorrigie
             {beleg.dateiname}
           </div>
           <div style={{ fontSize: 12, color: "var(--text3)", marginTop: 2 }}>
-            {beleg.lieferant || "Unbekannter Lieferant"} · {beleg.datum}
+            {gebucht && beleg.mandant ? (
+              <span style={{ color: "var(--accent)", fontWeight: 600 }}>{beleg.mandant}</span>
+            ) : null}
+            {gebucht && beleg.mandant ? " · " : ""}
+            {beleg.lieferant || "Unbekannter Lieferant"} · {beleg.datum || "—"}
           </div>
         </div>
         <div style={{ textAlign: "right", flexShrink: 0 }}>
           <div style={{ fontSize: 20, fontWeight: 700, color: "var(--accent)" }}>
             €{Number(beleg.betrag_brutto || 0).toFixed(2)}
           </div>
-          <Badge color={scoreColor}>{scoreLabel} {Math.round(score * 100)}%</Badge>
+          {gebucht ? (
+            <Badge color="var(--green)">✓ Gebucht</Badge>
+          ) : (
+            <Badge color={scoreColor}>{scoreLabel} {Math.round(score * 100)}%</Badge>
+          )}
         </div>
       </div>
 
@@ -204,8 +274,8 @@ const BuchungsKarte = ({ beleg, mandanten, onBestaetigen, onAblehnen, onKorrigie
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 12 }}>
             {[
               { l: "Kategorie",  v: beleg.kategorie_name || beleg.kategorie },
-              { l: "SKR03 Soll", v: beleg.skr03_soll || "—" },
-              { l: "SKR03 Haben",v: beleg.skr03_haben || "—" },
+              { l: "SKR03 Soll", v: skr.soll },
+              { l: "SKR03 Haben", v: skr.haben },
               { l: "Netto",      v: `€${Number(beleg.betrag_netto || 0).toFixed(2)}` },
               { l: `MwSt ${beleg.mwst_satz || 19}%`, v: `€${Number(beleg.mwst_betrag || 0).toFixed(2)}` },
               { l: "Vorsteuer",  v: beleg.vorsteuer_abzugsfaehig ? "✓ Abzugsfähig" : "✗ Nicht abzugsfähig",
@@ -247,7 +317,7 @@ const BuchungsKarte = ({ beleg, mandanten, onBestaetigen, onAblehnen, onKorrigie
               ⚠ {beleg.notiz}
             </div>
           )}
-          {Array.isArray(beleg.unsichere_felder) && beleg.unsichere_felder.length > 0 && (
+          {!gebucht && Array.isArray(beleg.unsichere_felder) && beleg.unsichere_felder.length > 0 && (
             <div style={{
               background: "color-mix(in srgb, var(--orange) 12%, var(--bg3))", border: "1px solid color-mix(in srgb, var(--orange) 25%, transparent)",
               borderRadius: 8, padding: "8px 12px", marginBottom: 12,
@@ -257,37 +327,59 @@ const BuchungsKarte = ({ beleg, mandanten, onBestaetigen, onAblehnen, onKorrigie
             </div>
           )}
 
-          {/* Mandant zuordnen */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 4 }}>Mandant</div>
-            <select
-              value={form.mandant || ""}
-              onChange={e => setForm(p => ({ ...p, mandant: e.target.value }))}
-              style={{
-                background: "var(--bg)", border: `1px solid var(--border2)`,
-                borderRadius: 8, color: form.mandant ? "var(--text)" : "var(--text3)",
-                padding: "7px 11px", fontSize: 13,
-                fontFamily: "'DM Sans', sans-serif", outline: "none",
-                width: "100%",
-              }}>
-              <option value="">— Mandant wählen —</option>
-              {mandanten.map(m => (
-                <option key={m} value={m}>{m}</option>
-              ))}
-            </select>
-          </div>
+          {gebucht ? (
+            <div style={{
+              marginBottom: 12, padding: "10px 12px", borderRadius: 8,
+              background: "color-mix(in srgb, var(--green) 10%, var(--bg3))",
+              border: "1px solid color-mix(in srgb, var(--green) 28%, transparent)",
+            }}>
+              <div style={{ fontSize: 10, color: "var(--text3)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>
+                Mandant
+              </div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: "var(--green)" }}>
+                {beleg.mandant || "—"}
+              </div>
+              {beleg.bestaetigt_am && (
+                <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 4 }}>
+                  Gebucht am {String(beleg.bestaetigt_am).slice(0, 10)}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 4 }}>Mandant</div>
+              <select
+                value={form.mandant || ""}
+                onChange={e => setForm(p => ({ ...p, mandant: e.target.value }))}
+                style={{
+                  background: "var(--bg)", border: `1px solid var(--border2)`,
+                  borderRadius: 8, color: form.mandant ? "var(--text)" : "var(--text3)",
+                  padding: "7px 11px", fontSize: 13,
+                  fontFamily: "'DM Sans', sans-serif", outline: "none",
+                  width: "100%",
+                }}>
+                <option value="">— Mandant wählen —</option>
+                {mandanten.map(m => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+            </div>
+          )}
 
-          {/* Aktionen */}
-          <div style={{ display: "flex", gap: 8 }}>
-            <Btn onClick={handleBestaetigen} loading={saving} variant="success" size="sm"
-                 disabled={!form.mandant}>
-              ✓ Buchung bestätigen
-            </Btn>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {!gebucht && (
+              <>
+                <Btn onClick={handleSpeichern} loading={saving} variant="success" size="sm"
+                     disabled={!form.mandant}>
+                  ✓ Buchung bestätigen
+                </Btn>
+                <Btn onClick={() => onAblehnen(readBelegId(beleg))} variant="danger" size="sm">
+                  ✕ Ablehnen
+                </Btn>
+              </>
+            )}
             <Btn onClick={() => setEdit(true)} variant="ghost" size="sm">
               ✏ Korrigieren
-            </Btn>
-            <Btn onClick={() => onAblehnen(readBelegId(beleg))} variant="danger" size="sm">
-              ✕
             </Btn>
           </div>
         </div>
@@ -299,6 +391,7 @@ const BuchungsKarte = ({ beleg, mandanten, onBestaetigen, onAblehnen, onKorrigie
               { k: "betrag_brutto",  l: "Brutto (€)", type: "number" },
               { k: "betrag_netto",   l: "Netto (€)",  type: "number" },
               { k: "mwst_betrag",    l: "MwSt (€)",   type: "number" },
+              { k: "mwst_satz",      l: "MwSt %",     type: "number" },
               { k: "datum",          l: "Datum",       type: "date" },
               { k: "lieferant",      l: "Lieferant",   type: "text" },
               { k: "rechnungsnummer",l: "Rechnungsnr.",type: "text" },
@@ -333,12 +426,28 @@ const BuchungsKarte = ({ beleg, mandanten, onBestaetigen, onAblehnen, onKorrigie
                 ))}
               </select>
             </div>
+            <div>
+              <div style={{ fontSize: 10, color: "var(--text3)", textTransform: "uppercase",
+                             letterSpacing: "0.06em", marginBottom: 3 }}>Mandant</div>
+              <select value={form.mandant || ""} onChange={e => set("mandant", e.target.value)}
+                style={{
+                  width: "100%", background: "var(--bg)", border: `1px solid var(--border2)`,
+                  borderRadius: 8, color: "var(--text)", padding: "7px 10px",
+                  fontSize: 13, outline: "none", fontFamily: "'DM Sans', sans-serif",
+                }}>
+                <option value="">— Mandant —</option>
+                {mandanten.map(m => <option key={m} value={m}>{m}</option>)}
+              </select>
+            </div>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
-            <Btn onClick={handleBestaetigen} loading={saving} variant="success" size="sm">
-              ✓ Korrigiert bestätigen
+            <Btn onClick={handleSpeichern} loading={saving} variant="success" size="sm"
+                 disabled={!gebucht && !form.mandant}>
+              {gebucht ? "✓ Änderungen speichern" : "✓ Korrigiert bestätigen"}
             </Btn>
-            <Btn onClick={() => setEdit(false)} variant="ghost" size="sm">Abbrechen</Btn>
+            <Btn onClick={() => { setEdit(false); setForm({ ...beleg }); }} variant="ghost" size="sm">
+              Abbrechen
+            </Btn>
           </div>
         </div>
       )}
@@ -389,8 +498,8 @@ const StatistikStrip = ({ stats, belege = null }) => {
     ...(abgelehnt > 0
       ? [{ l: "Abgelehnt (Archiv)", v: abgelehnt, c: "var(--text3)" }]
       : []),
-    { l: "Offen",            v: stats.vorschlaege_offen || 0,                  c: "var(--orange)" },
-    { l: "Bestätigt",        v: stats.bestaetigt || 0,                         c: "var(--green)" },
+    { l: "Zur Prüfung",       v: stats.vorschlaege_offen || 0,                  c: "var(--orange)" },
+    { l: "Gebucht",          v: stats.bestaetigt || 0,                         c: "var(--green)" },
     { l: "Ausgaben",         v: `€${(stats.total_ausgaben || 0).toLocaleString("de")}`, c: "var(--red)" },
     { l: "Vorsteuer",        v: `€${(stats.total_vorsteuer || 0).toLocaleString("de")}`,c: "var(--accent)" },
   ];
@@ -421,7 +530,7 @@ export default function BelegScanner() {
   const [stats,       setStats]       = useState(null);
   const [mandanten,   setMandanten]   = useState([]);
   const [loading,     setLoading]     = useState(false);
-  const [filter,      setFilter]      = useState("alle"); // alle | vorschlag | bestaetigt
+  const [filter,      setFilter]      = useState("scannen"); // scannen | bestaetigt
   const [toast,       setToast]       = useState(null);
   const [selectedMandant, setSelectedMandant] = useState("");
   const [archivMode,  setArchivMode] = useState(false);
@@ -528,6 +637,7 @@ export default function BelegScanner() {
     setLoading(false);
     if (neueBelege.length > 0) {
       setBelege(prev => [...neueBelege, ...prev]);
+      setFilter("scannen");
       await ladeAlles();
     }
   };
@@ -539,23 +649,42 @@ export default function BelegScanner() {
       showToast("Beleg-ID fehlt — bitte Seite neu laden", "error");
       return;
     }
+    const existing = belege.find((b) => readBelegId(b) === id);
+    const warGebucht = existing && belegWorkflowStatus(existing) === "bestaetigt";
+    const payload = korrekturen && typeof korrekturen === "object" ? { ...korrekturen } : {};
+    if (!payload.mandant && existing?.mandant) payload.mandant = existing.mandant;
     try {
-      await apiFetch(`/belege/${encodeURIComponent(id)}/bestaetigen`, {
+      const updated = await apiFetch(`/belege/${encodeURIComponent(id)}/bestaetigen`, {
         method: "POST",
-        body: JSON.stringify(korrekturen || {}),
+        body: JSON.stringify(payload),
       });
       setBelege((prev) =>
-        prev.map((b) =>
-          readBelegId(b) === id
-            ? { ...b, status: "bestaetigt", bestaetigt_am: new Date().toISOString() }
-            : b
-        )
+        prev.map((b) => (readBelegId(b) === id ? { ...b, ...updated } : b))
       );
-      showToast("✓ Buchung bestätigt und unter 'Gebucht' sichtbar");
+      if (warGebucht) {
+        showToast("✓ Änderungen gespeichert");
+      } else {
+        showToast(`✓ Gebucht für „${updated.mandant || payload.mandant}“ — jetzt unter Tab „Gebucht“ sichtbar`);
+        setFilter("bestaetigt");
+      }
       ladeAlles().catch((e) => console.error(e));
     } catch (e) {
-      showToast(`Bestätigen fehlgeschlagen: ${e.message}`, "error");
+      showToast(`Speichern fehlgeschlagen: ${e.message}`, "error");
       throw e;
+    }
+  };
+
+  const handleLoeschenGebucht = async (bid) => {
+    const id = String(bid || "").trim();
+    if (!id) return;
+    if (!window.confirm("Gebuchten Beleg endgültig löschen?")) return;
+    try {
+      await apiFetch(`/belege/${encodeURIComponent(id)}?quelle=pipeline`, { method: "DELETE" });
+      setBelege((prev) => prev.filter((b) => readBelegId(b) !== id));
+      showToast("Beleg gelöscht", "warn");
+      ladeAlles().catch((e) => console.error(e));
+    } catch (e) {
+      showToast(`Löschen fehlgeschlagen: ${e.message}`, "error");
     }
   };
 
@@ -577,12 +706,13 @@ export default function BelegScanner() {
     }
   };
 
-  const gefiltert = belege.filter(b =>
-    filter === "alle" ? !belegArchiviert(b) :
-    filter === "vorschlag"
-      ? !belegArchiviert(b) && belegWorkflowStatus(b) === "vorschlag"
-      : !belegArchiviert(b) && belegWorkflowStatus(b) === "bestaetigt"
+  const offeneBelege = belege.filter(
+    (b) => !belegArchiviert(b) && ["vorschlag", "manuell"].includes(belegWorkflowStatus(b))
   );
+  const gebuchteBelege = belege.filter(
+    (b) => !belegArchiviert(b) && belegWorkflowStatus(b) === "bestaetigt"
+  );
+  const gefiltert = filter === "bestaetigt" ? gebuchteBelege : offeneBelege;
 
   return (
     <div style={{
@@ -646,11 +776,13 @@ export default function BelegScanner() {
           >
             {archivMode ? "← Scanner" : "Archiv"}
           </Btn>
-          {!archivMode && ["alle", "vorschlag", "bestaetigt"].map(f => (
-            <Btn key={f} size="sm" variant={filter === f ? "subtle" : "ghost"}
-                 onClick={() => setFilter(f)}
-                 style={{ textTransform: "capitalize" }}>
-              {f === "alle" ? "Alle" : f === "vorschlag" ? `Offen (${belege.filter(b => !belegArchiviert(b) && belegWorkflowStatus(b) === "vorschlag").length})` : "Gebucht"}
+          {!archivMode && [
+            { id: "scannen", label: `Scannen (${offeneBelege.length})` },
+            { id: "bestaetigt", label: `Gebucht (${gebuchteBelege.length})` },
+          ].map((t) => (
+            <Btn key={t.id} size="sm" variant={filter === t.id ? "subtle" : "ghost"}
+                 onClick={() => setFilter(t.id)}>
+              {t.label}
             </Btn>
           ))}
         </div>
@@ -660,27 +792,43 @@ export default function BelegScanner() {
         {!archivMode && (<>
         <StatistikStrip stats={stats} belege={belege} />
 
-        <UploadZone onDatei={handleDateien} loading={loading} />
+        {filter === "scannen" && (
+          <>
+            <UploadZone onDatei={handleDateien} loading={loading} />
+            {offeneBelege.length > 0 && (
+              <div style={{
+                marginTop: 16, fontSize: 13, color: "var(--text2)", lineHeight: 1.5,
+                padding: "10px 14px", borderRadius: 10,
+                background: "color-mix(in srgb, var(--accent) 8%, var(--bg3))",
+                border: "1px solid color-mix(in srgb, var(--accent) 22%, transparent)",
+              }}>
+                Nach dem Scan: unten <strong>Mandant wählen</strong>, dann{" "}
+                <strong>Buchung bestätigen</strong>, <strong>korrigieren</strong> oder <strong>ablehnen</strong>.
+                Bestätigte Belege erscheinen nur unter <strong>Gebucht</strong>.
+              </div>
+            )}
+          </>
+        )}
 
         {gefiltert.length > 0 && (
-          <div style={{ marginTop: 24 }}>
+          <div style={{ marginTop: filter === "scannen" ? 20 : 0 }}>
             <div style={{
               display: "flex", justifyContent: "space-between",
               alignItems: "center", marginBottom: 14,
             }}>
               <div style={{ fontFamily: "'DM Serif Display', serif", fontSize: 18, color: "var(--text)" }}>
-                {filter === "vorschlag"
-                  ? `${gefiltert.length} Buchungsvorschlag${gefiltert.length !== 1 ? "e" : ""} zur Prüfung`
-                  : `${gefiltert.length} Belege`}
+                {filter === "bestaetigt"
+                  ? `${gefiltert.length} gebuchte${gefiltert.length !== 1 ? "" : "r"} Beleg${gefiltert.length !== 1 ? "e" : ""}`
+                  : `${gefiltert.length} gescannte${gefiltert.length !== 1 ? "" : "r"} Beleg${gefiltert.length !== 1 ? "e" : ""} zur Prüfung`}
               </div>
-              {filter === "vorschlag" && gefiltert.length > 1 && (
+              {filter === "scannen" && gefiltert.length > 1 && selectedMandant && (
                 <Btn variant="success" size="sm"
                      onClick={async () => {
-                       if (!window.confirm(`Alle ${gefiltert.length} Vorschläge bestätigen?`)) return;
-                       for (const b of gefiltert.filter(b => b.mandant)) {
+                       if (!window.confirm(`Alle ${gefiltert.length} Vorschläge für „${selectedMandant}“ bestätigen?`)) return;
+                       for (const b of gefiltert) {
                          const bid = readBelegId(b);
                          if (!bid) continue;
-                         await handleBestaetigen(bid);
+                         await handleBestaetigen(bid, { mandant: selectedMandant });
                        }
                      }}>
                   ✓ Alle bestätigen
@@ -694,23 +842,28 @@ export default function BelegScanner() {
                   key={readBelegId(beleg) || `${beleg.dateiname || "beleg"}-${idx}`}
                   beleg={beleg}
                   mandanten={mandanten}
+                  gebucht={filter === "bestaetigt"}
+                  defaultMandant={selectedMandant}
                   onBestaetigen={handleBestaetigen}
                   onAblehnen={handleAblehnen}
-                  onKorrigieren={() => {}}
+                  onLoeschen={filter === "bestaetigt" ? handleLoeschenGebucht : undefined}
                 />
               ))}
             </div>
           </div>
         )}
 
-        {gefiltert.length === 0 && !loading && belege.length === 0 && (
+        {gefiltert.length === 0 && !loading && (
           <div style={{
             textAlign: "center", padding: "48px 0",
             color: "var(--text3)", fontSize: 14, marginTop: 24,
           }}>
-            <div style={{ fontSize: 40, marginBottom: 12 }}>📄</div>
-            Noch keine Belege verarbeitet.<br />
-            Lade deinen ersten Beleg hoch — die KI erledigt den Rest.
+            <div style={{ fontSize: 40, marginBottom: 12 }}>{filter === "bestaetigt" ? "✓" : "📄"}</div>
+            {filter === "bestaetigt"
+              ? "Noch keine gebuchten Belege. Bestätigen Sie Vorschläge unter „Scannen“."
+              : belege.length === 0
+                ? <>Noch keine Belege verarbeitet.<br />Lade deinen ersten Beleg hoch — die KI erledigt den Rest.</>
+                : "Keine offenen Vorschläge — alle Belege sind gebucht oder archiviert."}
           </div>
         )}
         </>)}

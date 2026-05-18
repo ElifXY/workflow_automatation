@@ -78,8 +78,12 @@ Antworte NUR mit einem validen JSON-Objekt, ohne Markdown-Backticks, ohne Erklä
 }
 
 Wichtige Regeln:
+- Kassenbons: SUMME / ZU BEZAHLEN als betrag_brutto; Steuerzeile Netto/MwSt/Brutto übernehmen
+- Österreich: MwSt oft 13% (Kennzeichnung D auf dem Bon) — mwst_satz = 13, nicht 19
+- Beträge immer als JSON-Zahlen mit Punkt (4.7 nicht 0)
 - Bewirtungsbelege: vorsteuer_abzugsfaehig = true, aber nur 70% abzugsfähig (notiz setzen)
 - Privatanteile: in der notiz erwähnen
+- Ohne Firmennamen auf dem Bon: lieferant = "Kasse"
 - Wenn Datum fehlt: heutiges Datum verwenden
 - vertrauens_score: 0.0-1.0 (wie sicher du dir bist)
 - Bei unlesbaren Belegen: vertrauens_score < 0.5 und notiz mit Hinweis"""
@@ -312,8 +316,12 @@ def beleg_bestaetigen(ds, beleg_id: str, korrekturen: Dict = None) -> Dict:
     if korrekturen:
         beleg.update(korrekturen)
 
+    if not str(beleg.get("mandant") or "").strip():
+        raise ValueError("Mandant fehlt — bitte einen Mandanten zuordnen")
+
     beleg["status"]          = "bestaetigt"
-    beleg["bestaetigt_am"]   = datetime.now().isoformat()
+    if not beleg.get("bestaetigt_am"):
+        beleg["bestaetigt_am"] = datetime.now().isoformat()
 
     ds.beleg_speichern(beleg_id, beleg)
     ds.log_eintrag(
@@ -337,6 +345,25 @@ def beleg_wiederherstellen(ds, beleg_id: str) -> Dict:
         raise RuntimeError(f"Speichern fehlgeschlagen (Beleg {beleg_id})")
     ds.log_eintrag(f"BELEG_WIEDERHERGESTELLT | {beleg_id}")
     return beleg
+
+
+def beleg_aus_pipeline_loeschen(ds, beleg_id: str) -> Dict:
+    """Gebuchten oder offenen Beleg endgültig entfernen (nicht Archiv)."""
+    beleg = ds.beleg_holen(beleg_id)
+    if not beleg:
+        raise ValueError(f"Beleg {beleg_id} nicht gefunden")
+    if _beleg_ist_archiviert(beleg):
+        raise ValueError("Archivierte Belege bitte über das Archiv löschen")
+    st = _beleg_workflow_status(beleg)
+    if st not in _PIPELINE_STATI:
+        raise ValueError("Beleg kann nicht gelöscht werden")
+    if not ds.beleg_loeschen(beleg_id):
+        raise RuntimeError(f"Löschen fehlgeschlagen (Beleg {beleg_id})")
+    ds.log_eintrag(
+        f"BELEG_GELOESCHT | {beleg.get('mandant', '?')} | "
+        f"€{beleg.get('betrag_brutto', 0):.2f} | {st}"
+    )
+    return {"status": "deleted", "id": beleg_id}
 
 
 def beleg_endgueltig_loeschen(ds, beleg_id: str) -> Dict:

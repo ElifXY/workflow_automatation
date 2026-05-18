@@ -6456,6 +6456,8 @@ async def beleg_analysieren(data: BelegAnalyseRequest, _user: dict = Depends(get
     from core.beleg_service import beleg_speichern
     store = get_ds(_user)
 
+    from core.beleg_service import SKR03_KATEGORIEN, beleg_ohne_ki_parsen
+
     try:
         parsed = await analyze_receipt(
             filename=data.dateiname,
@@ -6468,13 +6470,21 @@ async def beleg_analysieren(data: BelegAnalyseRequest, _user: dict = Depends(get
         beleg["mandant"] = data.mandant or ""
         beleg["analysiert_am"] = datetime.now().isoformat()
         beleg["status"] = "vorschlag"
+        kat = (beleg.get("kategorie") or "sonstiges").strip().lower()
+        konto = SKR03_KATEGORIEN.get(kat, SKR03_KATEGORIEN["sonstiges"])
+        beleg["kategorie_name"] = konto["name"]
+        if (beleg.get("betrag_brutto") or 0) <= 0:
+            beleg["notiz"] = (
+                f"{beleg.get('notiz', '')} KI konnte Beträge nicht lesen — bitte korrigieren."
+            ).strip()
     except Exception as e:
-        # Fallback: Manuelles Template
         log.warning(f"KI-Analyse fehlgeschlagen, Fallback: {e}")
-        from core.beleg_service import beleg_ohne_ki_parsen
         beleg = beleg_ohne_ki_parsen(data.dateiname, {"mandant": data.mandant})
-        beleg["notiz"] = f"{beleg.get('notiz','')} KI-Fallback aktiv.".strip()
-        beleg["unsichere_felder"] = ["betrag_brutto", "datum", "kategorie"]
+        beleg["notiz"] = f"{beleg.get('notiz', '')} KI nicht verfügbar ({e}). Bitte manuell erfassen.".strip()
+        beleg["vertrauens_score"] = 0.35
+        beleg["unsichere_felder"] = [
+            "betrag_brutto", "betrag_netto", "mwst_betrag", "datum", "kategorie", "lieferant",
+        ]
 
     beleg_id = beleg_speichern(store, beleg)
     store.log_eintrag(f"BELEG_ANALYSIERT | {data.mandant} | {data.dateiname}")
@@ -6501,10 +6511,16 @@ def beleg_bestaetigen_ep(beleg_id: str, korrekturen: BelegKorrektur = None,
     from core.beleg_service import beleg_bestaetigen
     store = get_ds(_user)
     try:
-        korr = korrekturen.dict(exclude_none=True) if korrekturen else {}
+        korr = (
+            korrekturen.model_dump(exclude_none=True)
+            if korrekturen and hasattr(korrekturen, "model_dump")
+            else (korrekturen.dict(exclude_none=True) if korrekturen else {})
+        )
         return beleg_bestaetigen(store, beleg_id, korr)
     except ValueError as e:
-        raise HTTPException(404, str(e))
+        msg = str(e)
+        code = 400 if "Mandant" in msg else 404
+        raise HTTPException(code, msg)
 
 @app.post("/belege/{beleg_id}/ablehnen", tags=["Belege"],
           summary="Buchungsvorschlag ablehnen")
@@ -6544,11 +6560,21 @@ def beleg_wiederherstellen_ep(beleg_id: str, _user: dict = Depends(get_current_u
 
 
 @app.delete("/belege/{beleg_id}", tags=["Belege"],
-            summary="Archiv-Beleg endgültig löschen")
-def beleg_delete_ep(beleg_id: str, _user: dict = Depends(get_current_user)):
-    from core.beleg_service import beleg_endgueltig_loeschen
+            summary="Beleg löschen (Archiv oder gebucht/offen)")
+def beleg_delete_ep(
+    beleg_id: str,
+    quelle: Optional[str] = Query(
+        None,
+        description="pipeline = gebuchter/offener Beleg; sonst nur Archiv",
+    ),
+    _user: dict = Depends(get_current_user),
+):
+    from core.beleg_service import beleg_aus_pipeline_loeschen, beleg_endgueltig_loeschen
+
     store = get_ds(_user)
     try:
+        if (quelle or "").strip().lower() in {"pipeline", "scanner", "aktiv"}:
+            return beleg_aus_pipeline_loeschen(store, beleg_id)
         return beleg_endgueltig_loeschen(store, beleg_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -7209,6 +7235,7 @@ class DokumentSpeichernRequest(BaseModel):
     notiz:            Optional[str] = ""
     inhalt_b64:       Optional[str] = None  # Für Speicherung
     aufgabe_anlegen:  bool = False
+    aufgabe:          Optional[str] = ""
     ki_zusammenfassung: Optional[str] = ""
     betrag:           Optional[float] = None
 
@@ -7218,6 +7245,8 @@ class DokumentUpdateRequest(BaseModel):
     mandant:          Optional[str] = None
     datum:            Optional[str] = None
     frist:            Optional[str] = None
+    aufgabe:          Optional[str] = None
+    aufgabe_anlegen:  Optional[bool] = None
     lieferant:        Optional[str] = None
     ordner_pfad:      Optional[str] = None
     ordner_kategorie: Optional[str] = None
@@ -7243,6 +7272,44 @@ def _dokument_datei_pfad(dok: Dict[str, Any]) -> str:
         (dok.get("ordner_pfad") or "").replace("\\", "/").strip("/"),
         dok.get("dateiname") or "",
     )
+
+
+def _dokument_media_type(dateiname: str) -> str:
+    ext = (Path(dateiname or "").suffix or "").lower()
+    return {
+        ".pdf": "application/pdf",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+        ".xml": "application/xml",
+        ".txt": "text/plain",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    }.get(ext, "application/octet-stream")
+
+
+def _dokument_aufgabe_sync(store, dok: Dict[str, Any], beschreibung: str) -> None:
+    """Optional Aufgabe zum Archiv-Dokument anlegen/aktualisieren."""
+    mandant = (dok.get("mandant") or "").strip()
+    frist = (dok.get("frist") or "").strip()
+    text = (beschreibung or dok.get("aufgabe") or "").strip()
+    if not mandant or not frist or not text:
+        return
+    aufgabe_id = dok.get("aufgabe_id") or str(uuid.uuid4())
+    store.aufgabe_speichern(aufgabe_id, {
+        "id": aufgabe_id,
+        "mandant": mandant,
+        "beschreibung": text,
+        "frist": frist,
+        "prioritaet": "normal",
+        "kategorie": dok.get("ordner_kategorie") or dok.get("dokumenttyp") or "dokument",
+        "erledigt": False,
+        "erstellt_am": datetime.now().isoformat(),
+    })
+    dok["aufgabe_id"] = aufgabe_id
+    dok["aufgabe"] = text
 
 
 def _dokument_legacy_zu_archiv(leg: Dict[str, Any], index: int) -> Dict[str, Any]:
@@ -7505,6 +7572,7 @@ def dokument_speichern(data: DokumentSpeichernRequest,
         "mandant":         data.mandant,
         "datum":           data.datum,
         "frist":           data.frist,
+        "aufgabe":         (data.aufgabe or "").strip(),
         "lieferant":       data.lieferant,
         "ordner_pfad":     data.ordner_pfad,
         "ordner_kategorie":data.ordner_kategorie,
@@ -7525,19 +7593,14 @@ def dokument_speichern(data: DokumentSpeichernRequest,
         "timestamp": datetime.now().isoformat(),
     })
 
-    # Aufgabe anlegen wenn gewünscht (z.B. bei erkannter Frist)
-    if data.aufgabe_anlegen and data.frist:
-        aufgabe_id = str(uuid.uuid4())
-        store.aufgabe_speichern(aufgabe_id, {
-            "id":           aufgabe_id,
-            "mandant":      data.mandant,
-            "beschreibung": f"Frist aus Dokument: {data.dateiname}",
-            "frist":        data.frist,
-            "prioritaet":   "hoch",
-            "kategorie":    data.ordner_kategorie,
-            "erledigt":     False,
-            "erstellt_am":  datetime.now().isoformat(),
-        })
+    # Aufgabe anlegen wenn gewünscht
+    if data.aufgabe_anlegen and data.frist and data.mandant:
+        _dokument_aufgabe_sync(
+            store,
+            dokument_archiv[data.dok_id],
+            (data.aufgabe or "").strip() or f"Frist aus Dokument: {data.dateiname}",
+        )
+        _kv_set(store, "__dokument_archiv_v1", dokument_archiv)
 
     store.log_eintrag(f"DOKUMENT_GESPEICHERT | {data.mandant} | {data.dateiname} | {data.ordner_pfad}")
     return {
@@ -7624,17 +7687,19 @@ def dokument_datei_holen(dok_id: str, _user: dict = Depends(get_current_user)):
         )
         if not dok:
             raise HTTPException(404, "Dokument nicht gefunden")
-    if (dok.get("status") or "") == "geloescht":
-        raise HTTPException(410, "Dokument liegt im Papierkorb — zuerst wiederherstellen")
-
     datei_pfad = _dokument_datei_pfad(dok)
     if not Path(datei_pfad).is_file():
         raise HTTPException(404, "Datei nicht auf dem Server gefunden")
 
+    dateiname = dok.get("dateiname") or "dokument"
+    media = _dokument_media_type(dateiname)
     return FileResponse(
         datei_pfad,
-        filename=dok.get("dateiname") or "dokument",
-        media_type="application/octet-stream",
+        media_type=media,
+        headers={
+            "Content-Disposition": f'inline; filename="{dateiname}"',
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 
@@ -7675,11 +7740,64 @@ def dokument_archiv_aktualisieren(
         except OSError as exc:
             log.warning("Dokument verschieben fehlgeschlagen: %s", exc)
 
+    if data.aufgabe is not None:
+        dok["aufgabe"] = (data.aufgabe or "").strip()
+    if data.frist is not None:
+        dok["frist"] = data.frist
+    if data.aufgabe_anlegen and dok.get("mandant") and dok.get("frist"):
+        _dokument_aufgabe_sync(store, dok, dok.get("aufgabe") or f"Aufgabe: {dok.get('dateiname')}")
+
     dok["aktualisiert_am"] = datetime.now().isoformat()
     archiv[dok_id] = dok
     _kv_set(store, "__dokument_archiv_v1", archiv)
     store.log_eintrag(f"DOKUMENT_AKTUALISIERT | {dok.get('mandant')} | {dok.get('dateiname')}")
     return dok
+
+
+@app.post("/dokumente/papierkorb/leeren", tags=["Dokumente"],
+          summary="Alle Dokumente im Papierkorb endgültig löschen")
+def dokument_papierkorb_leeren(_user: dict = Depends(get_current_user)):
+    import os as _os
+
+    store = get_ds(_user)
+    archiv = _dokument_archiv_holen(store)
+    geloescht_ids = [
+        dok_id for dok_id, d in archiv.items()
+        if isinstance(d, dict) and (d.get("status") or "") == "geloescht"
+    ]
+    count = 0
+    for dok_id in geloescht_ids:
+        dok = archiv.get(dok_id) or {}
+        datei_pfad = _dokument_datei_pfad(dok)
+        if _os.path.exists(datei_pfad):
+            try:
+                _os.remove(datei_pfad)
+            except OSError as exc:
+                log.warning("Papierkorb Datei löschen fehlgeschlagen: %s (%s)", datei_pfad, exc)
+        del archiv[dok_id]
+        count += 1
+    _kv_set(store, "__dokument_archiv_v1", archiv)
+    store.log_eintrag(f"DOKUMENT_PAPIERKORB_GELEERT | {count}")
+    return {"status": "ok", "geloescht": count}
+
+
+@app.post("/dokumente/papierkorb/wiederherstellen-alle", tags=["Dokumente"],
+          summary="Alle Dokumente aus dem Papierkorb ins Archiv zurückholen")
+def dokument_papierkorb_wiederherstellen_alle(_user: dict = Depends(get_current_user)):
+    store = get_ds(_user)
+    archiv = _dokument_archiv_holen(store)
+    count = 0
+    for dok_id, dok in list(archiv.items()):
+        if not isinstance(dok, dict) or (dok.get("status") or "") != "geloescht":
+            continue
+        dok["status"] = "gespeichert"
+        dok["geloescht_am"] = None
+        dok["wiederhergestellt_am"] = datetime.now().isoformat()
+        archiv[dok_id] = dok
+        count += 1
+    _kv_set(store, "__dokument_archiv_v1", archiv)
+    store.log_eintrag(f"DOKUMENT_PAPIERKORB_WIEDERHERGESTELLT_ALLE | {count}")
+    return {"status": "ok", "wiederhergestellt": count}
 
 
 @app.delete("/dokumente/{dok_id}", tags=["Dokumente"],
