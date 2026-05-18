@@ -18,7 +18,10 @@ import {
   dokumentAktualisieren,
   dokumentLoeschen,
   dokumentWiederherstellen,
-  dokumentDateiDownload,
+  dokumentDateiOeffnen,
+  dokumentPapierkorbLeeren,
+  dokumentPapierkorbWiederherstellenAlle,
+  dokumentArchivAlleInPapierkorb,
   extractDokumenteListe,
 } from "../api";
 import { useTheme, readCssVar } from "../theme";
@@ -410,6 +413,8 @@ const ArchivZeile = ({ dok, mandanten, papierkorb, onRefresh, showToast }) => {
     betrag: dok.betrag ?? "",
     notiz: dok.notiz || "",
     ki_zusammenfassung: dok.ki_zusammenfassung || "",
+    aufgabe: dok.aufgabe || "",
+    frist: dok.frist || "",
   });
   const set = (k, v) => setForm((p) => ({ ...p, [k]: v }));
   const inp = (extra = {}) => ({
@@ -432,6 +437,9 @@ const ArchivZeile = ({ dok, mandanten, papierkorb, onRefresh, showToast }) => {
         dokumenttyp: form.doktyp,
         mandant: form.mandant,
         datum: form.datum || null,
+        frist: form.frist || null,
+        aufgabe: form.aufgabe || "",
+        aufgabe_anlegen: !!(form.aufgabe?.trim() && form.frist && form.mandant),
         lieferant: form.absender,
         ordner_kategorie: form.ordner,
         ordner_pfad: `${form.mandant}/${jahr}/${form.ordner}`,
@@ -463,8 +471,8 @@ const ArchivZeile = ({ dok, mandanten, papierkorb, onRefresh, showToast }) => {
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           {!papierkorb && (
             <>
-              <Btn size="xs" variant="ghost" disabled={!dokId} onClick={() => dokumentDateiDownload(dokId, dok.dateiname).catch((e) => showToast(e.message, "error"))}>
-                ⬇ Öffnen
+              <Btn size="xs" variant="ghost" disabled={!dokId} onClick={() => dokumentDateiOeffnen(dokId, dok.dateiname).catch((e) => showToast(e.message, "error"))}>
+                👁 Öffnen
               </Btn>
               <Btn size="xs" variant="ghost" disabled={!dokId} onClick={() => setEdit((p) => !p)}>{edit ? "Schließen" : "✏ Bearbeiten"}</Btn>
               <Btn size="xs" variant="danger" disabled={!dokId} onClick={async () => {
@@ -479,6 +487,9 @@ const ArchivZeile = ({ dok, mandanten, papierkorb, onRefresh, showToast }) => {
           )}
           {papierkorb && (
             <>
+              <Btn size="xs" variant="ghost" disabled={!dokId} onClick={() => dokumentDateiOeffnen(dokId, dok.dateiname).catch((e) => showToast(e.message, "error"))}>
+                👁 Öffnen
+              </Btn>
               <Btn size="xs" variant="success" disabled={!dokId} onClick={async () => {
                 try {
                   await dokumentWiederherstellen(dokId);
@@ -517,7 +528,15 @@ const ArchivZeile = ({ dok, mandanten, papierkorb, onRefresh, showToast }) => {
             <input value={form.absender} onChange={(e) => set("absender", e.target.value)} placeholder="Absender" style={{ ...inp(), width: "100%" }} />
             <input type="number" value={form.betrag} onChange={(e) => set("betrag", e.target.value)} placeholder="Betrag" style={{ ...inp(), width: "100%" }} />
           </div>
+          <div style={{ marginBottom: 8 }}>
+            <div style={{ fontSize: 10, color: "var(--text3)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>Aufgabe (optional)</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input value={form.aufgabe} onChange={(e) => set("aufgabe", e.target.value)} placeholder="Aufgabe aus diesem Dokument…" style={{ ...inp(), flex: 1 }} />
+              <input type="date" value={form.frist} onChange={(e) => set("frist", e.target.value)} style={{ ...inp(), width: 150 }} />
+            </div>
+          </div>
           <input value={form.notiz} onChange={(e) => set("notiz", e.target.value)} placeholder="Notiz" style={{ ...inp(), width: "100%", marginBottom: 8 }} />
+          <textarea value={form.ki_zusammenfassung} onChange={(e) => set("ki_zusammenfassung", e.target.value)} placeholder="KI-Zusammenfassung" rows={2} style={{ ...inp(), width: "100%", marginBottom: 8, resize: "vertical" }} />
           <Btn size="sm" variant="success" loading={saving} onClick={speichernMeta}>Speichern</Btn>
         </div>
       )}
@@ -543,6 +562,8 @@ export default function DokumentScanner({ tabActive = true }) {
     return archivCache.gespeichert.length > 0 ? "archiv" : "scan";
   });
   const [archivSuche, setArchivSuche] = useState("");
+  const [papierkorbBusy, setPapierkorbBusy] = useState(false);
+  const [archivBusy, setArchivBusy] = useState(false);
   const [toast,      setToast]      = useState(null);
   const fileRef = useRef(null);
   const archivSucheRef = useRef(archivSuche);
@@ -677,7 +698,8 @@ export default function DokumentScanner({ tabActive = true }) {
         jahr:archivEintrag.jahr,
         notiz:dok.notiz||"",
         inhalt_b64:dok.inhalt_b64,
-        aufgabe_anlegen:!!(dok.aufgabe&&dok.frist),
+        aufgabe:(dok.aufgabe||"").trim(),
+        aufgabe_anlegen:!!(dok.aufgabe?.trim()&&dok.frist&&dok.mandant),
         ki_zusammenfassung:archivEintrag.ki_zusammenfassung,
         betrag:archivEintrag.betrag,
       })});
@@ -777,6 +799,40 @@ export default function DokumentScanner({ tabActive = true }) {
                 style={{flex:1,minWidth:200,background:"var(--bg2)",border:`1px solid var(--border)`,borderRadius:10,padding:"10px 14px",color:"var(--text)",fontSize:13,outline:"none"}}
               />
               <Btn size="sm" variant="ghost" onClick={ladeArchiv}>Aktualisieren</Btn>
+              {archivListe.length > 0 && (
+                <Btn
+                  size="sm"
+                  variant="danger"
+                  loading={archivBusy}
+                  onClick={async () => {
+                    const n = archivListe.length;
+                    if (
+                      !window.confirm(
+                        `Alle ${n} Dokumente im Archiv löschen?\n\nSie landen im Papierkorb. Dort können Sie sie wiederherstellen oder endgültig entfernen.`
+                      )
+                    ) {
+                      return;
+                    }
+                    setArchivBusy(true);
+                    try {
+                      const r = await dokumentArchivAlleInPapierkorb(null);
+                      const cnt = r?.in_papierkorb ?? r?.anzahl ?? n;
+                      showToast(
+                        `${cnt} Dokument(e) in den Papierkorb — Tab „Papierkorb“`,
+                        "warn"
+                      );
+                      await ladeArchiv();
+                      setScannerView("papierkorb");
+                    } catch (e) {
+                      showToast(e.message, "error");
+                    } finally {
+                      setArchivBusy(false);
+                    }
+                  }}
+                >
+                  🗑 Alle löschen
+                </Btn>
+              )}
             </div>
             {archivListe.length===0?(
               <div style={{textAlign:"center",padding:"40px 0",color:"var(--text3)"}}>Noch keine gespeicherten Dokumente.</div>
@@ -792,6 +848,30 @@ export default function DokumentScanner({ tabActive = true }) {
 
         {view==="papierkorb"&&(
           <div>
+            {papierkorb.length>0&&(
+              <div style={{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap"}}>
+                <Btn size="sm" variant="success" loading={papierkorbBusy} onClick={async ()=>{
+                  setPapierkorbBusy(true);
+                  try{
+                    const r=await dokumentPapierkorbWiederherstellenAlle();
+                    showToast(r?.nachricht||r?.message||`Alle ${papierkorb.length} wiederhergestellt`);
+                    await ladeArchiv();
+                    setScannerView("archiv");
+                  }catch(e){showToast(e.message,"error");}
+                  finally{setPapierkorbBusy(false);}
+                }}>↩ Alle wiederherstellen</Btn>
+                <Btn size="sm" variant="danger" loading={papierkorbBusy} onClick={async ()=>{
+                  if(!window.confirm(`Alle ${papierkorb.length} Dokumente endgültig löschen? Dies kann nicht rückgängig gemacht werden.`))return;
+                  setPapierkorbBusy(true);
+                  try{
+                    const r=await dokumentPapierkorbLeeren();
+                    showToast(r?.nachricht||r?.message||"Papierkorb geleert","warn");
+                    await ladeArchiv();
+                  }catch(e){showToast(e.message,"error");}
+                  finally{setPapierkorbBusy(false);}
+                }}>✕ Alles endgültig löschen</Btn>
+              </div>
+            )}
             {papierkorb.length===0?(
               <div style={{textAlign:"center",padding:"40px 0",color:"var(--text3)"}}>Papierkorb ist leer.</div>
             ):(

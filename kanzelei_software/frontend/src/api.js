@@ -1107,21 +1107,41 @@ export const dokumentLoeschen = (dokId, endgueltig = false) =>
 export const dokumentWiederherstellen = (dokId) =>
   apiFetch(`/dokumente/${encodeURIComponent(dokId)}/wiederherstellen`, { method: "POST" });
 
-/** Datei mit Auth-Token herunterladen (Blob). */
-export const dokumentDateiDownload = async (dokId, dateiname = "dokument") => {
+/** Datei im Browser öffnen (neuer Tab), nicht als Download. */
+export const dokumentDateiOeffnen = async (dokId, dateiname = "dokument") => {
   const base = process.env.REACT_APP_API_URL || "/api";
   const token = (localStorage.getItem("kanzlei_token") || localStorage.getItem("token") || "").trim();
   const res = await fetch(`${base}/dokumente/${encodeURIComponent(dokId)}/datei`, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
   if (!res.ok) {
-    let msg = `Download fehlgeschlagen (${res.status})`;
+    let msg = `Öffnen fehlgeschlagen (${res.status})`;
     try {
       const j = await res.json();
       msg = j.detail || j.message || msg;
     } catch {}
     throw new Error(msg);
   }
+  const raw = await res.blob();
+  const ct = res.headers.get("Content-Type") || raw.type || "application/pdf";
+  const blob = raw.type ? raw : new Blob([raw], { type: ct });
+  const url = URL.createObjectURL(blob);
+  const tab = window.open(url, "_blank", "noopener,noreferrer");
+  if (!tab) {
+    URL.revokeObjectURL(url);
+    throw new Error("Pop-up blockiert — bitte Pop-ups für diese Seite erlauben.");
+  }
+  setTimeout(() => URL.revokeObjectURL(url), 120000);
+};
+
+/** Alias: expliziter Download (falls später benötigt). */
+export const dokumentDateiDownload = async (dokId, dateiname = "dokument") => {
+  const base = process.env.REACT_APP_API_URL || "/api";
+  const token = (localStorage.getItem("kanzlei_token") || localStorage.getItem("token") || "").trim();
+  const res = await fetch(`${base}/dokumente/${encodeURIComponent(dokId)}/datei`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) throw new Error(`Download fehlgeschlagen (${res.status})`);
   const blob = await res.blob();
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -1129,6 +1149,18 @@ export const dokumentDateiDownload = async (dokId, dateiname = "dokument") => {
   a.download = dateiname || "dokument";
   a.click();
   URL.revokeObjectURL(url);
+};
+
+export const dokumentPapierkorbLeeren = () =>
+  apiFetch("/dokumente/papierkorb/leeren", { method: "POST" });
+
+export const dokumentPapierkorbWiederherstellenAlle = () =>
+  apiFetch("/dokumente/papierkorb/wiederherstellen-alle", { method: "POST" });
+
+/** Alle gespeicherten Archiv-Dokumente in den Papierkorb (optional Mandant). */
+export const dokumentArchivAlleInPapierkorb = (mandant = null) => {
+  const q = mandant ? `?mandant=${encodeURIComponent(mandant)}` : "";
+  return apiFetch(`/dokumente/archiv/in-papierkorb-alle${q}`, { method: "POST" });
 };
 
 // ═══════════════════════════════════════════════════════════════

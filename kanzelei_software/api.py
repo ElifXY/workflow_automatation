@@ -7754,6 +7754,32 @@ def dokument_archiv_aktualisieren(
     return dok
 
 
+@app.post("/dokumente/archiv/in-papierkorb-alle", tags=["Dokumente"],
+          summary="Alle Archiv-Dokumente in den Papierkorb legen")
+def dokument_archiv_in_papierkorb_alle(
+    mandant: Optional[str] = Query(None, description="Optional nur diesen Mandanten"),
+    _user: dict = Depends(get_current_user),
+):
+    """Alle gespeicherten Archiv-Einträge → Papierkorb (endgültig löschen unter Papierkorb)."""
+    store = get_ds(_user)
+    archiv = _dokument_archiv_holen(store)
+    count = 0
+    for dok_id, dok in list(archiv.items()):
+        if not isinstance(dok, dict):
+            continue
+        if (dok.get("status") or "gespeichert") != "gespeichert":
+            continue
+        if mandant and (dok.get("mandant") or "") != mandant:
+            continue
+        dok["status"] = "geloescht"
+        dok["geloescht_am"] = datetime.now().isoformat()
+        archiv[dok_id] = dok
+        count += 1
+    _kv_set(store, "__dokument_archiv_v1", archiv)
+    store.log_eintrag(f"DOKUMENT_ARCHIV_PAPIERKORB_ALLE | {count}")
+    return {"status": "ok", "in_papierkorb": count}
+
+
 @app.post("/dokumente/papierkorb/leeren", tags=["Dokumente"],
           summary="Alle Dokumente im Papierkorb endgültig löschen")
 def dokument_papierkorb_leeren(_user: dict = Depends(get_current_user)):
