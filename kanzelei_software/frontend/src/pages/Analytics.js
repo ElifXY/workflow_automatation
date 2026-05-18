@@ -414,6 +414,7 @@ function AuditTab() {
 function EngineTab() {
   const [bericht, setBericht] = useState(null);
   const [analyse, setAnalyse] = useState(null);
+  const [runResult, setRunResult] = useState(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
 
@@ -438,8 +439,15 @@ function EngineTab() {
           type="button"
           disabled={busy}
           onClick={async () => {
-            await run(engineRun);
-            setMsg("Daily Checks gestartet (Hintergrund).");
+            const d = await run(engineRun);
+            if (d) {
+              setRunResult(d);
+              const n = d.mandanten_geprueft ?? d.mandanten ?? "?";
+              const w = Array.isArray(d.warnungen) ? d.warnungen.length : 0;
+              setMsg(
+                `Daily Checks fertig: ${n} Mandanten, ${w} Warnung(en), ${d.emails_gesendet ?? 0} E-Mail(s) gesendet.`
+              );
+            }
           }}
           style={{
             padding: "10px 16px",
@@ -490,6 +498,23 @@ function EngineTab() {
         </button>
       </div>
       {msg && <div style={{ color: "var(--orange)", marginBottom: 10 }}>{msg}</div>}
+      {runResult && (
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ color: "var(--text3)", marginBottom: 6 }}>Letzter Engine-Lauf</div>
+          <pre
+            style={{
+              color: "var(--text2)",
+              fontSize: 11,
+              whiteSpace: "pre-wrap",
+              maxHeight: 280,
+              overflow: "auto",
+              margin: 0,
+            }}
+          >
+            {JSON.stringify(runResult, null, 2)}
+          </pre>
+        </div>
+      )}
       {bericht && (
         <div style={{ marginBottom: 14 }}>
           <div style={{ color: "var(--text3)", marginBottom: 6 }}>Tagesbericht</div>

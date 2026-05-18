@@ -286,7 +286,14 @@ class Engine:
         Vollständige KI-Analyse aller Mandanten.
         Für Dashboard-Übersicht und strategische Planung.
         """
-        return analysiere_alle(self.ds)
+        mandanten = analysiere_alle(self.ds)
+        return {
+            "mandanten":     mandanten,
+            "anzahl":        len(mandanten),
+            "kritisch":      sum(1 for m in mandanten if m.get("status") == "KRITISCH"),
+            "wichtig":       sum(1 for m in mandanten if m.get("status") == "WICHTIG"),
+            "generiert_am":  datetime.now().isoformat(),
+        }
 
     # ────────────────────────────────────────────────────────
     # EINZEL-CHECKS

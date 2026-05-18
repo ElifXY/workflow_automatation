@@ -514,14 +514,15 @@ def ok(data: Any = None, message: str = None, **kwargs) -> Dict:
     result.update(kwargs)
     return result
 
-def ok_compat(payload: Dict[str, Any], message: Optional[str] = None, **kwargs) -> Dict:
+def ok_compat(payload: Any, message: Optional[str] = None, **kwargs) -> Dict:
     """
     Einheitliches Format ohne Breaking Changes:
-    - behält bestehende Top-Level-Felder
+    - behält bestehende Top-Level-Felder (nur bei dict)
     - ergänzt zusätzlich ok/data/message
     """
     result = {"ok": True, "data": payload}
-    result.update(payload)
+    if isinstance(payload, dict):
+        result.update(payload)
     if message:
         result["message"] = message
     result.update(kwargs)
@@ -3360,25 +3361,24 @@ def workflow_onboarding(name: str, _user: dict = Depends(get_current_user)):
 # ============================================================
 
 @app.post("/engine/run", tags=["Engine"], summary="Engine manuell triggern")
-def engine_run(background_tasks: BackgroundTasks, _user: dict = Depends(get_current_user)):
+def engine_run(_user: dict = Depends(get_current_user)):
     """
     Führt alle Daily Checks sofort aus (ohne auf den Auto-Agent zu warten).
-    Nützlich nach Datenänderungen oder für manuelle Kontrolle.
+    Gibt Zusammenfassung (Mandanten, Warnungen, Aktionen) direkt zurück.
     """
     from core.engine import Engine
     store = get_ds(_user)
-
-    def run():
-        engine = Engine(store)
-        result = engine.run_daily_checks()
-        log.info(f"Engine manuell getriggert | {result.get('mandanten_geprueft', 0)} Mandanten")
-
-    background_tasks.add_task(run)
+    engine = Engine(store)
+    result = engine.run_daily_checks()
+    log.info(
+        f"Engine manuell getriggert | {result.get('mandanten_geprueft', 0)} Mandanten | "
+        f"{len(result.get('warnungen', []))} Warnungen"
+    )
     _track_action_for_suggestions(store, "engine_run_manual")
     return ok_compat({
-        "status":    "gestartet",
-        "hinweis":   "Engine läuft im Hintergrund",
-        "timestamp": datetime.now().isoformat()
+        "status":    "fertig",
+        "timestamp": datetime.now().isoformat(),
+        **result,
     })
 
 
@@ -8005,18 +8005,22 @@ def bot_fragen_mandant(mandant: str, nur_offen: bool = Query(True),
 
 @app.post("/bot/analyse", tags=["Bot"],
           summary="Automatische Bot-Analyse aller Mandanten starten")
-def bot_analyse(background_tasks: BackgroundTasks, _user: dict = Depends(get_current_user)):
-    """Startet die vollautomatische Analyse im Hintergrund."""
+def bot_analyse(_user: dict = Depends(get_current_user)):
+    """Analysiert alle Mandanten und legt fehlende Bot-Fragen an."""
     store = get_ds(_user)
-    def _run():
-        try:
-            bot   = _get_bot(store)
-            fragen = bot.analysiere_alle_mandanten()
-            log.info(f"Bot-Analyse: {len(fragen)} neue Fragen")
-        except Exception as e:
-            log.error(f"Bot-Analyse Fehler: {e}")
-    background_tasks.add_task(_run)
-    return {"status": "gestartet", "hinweis": "Läuft im Hintergrund"}
+    try:
+        bot = _get_bot(store)
+        fragen = bot.analysiere_alle_mandanten()
+        log.info(f"Bot-Analyse: {len(fragen)} neue Fragen")
+        return ok_compat({
+            "status":       "fertig",
+            "neue_fragen":  len(fragen),
+            "fragen":       fragen[:50],
+            "timestamp":    datetime.now().isoformat(),
+        })
+    except Exception as e:
+        log.error(f"Bot-Analyse Fehler: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/bot/statistiken", tags=["Bot"], summary="Bot-Statistiken (gesparte Telefonate)")
 def bot_statistiken(_user: dict = Depends(get_current_user)):
@@ -8188,16 +8192,15 @@ def regel_loeschen(regel_id: str, _user: dict = Depends(get_current_user)):
 
 @app.post("/regeln/ausfuehren", tags=["Workflow-Baukasten"],
           summary="Alle aktiven Regeln sofort ausführen")
-def regeln_ausfuehren(background_tasks: BackgroundTasks, _user: dict = Depends(get_current_user)):
+def regeln_ausfuehren(_user: dict = Depends(get_current_user)):
     store = get_ds(_user)
-    def _run():
-        try:
-            result = _get_builder(store).fuehre_alle_aus()
-            log.info(f"Workflow-Batch: {result}")
-        except Exception as e:
-            log.error(f"Workflow-Batch Fehler: {e}")
-    background_tasks.add_task(_run)
-    return {"status": "gestartet"}
+    try:
+        result = _get_builder(store).fuehre_alle_aus()
+        log.info(f"Workflow-Batch: {result}")
+        return ok_compat({"status": "fertig", **result})
+    except Exception as e:
+        log.error(f"Workflow-Batch Fehler: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/regeln/standard-erstellen", tags=["Workflow-Baukasten"],
           summary="Standard-Workflows für neue Kanzlei erstellen")

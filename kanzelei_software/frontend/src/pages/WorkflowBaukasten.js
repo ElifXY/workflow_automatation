@@ -209,8 +209,11 @@ const RegelnTab = () => {
   const ausfuehren = async () => {
     setRunning(true);
     try {
-      await api("/regeln/ausfuehren",{method:"POST"});
-      showToast("✓ Alle Regeln werden ausgeführt");
+      const d = await api("/regeln/ausfuehren",{method:"POST"});
+      const regeln = d?.regeln_geprueft ?? d?.data?.regeln_geprueft ?? 0;
+      const aktionen = d?.aktionen ?? d?.data?.aktionen ?? 0;
+      showToast(`✓ Regeln ausgeführt: ${regeln} Regel(n), ${aktionen} Aktion(en)`);
+      laden();
     } catch(e){showToast(e.message);}
     finally{setRunning(false);}
   };
@@ -343,9 +346,10 @@ const BotTab = () => {
   const analyseStarten = async () => {
     setRunning(true);
     try {
-      await api("/bot/analyse",{method:"POST"});
-      showToast("✓ Bot-Analyse gestartet (läuft im Hintergrund)");
-      setTimeout(laden, 3000);
+      const d = await api("/bot/analyse",{method:"POST"});
+      const n = d?.neue_fragen ?? d?.data?.neue_fragen ?? 0;
+      showToast(`✓ Bot-Analyse fertig: ${n} neue Frage(n)`);
+      laden();
     } catch(e){showToast(e.message);}
     finally{setRunning(false);}
   };
