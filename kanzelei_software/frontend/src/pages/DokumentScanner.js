@@ -18,13 +18,14 @@ import {
   dokumentAktualisieren,
   dokumentLoeschen,
   dokumentWiederherstellen,
-  dokumentDateiOeffnen,
+  dokumentDateiBlobUrl,
   dokumentPapierkorbLeeren,
   dokumentPapierkorbWiederherstellenAlle,
   dokumentArchivAlleInPapierkorb,
   extractDokumenteListe,
 } from "../api";
 import { useTheme, readCssVar } from "../theme";
+import DecimalInput from "../components/DecimalInput";
 
 /** Typische Dokumenttypen in Steuerkanzleien — label = Anzeige im Dropdown */
 const DOK_TYPEN = {
@@ -397,8 +398,59 @@ const DokumentKarte = ({dok,mandanten,onSpeichern,onAblehnen}) => {
   );
 };
 
+// ─── Datei-Vorschau (in der App, mit Zurück) ───────────────
+const DateiVorschauModal = ({ preview, onClose }) => {
+  useEffect(() => {
+    if (!preview) return undefined;
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [preview, onClose]);
+
+  if (!preview) return null;
+
+  const ct = (preview.contentType || "").toLowerCase();
+  const isPdf = ct.includes("pdf");
+  const isImage = ct.startsWith("image/");
+
+  return (
+    <div
+      style={{
+        position: "fixed", inset: 0, zIndex: 10000,
+        background: "rgba(0,0,0,0.88)", display: "flex", flexDirection: "column",
+      }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div style={{
+        display: "flex", alignItems: "center", gap: 12, padding: "12px 16px",
+        background: "var(--bg2)", borderBottom: "1px solid var(--border)", flexShrink: 0,
+      }}>
+        <Btn size="sm" variant="primary" onClick={onClose}>← Zurück</Btn>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontWeight: 600, color: "var(--text)", fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {preview.name}
+          </div>
+          <div style={{ fontSize: 11, color: "var(--text3)" }}>Vorschau — Esc oder Zurück schließt</div>
+        </div>
+        <Btn size="sm" variant="ghost" onClick={() => window.open(preview.url, "_blank", "noopener")}>
+          Neuer Tab
+        </Btn>
+      </div>
+      <div style={{ flex: 1, minHeight: 0, padding: 12, display: "flex", justifyContent: "center" }}>
+        {isImage ? (
+          <img src={preview.url} alt={preview.name} style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: 8 }} />
+        ) : isPdf ? (
+          <iframe title={preview.name} src={preview.url} style={{ width: "100%", height: "100%", border: "none", borderRadius: 8, background: "#fff" }} />
+        ) : (
+          <iframe title={preview.name} src={preview.url} style={{ width: "100%", height: "100%", border: "none", borderRadius: 8, background: "#fff" }} />
+        )}
+      </div>
+    </div>
+  );
+};
+
 // ─── Archiv-Zeile (gespeicherte Dokumente) ─────────────────
-const ArchivZeile = ({ dok, mandanten, papierkorb, onRefresh, showToast }) => {
+const ArchivZeile = ({ dok, mandanten, papierkorb, onRefresh, showToast, onDateiOeffnen }) => {
   const dokId = dok.dok_id || dok.id;
   const [edit, setEdit] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -445,7 +497,7 @@ const ArchivZeile = ({ dok, mandanten, papierkorb, onRefresh, showToast }) => {
         ordner_pfad: `${form.mandant}/${jahr}/${form.ordner}`,
         jahr: parseInt(jahr, 10),
         notiz: form.notiz,
-        betrag: form.betrag === "" ? null : Number(form.betrag),
+        betrag: !form.betrag && form.betrag !== 0 ? null : Number(form.betrag),
         ki_zusammenfassung: form.ki_zusammenfassung,
       });
       showToast("Änderungen gespeichert");
@@ -471,7 +523,7 @@ const ArchivZeile = ({ dok, mandanten, papierkorb, onRefresh, showToast }) => {
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           {!papierkorb && (
             <>
-              <Btn size="xs" variant="ghost" disabled={!dokId} onClick={() => dokumentDateiOeffnen(dokId, dok.dateiname).catch((e) => showToast(e.message, "error"))}>
+              <Btn size="xs" variant="ghost" disabled={!dokId} onClick={() => onDateiOeffnen?.(dokId, dok.dateiname)}>
                 👁 Öffnen
               </Btn>
               <Btn size="xs" variant="ghost" disabled={!dokId} onClick={() => setEdit((p) => !p)}>{edit ? "Schließen" : "✏ Bearbeiten"}</Btn>
@@ -487,7 +539,7 @@ const ArchivZeile = ({ dok, mandanten, papierkorb, onRefresh, showToast }) => {
           )}
           {papierkorb && (
             <>
-              <Btn size="xs" variant="ghost" disabled={!dokId} onClick={() => dokumentDateiOeffnen(dokId, dok.dateiname).catch((e) => showToast(e.message, "error"))}>
+              <Btn size="xs" variant="ghost" disabled={!dokId} onClick={() => onDateiOeffnen?.(dokId, dok.dateiname)}>
                 👁 Öffnen
               </Btn>
               <Btn size="xs" variant="success" disabled={!dokId} onClick={async () => {
@@ -526,7 +578,12 @@ const ArchivZeile = ({ dok, mandanten, papierkorb, onRefresh, showToast }) => {
             </select>
             <input type="date" value={form.datum} onChange={(e) => set("datum", e.target.value)} style={{ ...inp(), width: "100%" }} />
             <input value={form.absender} onChange={(e) => set("absender", e.target.value)} placeholder="Absender" style={{ ...inp(), width: "100%" }} />
-            <input type="number" value={form.betrag} onChange={(e) => set("betrag", e.target.value)} placeholder="Betrag" style={{ ...inp(), width: "100%" }} />
+            <DecimalInput
+              value={form.betrag === "" || form.betrag == null ? 0 : Number(form.betrag)}
+              onChange={(n) => set("betrag", n)}
+              placeholder="Betrag"
+              style={{ ...inp(), width: "100%" }}
+            />
           </div>
           <div style={{ marginBottom: 8 }}>
             <div style={{ fontSize: 10, color: "var(--text3)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>Aufgabe (optional)</div>
@@ -565,6 +622,7 @@ export default function DokumentScanner({ tabActive = true }) {
   const [papierkorbBusy, setPapierkorbBusy] = useState(false);
   const [archivBusy, setArchivBusy] = useState(false);
   const [toast,      setToast]      = useState(null);
+  const [filePreview, setFilePreview] = useState(null);
   const fileRef = useRef(null);
   const archivSucheRef = useRef(archivSuche);
   archivSucheRef.current = archivSuche;
@@ -579,6 +637,29 @@ export default function DokumentScanner({ tabActive = true }) {
   const showToast = useCallback((text,type="success")=>{
     setToast({text,type}); setTimeout(()=>setToast(null),4000);
   },[]);
+
+  const schliesseVorschau = useCallback(() => {
+    setFilePreview((prev) => {
+      if (prev?.url) URL.revokeObjectURL(prev.url);
+      return null;
+    });
+  }, []);
+
+  const oeffneDateiVorschau = useCallback(async (dokId, dateiname) => {
+    try {
+      const { url, contentType } = await dokumentDateiBlobUrl(dokId);
+      setFilePreview((prev) => {
+        if (prev?.url) URL.revokeObjectURL(prev.url);
+        return { url, contentType, name: dateiname || "Dokument" };
+      });
+    } catch (e) {
+      showToast(e.message, "error");
+    }
+  }, [showToast]);
+
+  useEffect(() => () => {
+    if (filePreview?.url) URL.revokeObjectURL(filePreview.url);
+  }, [filePreview?.url]);
 
   const ladeArchiv = useCallback(async (silent = false) => {
     setArchivLaden(true);
@@ -839,7 +920,7 @@ export default function DokumentScanner({ tabActive = true }) {
             ):(
               <div style={{display:"flex",flexDirection:"column",gap:10}}>
                 {archivListe.map(dok=>(
-                  <ArchivZeile key={dok.dok_id||dok.id||dok.dateiname} dok={dok} mandanten={mandanten} papierkorb={false} onRefresh={ladeArchiv} showToast={showToast}/>
+                  <ArchivZeile key={dok.dok_id||dok.id||dok.dateiname} dok={dok} mandanten={mandanten} papierkorb={false} onRefresh={ladeArchiv} showToast={showToast} onDateiOeffnen={oeffneDateiVorschau}/>
                 ))}
               </div>
             )}
@@ -877,7 +958,7 @@ export default function DokumentScanner({ tabActive = true }) {
             ):(
               <div style={{display:"flex",flexDirection:"column",gap:10}}>
                 {papierkorb.map(dok=>(
-                  <ArchivZeile key={dok.dok_id||dok.id||dok.dateiname} dok={dok} mandanten={mandanten} papierkorb onRefresh={ladeArchiv} showToast={showToast}/>
+                  <ArchivZeile key={dok.dok_id||dok.id||dok.dateiname} dok={dok} mandanten={mandanten} papierkorb onRefresh={ladeArchiv} showToast={showToast} onDateiOeffnen={oeffneDateiVorschau}/>
                 ))}
               </div>
             )}
@@ -892,6 +973,7 @@ export default function DokumentScanner({ tabActive = true }) {
           </div>
         )}
       </div>
+      <DateiVorschauModal preview={filePreview} onClose={schliesseVorschau} />
     </div>
   );
 }

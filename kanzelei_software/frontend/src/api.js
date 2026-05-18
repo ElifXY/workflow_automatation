@@ -1108,7 +1108,7 @@ export const dokumentWiederherstellen = (dokId) =>
   apiFetch(`/dokumente/${encodeURIComponent(dokId)}/wiederherstellen`, { method: "POST" });
 
 /** Datei im Browser öffnen (neuer Tab), nicht als Download. */
-export const dokumentDateiOeffnen = async (dokId, dateiname = "dokument") => {
+export const dokumentDateiBlobUrl = async (dokId) => {
   const base = process.env.REACT_APP_API_URL || "/api";
   const token = (localStorage.getItem("kanzlei_token") || localStorage.getItem("token") || "").trim();
   const res = await fetch(`${base}/dokumente/${encodeURIComponent(dokId)}/datei`, {
@@ -1126,6 +1126,12 @@ export const dokumentDateiOeffnen = async (dokId, dateiname = "dokument") => {
   const ct = res.headers.get("Content-Type") || raw.type || "application/pdf";
   const blob = raw.type ? raw : new Blob([raw], { type: ct });
   const url = URL.createObjectURL(blob);
+  return { url, contentType: ct, blob };
+};
+
+/** Öffnet in neuem Tab (Fallback, wenn Vorschau nicht genutzt wird). */
+export const dokumentDateiOeffnen = async (dokId, dateiname = "dokument") => {
+  const { url } = await dokumentDateiBlobUrl(dokId);
   const tab = window.open(url, "_blank", "noopener,noreferrer");
   if (!tab) {
     URL.revokeObjectURL(url);
