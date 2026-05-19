@@ -4,7 +4,7 @@
 # ============================================================
 
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Tuple
+from typing import Optional, Dict, Tuple, List
 import logging
 import os
 import re
@@ -56,6 +56,153 @@ def _anrede_name(mandant: str, m: Dict) -> str:
     return kurz if kurz and len(kurz) >= 2 else "Damen und Herren"
 
 
+# Kurzbezeichnungen / Kategorien → verständliche Formulierungen für Mandanten-Mails
+_BEGRIFF_MAP = {
+    "fristenabgabe":     "Abgabe der gesetzlichen Fristen",
+    "frist":             "Erfüllung einer Frist",
+    "ust":               "Umsatzsteuer-Voranmeldung",
+    "ustva":             "Umsatzsteuer-Voranmeldung",
+    "ustva2024":         "Umsatzsteuer-Voranmeldung",
+    "lohn":              "Lohnabrechnung",
+    "lohnabrechnung":    "Lohnabrechnung",
+    "lohnsteuer":        "Lohnsteuer-Anmeldung",
+    "einkommensteuer":   "Einkommensteuererklärung",
+    "est":               "Einkommensteuererklärung",
+    "jahresabschluss":   "Jahresabschluss",
+    "bescheid":          "Steuerbescheid",
+    "gewerbesteuer":     "Gewerbesteuererklärung",
+    "körperschaftsteuer": "Körperschaftsteuererklärung",
+    "koerperschaftsteuer": "Körperschaftsteuererklärung",
+    "dokumente":         "Einreichung fehlender Unterlagen",
+    "unterlagen":        "Einreichung fehlender Unterlagen",
+}
+
+_MONATE_DE = (
+    "Januar", "Februar", "März", "April", "Mai", "Juni",
+    "Juli", "August", "September", "Oktober", "November", "Dezember",
+)
+
+
+def _norm_begriff(s: str) -> str:
+    return re.sub(r"[^a-z0-9äöüß]", "", (s or "").lower())
+
+
+def _esc_html(s: str) -> str:
+    return (
+        (s or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _lesbare_aufgaben_beschreibung(aufgabe: Dict) -> str:
+    """Mandantentaugliche Bezeichnung aus Beschreibung, Titel oder Kategorie."""
+    for feld in ("beschreibung", "titel", "name", "kategorie"):
+        raw = (aufgabe.get(feld) or "").strip()
+        if not raw or raw.lower() in ("?", "aufgabe", "task", "todo"):
+            continue
+        key = _norm_begriff(raw)
+        if key in _BEGRIFF_MAP:
+            return _BEGRIFF_MAP[key]
+        # Bereits gut lesbarer Text (Satz, mehrere Wörter, Großschreibung)
+        if len(raw) > 12 and (" " in raw or any(c.isupper() for c in raw[1:])):
+            return raw[0].upper() + raw[1:] if raw else raw
+        label = raw.replace("_", " ").replace("-", " ").strip()
+        wkey = _norm_begriff(label)
+        if wkey in _BEGRIFF_MAP:
+            return _BEGRIFF_MAP[wkey]
+        if label:
+            return " ".join(w.capitalize() for w in label.split())
+    return "Offener Mandantenpunkt"
+
+
+def _format_frist_de(frist_str: Optional[str]) -> str:
+    if not frist_str:
+        return "ohne Datum"
+    try:
+        d = datetime.strptime(str(frist_str)[:10], "%Y-%m-%d")
+        return f"{d.day}. {_MONATE_DE[d.month - 1]} {d.year}"
+    except (ValueError, TypeError):
+        return str(frist_str)
+
+
+def _tage_bis_frist(frist_str: Optional[str]) -> Optional[int]:
+    if not frist_str:
+        return None
+    try:
+        frist = datetime.strptime(str(frist_str)[:10], "%Y-%m-%d")
+        heute = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        return (frist - heute).days
+    except (ValueError, TypeError):
+        return None
+
+
+def _aufgabe_zeile(aufgabe: Dict, typ: str) -> str:
+    titel = _lesbare_aufgaben_beschreibung(aufgabe)
+    frist = _format_frist_de(aufgabe.get("frist"))
+    tage = _tage_bis_frist(aufgabe.get("frist"))
+
+    if typ == "ueberfaellig":
+        if tage is not None and tage < 0:
+            t = "Tag" if abs(tage) == 1 else "Tage"
+            return f"{titel} — Frist war am {frist} ({abs(tage)} {t} überfällig)"
+        return f"{titel} — Frist war am {frist}"
+
+    if tage == 0:
+        return f"{titel} — heute fällig ({frist})"
+    if tage == 1:
+        return f"{titel} — morgen fällig ({frist})"
+    if tage is not None and tage > 0:
+        t = "Tag" if tage == 1 else "Tage"
+        return f"{titel} — fällig am {frist} (noch {tage} {t})"
+    return f"{titel} — Frist am {frist}"
+
+
+def _baue_aufgaben_inhalt(
+    ueberfaellig: List[Dict],
+    bald: List[Dict],
+) -> Tuple[str, str]:
+    """Plain-Text und HTML-Liste für den Aufgaben-Block."""
+    if not ueberfaellig and not bald:
+        return "", ""
+
+    plain: List[str] = [
+        "Zu Ihrem Mandat liegen folgende offene Fristen und Aufgaben vor:",
+        "",
+    ]
+    html_parts: List[str] = [
+        '<p style="margin:0 0 10px;color:#333;line-height:1.65;">'
+        "Zu Ihrem Mandat liegen folgende offene Fristen und Aufgaben vor:</p>",
+    ]
+    lis: List[str] = []
+
+    if ueberfaellig:
+        plain.append("Überfällig:")
+        for a in sorted(ueberfaellig, key=lambda x: x.get("frist", "")):
+            z = _aufgabe_zeile(a, "ueberfaellig")
+            plain.append(f"  • {z}")
+            lis.append(f'<li style="margin-bottom:8px;">{_esc_html(z)}</li>')
+        plain.append("")
+
+    if bald:
+        plain.append("In den nächsten Tagen anstehend:")
+        for a in sorted(bald, key=lambda x: x.get("frist", "")):
+            z = _aufgabe_zeile(a, "bald")
+            plain.append(f"  • {z}")
+            lis.append(f'<li style="margin-bottom:8px;">{_esc_html(z)}</li>')
+
+    if lis:
+        html_parts.append(
+            '<ul style="margin:4px 0 0;padding-left:20px;color:#333;line-height:1.65;">'
+            + "".join(lis)
+            + "</ul>"
+        )
+
+    return "\n".join(plain).strip(), "".join(html_parts)
+
+
 def _ton(umsatz: float, tage: int, ueberfaellig: int, score: float) -> str:
     if umsatz >= 500000:
         return "premium_dringend" if (ueberfaellig > 0 or tage >= 14) else "premium"
@@ -70,7 +217,7 @@ def _ton(umsatz: float, tage: int, ueberfaellig: int, score: float) -> str:
 
 def _analysiere_inhalt(
     mandant: str, m: Dict, aufgaben: Dict, ds
-) -> Tuple[str, str, str, str, str]:
+) -> Tuple[str, str, str, str, str, str]:
     umsatz = float(m.get("umsatz", 0) or 0)
     fehlende = m.get("fehlende_dokumente_liste", [])
     fehlende = fehlende if isinstance(fehlende, list) else []
@@ -82,26 +229,12 @@ def _analysiere_inhalt(
 
     meine = [a for a in aufgaben.values() if a.get("mandant") == mandant and not a.get("erledigt")]
     heute = datetime.now().strftime("%Y-%m-%d")
+    grenze = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
     ueberfaellig = [a for a in meine if a.get("frist", "9999") < heute]
+    bald = [a for a in meine if heute <= a.get("frist", "9999") <= grenze]
     ton = _ton(umsatz, tage, len(ueberfaellig), len(ueberfaellig) * 3000 + tage * 100)
 
-    aufgaben_text = ""
-    if ueberfaellig:
-        namen = [a.get("beschreibung", "Aufgabe")[:50] for a in ueberfaellig[:3]]
-        aufgaben_text = (
-            f"Folgende Punkte sind überfällig ({len(ueberfaellig)}): "
-            + ", ".join(namen)
-            + (" …" if len(ueberfaellig) > 3 else "")
-        )
-    grenze = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
-    bald = [a for a in meine if heute <= a.get("frist", "9999") <= grenze]
-    if bald and not aufgaben_text:
-        namen = [a.get("beschreibung", "Aufgabe")[:40] for a in bald[:3]]
-        aufgaben_text = (
-            f"In den nächsten Tagen stehen {len(bald)} Termin(e) an"
-            + (f" ({', '.join(namen)})" if namen else "")
-            + "."
-        )
+    aufgaben_text, aufgaben_html = _baue_aufgaben_inhalt(ueberfaellig, bald)
 
     dokumente_text = ""
     if fehlende:
@@ -119,13 +252,14 @@ def _analysiere_inhalt(
             "Wir freuen uns auf Ihre Nachricht."
         )
 
-    return ton, aufgaben_text, dokumente_text, tage_text, _anrede_name(mandant, m)
+    return ton, aufgaben_text, aufgaben_html, dokumente_text, tage_text, _anrede_name(mandant, m)
 
 
 def _html_email(
     anrede_name: str,
     ton: str,
     aufgaben_text: str,
+    aufgaben_html: str,
     dokumente_text: str,
     tage_text: str,
     kanzlei_name: str,
@@ -158,12 +292,15 @@ def _html_email(
     )
 
     blocks = []
-    if aufgaben_text:
+    if aufgaben_html or aufgaben_text:
+        inner = aufgaben_html if aufgaben_html else (
+            f'<p style="margin:8px 0 0;color:#333;line-height:1.6;">{aufgaben_text}</p>'
+        )
         blocks.append(
             f'<div style="background:#f8f9fa;border-left:4px solid {accent};padding:16px;'
             f'border-radius:0 8px 8px 0;margin:16px 0;">'
             f'<strong style="color:{accent};">Offene Fristen &amp; Aufgaben</strong>'
-            f'<p style="margin:8px 0 0;color:#333;line-height:1.6;">{aufgaben_text}</p></div>'
+            f'<div style="margin-top:8px;">{inner}</div></div>'
         )
     if dokumente_text:
         blocks.append(
@@ -261,7 +398,7 @@ def _plain_email(
     )
     einleitungen = {
         "freundlich":       "wir informieren Sie über den aktuellen Stand Ihrer Unterlagen.",
-        "hoeflich":         "wir erlauben uns, Sie an offene Punkte zu erinnern.",
+        "hoeflich":         "wir erlauben uns, Sie freundlich an noch offene Punkte in Ihrer Mandatsbetreuung zu erinnern.",
         "nachdrücklich":    "folgende Punkte erfordern zeitnahe Bearbeitung:",
         "dringend":         "folgende Punkte sind dringend:",
         "premium":          "als geschätzter Mandant erhalten Sie folgende Information:",
@@ -269,7 +406,7 @@ def _plain_email(
     }
     body = anrede + einleitungen.get(ton, einleitungen["freundlich"]) + "\n\n"
     if aufgaben_text:
-        body += f"OFFENE FRISTEN & AUFGABEN:\n{aufgaben_text}\n\n"
+        body += aufgaben_text + "\n\n"
     if dokumente_text:
         body += f"UNTERLAGEN:\n{dokumente_text}\n\n"
     if tage_text:
@@ -301,11 +438,11 @@ def _betreff(ton: str, anrede_name: str) -> str:
 def generate_ai_email(mandant: str, m: Dict, aufgaben: Dict, ds) -> str:
     """HTML-E-Mail für einen Mandanten."""
     kanzlei_name, kanzlei_email, kanzlei_telefon = _kanzlei_meta(ds)
-    ton, aufgaben_text, dokumente_text, tage_text, anrede_name = _analysiere_inhalt(
+    ton, aufgaben_text, aufgaben_html, dokumente_text, tage_text, anrede_name = _analysiere_inhalt(
         mandant, m, aufgaben, ds
     )
     return _html_email(
-        anrede_name, ton, aufgaben_text, dokumente_text, tage_text,
+        anrede_name, ton, aufgaben_text, aufgaben_html, dokumente_text, tage_text,
         kanzlei_name, kanzlei_email, kanzlei_telefon,
     )
 
@@ -342,11 +479,11 @@ def generiere_email_text(
 
 def erstelle_email_vorschau(mandant: str, m: Dict, aufgaben: Dict, ds) -> Dict:
     kanzlei_name, kanzlei_email, kanzlei_telefon = _kanzlei_meta(ds)
-    ton, aufgaben_text, dokumente_text, tage_text, anrede_name = _analysiere_inhalt(
+    ton, aufgaben_text, aufgaben_html, dokumente_text, tage_text, anrede_name = _analysiere_inhalt(
         mandant, m, aufgaben, ds
     )
     html_body = _html_email(
-        anrede_name, ton, aufgaben_text, dokumente_text, tage_text,
+        anrede_name, ton, aufgaben_text, aufgaben_html, dokumente_text, tage_text,
         kanzlei_name, kanzlei_email, kanzlei_telefon,
     )
     plain_body = _plain_email(
