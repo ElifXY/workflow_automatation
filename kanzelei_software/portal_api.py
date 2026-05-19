@@ -587,23 +587,30 @@ def freigabe_erteilen(fid: str, kommentar: str = Query(""),
 
 @portal_router.post("/portal/nachricht", tags=["Portal"])
 def nachricht_senden(data: NachrichtCreate, mandant: str = Depends(hole_mandant)):
-    if not bool(setting_holen("portal_nachrichten_aktiv", True)):
-        raise HTTPException(503, "Nachrichten im Mandantenportal sind deaktiviert")
-    betreff = (data.betreff or "").strip()
-    inhalt = (data.inhalt or "").strip()
-    text_voll = f"Betreff: {betreff}\n\n{inhalt}" if betreff else inhalt
-    ds.kommunikation_hinzufuegen(mandant, {
-        "typ": "portal_nachricht",
-        "text": text_voll,
-        "richtung": "eingehend",
-        "timestamp": datetime.now().isoformat(),
-        "gelesen": False,
-    })
-    m = ds.hole_mandanten().get(mandant,{})
-    m["letzte_antwort"] = datetime.now().isoformat()
-    ds.mandant_speichern(mandant, m)
-    ds.log_eintrag(f"PORTAL_NACHRICHT | {mandant} | {data.betreff[:50]}")
-    return {"status":"gesendet"}
+    try:
+        if not bool(setting_holen("portal_nachrichten_aktiv")):
+            raise HTTPException(503, "Nachrichten im Mandantenportal sind deaktiviert")
+        betreff = (data.betreff or "").strip()
+        inhalt = (data.inhalt or "").strip()
+        text_voll = f"Betreff: {betreff}\n\n{inhalt}" if betreff else inhalt
+        if not ds.kommunikation_hinzufuegen(mandant, {
+            "typ": "portal_nachricht",
+            "text": text_voll,
+            "richtung": "eingehend",
+            "timestamp": datetime.now().isoformat(),
+        }):
+            raise HTTPException(500, "Nachricht konnte nicht gespeichert werden")
+        m = dict(ds.hole_mandanten().get(mandant) or {})
+        if m:
+            m["letzte_antwort"] = datetime.now().isoformat()
+            ds.mandant_speichern(mandant, m)
+        ds.log_eintrag(f"PORTAL_NACHRICHT | {mandant} | {betreff[:50]}")
+        return {"status": "gesendet"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("portal/nachricht fehlgeschlagen (%s): %s", mandant, e)
+        raise HTTPException(500, "Nachricht konnte nicht gesendet werden") from e
 
 @portal_router.get("/portal/nachrichten", tags=["Portal"])
 def meine_nachrichten(mandant: str = Depends(hole_mandant)):
