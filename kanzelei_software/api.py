@@ -1128,9 +1128,14 @@ async def startup_event():
             )
 
         gw = (os.getenv("API_GATEWAY_KEY") or "").strip()
-        if len(gw) < 32:
+        if gw and len(gw) < 32:
             prod_errs.append(
-                "API_GATEWAY_KEY muss mindestens 32 Zeichen haben (öffentlicher API-Zugriff)."
+                "API_GATEWAY_KEY ist gesetzt, aber kürzer als 32 Zeichen."
+            )
+        elif not gw:
+            log.warning(
+                "Production: API_GATEWAY_KEY nicht gesetzt — öffentliche Routen nur per JWT/Session "
+                "(empfohlen für Produktion: openssl rand -hex 24 in .env eintragen)."
             )
         raw_jwt = (os.getenv("JWT_SECRET") or "").strip()
         jsecret = raw_jwt.lower()

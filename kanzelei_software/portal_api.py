@@ -29,10 +29,13 @@ log = logging.getLogger("kanzlei_portal")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 _plog = (os.getenv("PORTAL_LOG_DIR") or os.getenv("API_LOG_DIR") or "").strip()
 if _plog:
-    os.makedirs(_plog, exist_ok=True)
-    _pfh = logging.FileHandler(os.path.join(_plog, "portal.log"), encoding="utf-8")
-    _pfh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-    log.addHandler(_pfh)
+    try:
+        os.makedirs(_plog, exist_ok=True)
+        _pfh = logging.FileHandler(os.path.join(_plog, "portal.log"), encoding="utf-8")
+        _pfh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        log.addHandler(_pfh)
+    except OSError as e:
+        log.warning("Portal-Datei-Log nicht nutzbar (%s): nur stdout.", e)
 
 # Router wird in die Haupt-App (api.py / backend.api) eingebunden — CORS dort.
 portal_router = APIRouter(tags=["Portal"])
@@ -639,7 +642,12 @@ def register_portal_with_app(main_app: FastAPI) -> None:
                 "Production: PORTAL_SECRET muss mindestens 32 Zeichen haben und keine Dev-Platzhalter enthalten."
             )
         gw = (os.getenv("PORTAL_GATEWAY_KEY") or os.getenv("API_GATEWAY_KEY") or "").strip()
-        if len(gw) < 32:
+        if gw and len(gw) < 32:
             raise RuntimeError(
-                "Production: API_GATEWAY_KEY oder PORTAL_GATEWAY_KEY (mindestens 32 Zeichen) ist erforderlich."
+                "Production: API_GATEWAY_KEY/PORTAL_GATEWAY_KEY ist gesetzt, aber kürzer als 32 Zeichen."
+            )
+        if not gw:
+            log.warning(
+                "Production: kein API_GATEWAY_KEY — Portal/API ohne Gateway-Header-Schutz "
+                "(JWT-Login der Kanzlei bleibt aktiv)."
             )
