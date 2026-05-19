@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from fastapi import FastAPI, HTTPException, Depends, Header, status, Query, Request, APIRouter
 from fastapi.responses import JSONResponse, HTMLResponse
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 from dotenv import load_dotenv
 from core.daten_speicher import DatenSpeicher
 from modules.settings_manager import setting_holen
@@ -122,8 +122,26 @@ def _save_portal(data: Dict):
 # ── MODELS ───────────────────────────────────────────────────
 
 class NachrichtCreate(BaseModel):
-    betreff: str = Field(..., min_length=2, max_length=200)
-    inhalt:  str = Field(..., min_length=5, max_length=5000)
+    betreff: str = Field(..., min_length=1, max_length=200)
+    inhalt:  str = Field(
+        ...,
+        min_length=1,
+        max_length=5000,
+        validation_alias=AliasChoices("inhalt", "text", "nachricht"),
+    )
+
+
+def _komm_zeile_normalisieren(k: Dict) -> Dict:
+    """DB-Felder (erstellt_am) für Portal-UI vereinheitlichen."""
+    row = dict(k)
+    row.setdefault("timestamp", row.get("erstellt_am") or row.get("zeit") or "")
+    txt = (row.get("text") or "").strip()
+    if txt.startswith("Betreff:"):
+        parts = txt.split("\n\n", 1)
+        if len(parts) == 2:
+            row.setdefault("betreff", parts[0].replace("Betreff:", "", 1).strip())
+            row["text"] = parts[1].strip()
+    return row
 
 class DokumentUpload(BaseModel):
     dateiname:    str
@@ -569,8 +587,18 @@ def freigabe_erteilen(fid: str, kommentar: str = Query(""),
 
 @portal_router.post("/portal/nachricht", tags=["Portal"])
 def nachricht_senden(data: NachrichtCreate, mandant: str = Depends(hole_mandant)):
-    ds.kommunikation_hinzufuegen(mandant,{"typ":"portal_nachricht","betreff":data.betreff,
-        "text":data.inhalt,"timestamp":datetime.now().isoformat(),"gelesen":False})
+    if not bool(setting_holen("portal_nachrichten_aktiv", True)):
+        raise HTTPException(503, "Nachrichten im Mandantenportal sind deaktiviert")
+    betreff = (data.betreff or "").strip()
+    inhalt = (data.inhalt or "").strip()
+    text_voll = f"Betreff: {betreff}\n\n{inhalt}" if betreff else inhalt
+    ds.kommunikation_hinzufuegen(mandant, {
+        "typ": "portal_nachricht",
+        "text": text_voll,
+        "richtung": "eingehend",
+        "timestamp": datetime.now().isoformat(),
+        "gelesen": False,
+    })
     m = ds.hole_mandanten().get(mandant,{})
     m["letzte_antwort"] = datetime.now().isoformat()
     ds.mandant_speichern(mandant, m)
@@ -581,10 +609,14 @@ def nachricht_senden(data: NachrichtCreate, mandant: str = Depends(hole_mandant)
 def meine_nachrichten(mandant: str = Depends(hole_mandant)):
     komm = ds.hole_kommunikation(mandant)
     sichtbar = sorted(
-        [k for k in komm if k.get("typ") in ["portal_nachricht","auto_email",
-         "dokument_unterschrieben","portal_upload","freigabe_erteilt","unterschrift_abgelehnt"]],
-        key=lambda x: x.get("timestamp",""), reverse=True)
-    return {"nachrichten":sichtbar[:20]}
+        [_komm_zeile_normalisieren(k) for k in komm if k.get("typ") in [
+            "portal_nachricht", "auto_email", "dokument_unterschrieben", "portal_upload",
+            "freigabe_erteilt", "unterschrift_abgelehnt",
+        ]],
+        key=lambda x: x.get("timestamp", ""),
+        reverse=True,
+    )
+    return {"nachrichten": sichtbar[:20]}
 
 @portal_router.post("/portal/simulation", tags=["Portal"])
 def simulation(data: SimulationRequest, mandant: str = Depends(hole_mandant)):
