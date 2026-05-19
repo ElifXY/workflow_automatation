@@ -1815,9 +1815,11 @@ def dokument_erhalten(name: str, dokument_name: str = Query(...),
 # ============================================================
 
 class EmailSendRequest(BaseModel):
-    betreff:    Optional[str] = None
-    email_text: Optional[str] = None   # Wenn gesetzt: benutzerdefinierten Text senden
-    force:      bool          = True   # BUGFIX: war False → jetzt True als Default (manuelle Sends immer erlaubt)
+    betreff:      Optional[str] = None
+    email_text:   Optional[str] = None   # Plain-Text (optional)
+    email_html:   Optional[str] = None   # HTML-Vorschau (bevorzugt für Mandanten-Mails)
+    empfaenger:   Optional[str] = None   # Ziel-Adresse (sonst Mandanten-Stammdaten)
+    force:        bool          = True
 
 @app.get("/email/{name}/vorschau", tags=["Email"])
 def email_vorschau(name: str, _user: dict = Depends(get_current_user)):
@@ -1842,42 +1844,76 @@ def email_senden(name: str, background_tasks: BackgroundTasks,
     _user: dict = Depends(get_current_user)):
     store = get_ds(_user)
     m = get_mandant_or_404(name, store)
-    if not m.get("email"):
-        raise HTTPException(400, f"Mandant '{name}' hat keine Email-Adresse")
 
-    # BUGFIX: 24h-Sperre nur bei automatischen Sends, nicht bei manuellen
-    force = data.force if data else True  # Manueller Send immer erlaubt
+    to_email = (data.empfaenger if data and data.empfaenger else m.get("email") or "").strip()
+    if not to_email or "@" not in to_email:
+        raise HTTPException(
+            400,
+            f"Keine gültige Empfänger-E-Mail für '{name}'. Bitte Adresse eingeben oder im Mandanten hinterlegen.",
+        )
+
+    force = data.force if data else True
     if not force and not darf_email_senden(name, store=store):
         raise HTTPException(429, "Email bereits in den letzten 24h gesendet. Nutze force=true zum Überschreiben.")
 
-    # Benutzerdefinierten Text verwenden wenn vorhanden
-    custom_text = data.email_text if data and data.email_text else None
+    custom_html = (data.email_html or "").strip() if data else ""
+    custom_text = (data.email_text or "").strip() if data else ""
+    if custom_text and custom_text.lstrip().startswith("<!DOCTYPE"):
+        custom_html = custom_html or custom_text
+        custom_text = ""
 
-    if custom_text:
-        subject = (data.betreff if data and data.betreff
-                   else f"Nachricht von Ihrer Kanzlei — {datetime.now().strftime('%d.%m.%Y')}")
-        idem_src = f"{store.kanzlei_id}|{name}|manual|{datetime.now().strftime('%Y-%m-%d-%H')}|{subject}|{custom_text[:160]}"
+    if custom_html or custom_text:
+        subject = (
+            data.betreff if data and data.betreff
+            else f"Mitteilung Ihrer Steuerkanzlei — {datetime.now().strftime('%d.%m.%Y')}"
+        )
+        body_text = custom_text or "Bitte öffnen Sie diese Nachricht in einem HTML-fähigen E-Mail-Programm."
+        body_html = custom_html or ""
+        idem_src = (
+            f"{store.kanzlei_id}|{name}|manual|{datetime.now().strftime('%Y-%m-%d-%H')}"
+            f"|{to_email}|{subject}|{(body_html or body_text)[:160]}"
+        )
         idem = hashlib.sha256(idem_src.encode("utf-8")).hexdigest()
         enq = email_outbox_enqueue(
             kanzlei_id=store.kanzlei_id,
             mandant=name,
-            to_email=m["email"],
+            to_email=to_email,
             subject=subject,
-            body_text=custom_text,
-            body_html="",
+            body_text=body_text,
+            body_html=body_html,
             idempotency_key=idem,
             max_attempts=5,
         )
-        store.log_eintrag(f"EMAIL_MANUELL_ENQUEUED | {name} | {m['email']} | outbox_id={enq.get('id')}")
+        store.log_eintrag(f"EMAIL_MANUELL_ENQUEUED | {name} | {to_email} | outbox_id={enq.get('id')}")
         background_tasks.add_task(_process_email_outbox_once, 5)
         _track_action_for_suggestions(store, "email_send_manual")
     else:
-        background_tasks.add_task(_email_fuer_mandant_senden, name, store)
-        background_tasks.add_task(_process_email_outbox_once, 5)
-        _track_action_for_suggestions(store, "email_send_auto")
+        if to_email != (m.get("email") or "").strip():
+            from core.ai_email import erstelle_email_vorschau
+            v = erstelle_email_vorschau(name, m, store.hole_fristen(), store)
+            subject = data.betreff if data and data.betreff else v["betreff"]
+            idem_src = f"{store.kanzlei_id}|{name}|manual|{datetime.now().isoformat()}|{to_email}|{subject}"
+            idem = hashlib.sha256(idem_src.encode("utf-8")).hexdigest()
+            enq = email_outbox_enqueue(
+                kanzlei_id=store.kanzlei_id,
+                mandant=name,
+                to_email=to_email,
+                subject=subject,
+                body_text=v["email_text"],
+                body_html=v["email_html"],
+                idempotency_key=idem,
+                max_attempts=5,
+            )
+            store.log_eintrag(f"EMAIL_MANUELL_ENQUEUED | {name} | {to_email} | outbox_id={enq.get('id')}")
+            background_tasks.add_task(_process_email_outbox_once, 5)
+            _track_action_for_suggestions(store, "email_send_manual")
+        else:
+            background_tasks.add_task(_email_fuer_mandant_senden, name, store)
+            background_tasks.add_task(_process_email_outbox_once, 5)
+            _track_action_for_suggestions(store, "email_send_auto")
 
     return ok_compat(
-        {"status": "queued", "mandant": name, "empfaenger": m["email"]},
+        {"status": "queued", "mandant": name, "empfaenger": to_email},
         "Email in Queue eingereiht",
     )
 

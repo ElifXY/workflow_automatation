@@ -16,6 +16,7 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
+import KiEmailComposer from "../components/KiEmailComposer";
 
 import {
   getMandant,
@@ -28,8 +29,6 @@ import {
   getDokumente,
   dokumentAnfordern,
   dokumentErhalten,
-  getEmailPreview,
-  sendEmail,
   mandantAntwortEmpfangen,
   getSimulation,
   getMandantReport,
@@ -646,170 +645,13 @@ const PortalSection = ({ name, showToast }) => {
 // EMAIL SECTION
 // ═══════════════════════════════════════════════════════════
 
-const EmailSection = ({ name, email }) => {
-  const [preview,    setPreview]    = useState(null);
-  const [loading,    setLoading]    = useState(false);
-  const [sending,    setSending]    = useState(false);
-  const [gesendet,   setGesendet]   = useState(false);
-  const [editMode,   setEditMode]   = useState(false);
-  const [editText,   setEditText]   = useState("");
-  const [betreff,    setBetreff]    = useState("");
+const EmailSection = ({ name, email }) => (
+  <Card>
+    <SectionTitle>KI-E-Mail an Mandant</SectionTitle>
+    <KiEmailComposer mandantName={name} mandantEmail={email || ""} />
+  </Card>
+);
 
-  const ladeVorschau = async () => {
-    setLoading(true);
-    try {
-      const d = await getEmailPreview(name);
-      setPreview(d);
-      setEditText(d.email_text || "");
-      setBetreff(`Kanzlei Mitteilung — ${name} — ${new Date().toLocaleDateString("de-DE")}`);
-    } catch (e) {
-      setPreview({ email_text: "Vorschau nicht verfügbar: " + e.message, empfaenger: "" });
-      setEditText("Vorschau nicht verfügbar: " + e.message);
-    } finally { setLoading(false); }
-  };
-
-  const handleSenden = async () => {
-    if (!email) { alert("Kein E-Mail für diesen Mandanten hinterlegt."); return; }
-    setSending(true);
-    try {
-      // FIX: email_text (nicht emailText) — Backend erwartet snake_case
-      await sendEmail(name, {
-        email_text: editMode ? editText : (preview?.email_text || null),
-        betreff:    betreff || null,
-        force:      true,
-      });
-      setGesendet(true);
-      setTimeout(() => setGesendet(false), 4000);
-    } catch (e) { alert(e.message); }
-    finally { setSending(false); }
-  };
-
-  const handleKiNeu = async () => {
-    setLoading(true);
-    setEditMode(false);
-    try {
-      const d = await getEmailPreview(name);
-      setPreview(d);
-      setEditText(d.email_text || "");
-    } catch (e) { alert(e.message); }
-    finally { setLoading(false); }
-  };
-
-  return (
-    <Card>
-      <SectionTitle>KI-Email</SectionTitle>
-      <div style={{ fontSize: 12, color: "var(--text3)", lineHeight: 1.55, marginBottom: 12 }}>
-        Text wird aus Mandanten-Status erstellt: offene Aufgaben, fehlende Dokumente,
-        Tage ohne Antwort und Risiko-Score.
-      </div>
-
-      {!email && (
-        <div style={{
-          fontSize: 12, color: "var(--orange)", marginBottom: 12,
-          background: "var(--orange)" + "15", border: `1px solid ${"var(--orange)"}30`,
-          borderRadius: 8, padding: "8px 12px",
-        }}>
-          ⚠ Keine E-Mail-Adresse hinterlegt
-        </div>
-      )}
-
-      {gesendet && (
-        <div style={{
-          fontSize: 12, color: "var(--green)", marginBottom: 12,
-          background: "var(--green)" + "15", border: `1px solid ${"var(--green)"}30`,
-          borderRadius: 8, padding: "8px 12px",
-        }}>
-          ✓ Email wurde versendet
-        </div>
-      )}
-
-      {!preview ? (
-        <Btn onClick={ladeVorschau} loading={loading} variant="ghost" size="sm">
-          KI-Email generieren
-        </Btn>
-      ) : (
-        <>
-          {/* Betreff */}
-          <div style={{ marginBottom: 10 }}>
-            <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 4,
-                          textTransform: "uppercase", letterSpacing: "0.06em" }}>
-              Betreff
-            </div>
-            <Input
-              placeholder="Betreff..."
-              value={betreff}
-              onChange={setBetreff}
-            />
-          </div>
-
-          {/* Email-Text — editierbar */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={{ display: "flex", justifyContent: "space-between",
-                          alignItems: "center", marginBottom: 6 }}>
-              <div style={{ fontSize: 11, color: "var(--text3)", textTransform: "uppercase",
-                             letterSpacing: "0.06em" }}>
-                Email-Text {editMode && <span style={{ color: "var(--accent)" }}>(bearbeitet)</span>}
-              </div>
-              <div style={{ display: "flex", gap: 6 }}>
-                <Btn size="xs" variant={editMode ? "subtle" : "ghost"}
-                     onClick={() => { setEditMode(!editMode); if (!editMode) setEditText(preview.email_text); }}>
-                  {editMode ? "✓ Bearbeitung" : "✏ Bearbeiten"}
-                </Btn>
-                <Btn size="xs" variant="ghost" onClick={handleKiNeu} loading={loading}>
-                  ⟳ KI neu
-                </Btn>
-              </div>
-            </div>
-
-            {editMode ? (
-              <textarea
-                value={editText}
-                onChange={e => setEditText(e.target.value)}
-                rows={10}
-                style={{
-                  width: "100%", background: "var(--bg)",
-                  border: `1px solid ${"var(--accent)"}66`,
-                  borderRadius: 10, color: "var(--text)",
-                  padding: "12px 14px", fontSize: 13,
-                  fontFamily: "'DM Sans', sans-serif",
-                  lineHeight: 1.8, resize: "vertical", outline: "none",
-                }}
-              />
-            ) : (
-              <pre style={{
-                whiteSpace: "pre-wrap", fontFamily: "'DM Sans', sans-serif",
-                fontSize: 12, color: "var(--text2)", lineHeight: 1.8,
-                background: "var(--bg)", border: `1px solid var(--border)`,
-                borderRadius: 10, padding: "12px 14px",
-                maxHeight: 240, overflowY: "auto",
-                cursor: "text",
-              }}
-                onClick={() => setEditMode(true)}
-                title="Klicken zum Bearbeiten">
-                {editText || preview.email_text}
-              </pre>
-            )}
-          </div>
-
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <Btn onClick={handleSenden} loading={sending} variant="primary" size="sm"
-                 disabled={!email}>
-              ✉ Senden an {preview.empfaenger || email || "?"}
-            </Btn>
-            <Btn onClick={() => { setPreview(null); setEditText(""); setEditMode(false); }}
-                 variant="ghost" size="sm">
-              Schließen
-            </Btn>
-          </div>
-
-          <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 8 }}>
-            Klicke auf den Text oder „Bearbeiten" um die Email anzupassen
-          </div>
-        </>
-      )}
-    </Card>
-  );
-};
 
 // ═══════════════════════════════════════════════════════════
 // SIMULATION SECTION

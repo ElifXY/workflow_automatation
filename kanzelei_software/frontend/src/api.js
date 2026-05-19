@@ -486,8 +486,9 @@ export const sendEmail = (name, options = {}) =>
   apiFetch(`/email/${encodeURIComponent(name)}/senden`, {
     method: "POST",
     body: JSON.stringify({
-      // Akzeptiere beide Schreibweisen (snake_case bevorzugt)
       email_text: options.email_text || options.emailText || null,
+      email_html: options.email_html || options.emailHtml || null,
+      empfaenger: options.empfaenger || options.to || null,
       betreff:    options.betreff   || null,
       force:      options.force !== undefined ? options.force : true,
     }),

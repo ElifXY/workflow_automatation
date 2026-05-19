@@ -16,7 +16,7 @@ import {
   getMandanten, getHeute, getEmpfehlungen, getKpis,
   addMandantAPI, updateMandantAPI, deleteMandantAPI,
   addAufgabeAPI, toggleAufgabeAPI, updateAufgabeAPI, deleteAufgabeAPI,
-  getEmailPreview, sendEmail, getSaasReadiness, getBillingUsage,
+  getSaasReadiness, getBillingUsage,
   createStripeCheckoutSession,
   trackBillingFunnelEvent,
   apiGet,
@@ -47,6 +47,7 @@ import ForgotPassword    from "./pages/ForgotPassword";
 import ResetPassword     from "./pages/ResetPassword";
 import VerifyEmail       from "./pages/VerifyEmail";
 import MandantDetail     from "./pages/MandantDetail";
+import KiEmailComposer   from "./components/KiEmailComposer";
 import { hasRoleReal, getEffectiveRole } from "./components/PermissionGate";
 import { hasNavTab } from "./navAccess";
 import { useContentLayoutWidth, readContentLayoutWidth } from "./useContentLayoutWidth";
@@ -1131,71 +1132,32 @@ const MandantFormPanel = ({ initialData, onSubmit, onCancel, loading, onDirtyCha
 // EMAIL MODAL
 // ═══════════════════════════════════════════════════════════
 
-const EmailModal = ({ name, onClose, onSend }) => {
-  const [preview, setPreview] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [sending, setSending] = useState(false);
-
-  useEffect(() => {
-    getEmailPreview(name)
-      .then(d => setPreview(d))
-      .catch(() => setPreview({ email_text:"Vorschau nicht verfügbar", empfaenger:"" }))
-      .finally(() => setLoading(false));
-  }, [name]);
-
-  const handleSend = async () => {
-    setSending(true);
-    try { await onSend(name); onClose(); }
-    catch (e) { alert("Fehler: " + e.message); }
-    finally { setSending(false); }
-  };
-
-  return (
-    <div style={{ position:"fixed", inset:0, background:"var(--overlay-scrim)",
-                  display:"flex", alignItems:"center", justifyContent:"center",
-                  zIndex:1000, animation:"fadeIn 0.15s ease" }}
-         onClick={e => e.target === e.currentTarget && onClose()}>
-      <div style={{ background:"var(--bg2)", border:"1px solid var(--border2)",
-                    borderRadius:"var(--radius-lg)", width:"min(560px,90vw)",
-                    maxHeight:"80vh", display:"flex", flexDirection:"column" }}>
-        <div style={{ padding:"20px 24px", borderBottom:"1px solid var(--border)",
-                      display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-          <div>
-            <div style={{ fontFamily:"var(--font-head)", fontSize:18, color:"var(--accent)" }}>
-              KI-Email-Vorschau
-            </div>
-            <div style={{ fontSize:12, color:"var(--text3)", marginTop:2 }}>
-              {name}{preview?.empfaenger ? ` · ${preview.empfaenger}` : ""}
-            </div>
-            <div style={{ fontSize:11, color:"var(--text3)", marginTop:6, lineHeight:1.45 }}>
-              Inhalt basiert auf Aufgaben, Dokumenten und Kontakt-Status.
-            </div>
+const EmailModal = ({ name, mandantEmail = "", onClose }) => (
+  <div style={{ position:"fixed", inset:0, background:"var(--overlay-scrim)",
+                display:"flex", alignItems:"center", justifyContent:"center",
+                zIndex:1000 }}
+       onClick={e => e.target === e.currentTarget && onClose()}>
+    <div style={{ background:"var(--bg2)", border:"1px solid var(--border2)",
+                  borderRadius:"var(--radius-lg)", width:"min(640px,94vw)",
+                  maxHeight:"90vh", display:"flex", flexDirection:"column" }}>
+      <div style={{ padding:"18px 22px", borderBottom:"1px solid var(--border)",
+                    display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+        <div>
+          <div style={{ fontFamily:"var(--font-head)", fontSize:18, color:"var(--accent)" }}>
+            KI-E-Mail an Mandant
           </div>
-          <Btn variant="ghost" size="sm" onClick={onClose}>✕</Btn>
+          <div style={{ fontSize:12, color:"var(--text3)", marginTop:2 }}>{name}</div>
         </div>
-
-        <div style={{ flex:1, overflowY:"auto", padding:"20px 24px" }}>
-          {loading ? (
-            <div style={{ textAlign:"center", padding:40 }}><Spinner size={28} /></div>
-          ) : (
-            <pre style={{ whiteSpace:"pre-wrap", fontFamily:"var(--font-body)",
-                          fontSize:13, color:"var(--text2)", lineHeight:1.7,
-                          background:"var(--bg)", border:"1px solid var(--border)",
-                          borderRadius:"var(--radius)", padding:16 }}>
-              {preview?.email_text}
-            </pre>
-          )}
-        </div>
-
-        <div style={{ padding:"16px 24px", borderTop:"1px solid var(--border)",
-                      display:"flex", gap:10 }}>
-          <Btn onClick={handleSend} loading={sending} variant="primary">Email senden</Btn>
-          <Btn onClick={onClose} variant="ghost">Schließen</Btn>
-        </div>
+        <Btn variant="ghost" size="sm" onClick={onClose}>✕</Btn>
+      </div>
+      <div style={{ flex:1, overflowY:"auto", padding:"18px 22px" }}>
+        <KiEmailComposer mandantName={name} mandantEmail={mandantEmail} compact onSent={onClose} />
       </div>
     </div>
-  );
-};
+  </div>
+);
+
+
 
 // ═══════════════════════════════════════════════════════════
 // AUFGABEN SEITE
@@ -1810,17 +1772,12 @@ function RisikoDashboard({ kpis, heute, onEmail, onTab, onRefresh, isMobile = fa
   const UMSATZ_FARBE = (u) =>
     u >= 500000 ? "var(--purple)" : u >= 100000 ? "var(--accent)" : u >= 30000 ? "var(--blue)" : "var(--text3)";
 
-  const handleEmail = async (name, email) => {
-    if (!email) { showToast("⚠ Keine E-Mail-Adresse hinterlegt"); return; }
-    setSending(name);
-    try {
-      await sendEmail(name);
-      showToast(`✓ Email an ${name} gesendet`);
-    } catch (e) {
-      showToast(`⚠ ${e.message}`);
-    } finally {
-      setSending(null);
+  const handleEmail = (name) => {
+    if (onEmail) {
+      onEmail(name);
+      return;
     }
+    showToast("⚠ E-Mail-Dialog nicht verfügbar");
   };
 
   const resolveTaskId = (item) => item?.id || item?.aufgabe_id || item?.task_id || "";
@@ -2187,14 +2144,11 @@ function RisikoDashboard({ kpis, heute, onEmail, onTab, onRefresh, isMobile = fa
                       Öffnen →
                     </Btn>
                   </Link>
-                  {k.email && (
-                    <Btn size="sm" variant={k.status==="KRITISCH"?"danger":"subtle"}
-                         loading={sending===k.mandant}
-                         onClick={() => handleEmail(k.mandant, k.email)}
-                         style={rowActionsBelow ? { flex:"1 1 160px", minWidth:0, maxWidth:"100%" } : undefined}>
-                      {k.status==="KRITISCH" ? "⚡ Email jetzt" : "✉ Email"}
-                    </Btn>
-                  )}
+                  <Btn size="sm" variant={k.status==="KRITISCH"?"danger":"subtle"}
+                       onClick={() => handleEmail(k.mandant)}
+                       style={rowActionsBelow ? { flex:"1 1 160px", minWidth:0, maxWidth:"100%" } : undefined}>
+                    {k.status==="KRITISCH" ? "⚡ E-Mail" : "✉ E-Mail"}
+                  </Btn>
                 </div>
               </div>
             </div>
@@ -2496,12 +2450,12 @@ function AppInner() {
     } catch (e) { toast(e.message, "error"); }
   };
 
-  const handleSendEmail = async (name) => {
-    await sendEmail(name);
-    toast(`✓ Email an ${name} gesendet`);
-  };
-
   const contentPad = isMobile ? "14px 12px" : "28px 36px";
+
+  const openEmailModal = (mandantName) => {
+    const row = (kpis || []).find((k) => k.mandant === mandantName);
+    setEmailModal({ name: mandantName, email: row?.email || "" });
+  };
 
   const renderContent = () => {
     if (loading) return (
@@ -2518,7 +2472,7 @@ function AppInner() {
 
       // ── DASHBOARD ──────────────────────────────────────────
       case "dashboard":
-        return <RisikoDashboard kpis={kpis} heute={heute} onEmail={m => setEmailModal(m)} onTab={setActiveTab} onRefresh={ladeAlles} isMobile={isMobile} />;
+        return <RisikoDashboard kpis={kpis} heute={heute} onEmail={openEmailModal} onTab={setActiveTab} onRefresh={ladeAlles} isMobile={isMobile} />;
 
       // ── MANDANTEN ──────────────────────────────────────────
       case "mandanten":
@@ -2552,7 +2506,7 @@ function AppInner() {
               kpis={kpis}
               onSelect={n => setSelectedName(prev => prev === n ? null : n)}
               onDelete={handleDelete}
-              onEmail={m => setEmailModal(m)}
+              onEmail={openEmailModal}
               selectedName={selectedName}
               isMobile={isMobile}
             />
@@ -2575,7 +2529,7 @@ function AppInner() {
                 Automatische Analyse · {empfehlungen.length} Mandanten mit Handlungsbedarf
               </div>
             </div>
-            <EmpfehlungenPanel empfehlungen={empfehlungen} onEmail={m => setEmailModal(m)} />
+            <EmpfehlungenPanel empfehlungen={empfehlungen} onEmail={openEmailModal} />
           </div>
         );
 
@@ -2751,9 +2705,11 @@ function AppInner() {
         {activeTab !== "dokumente" ? renderContent() : null}
       </main>
       {emailModal && (
-        <EmailModal name={emailModal}
-                    onClose={() => setEmailModal(null)}
-                    onSend={handleSendEmail} />
+        <EmailModal
+          name={emailModal.name || emailModal}
+          mandantEmail={emailModal.email || ""}
+          onClose={() => setEmailModal(null)}
+        />
       )}
       {((!isMobile && !sidebarVisible) || (isMobile && !mobileNavOpen)) ? (
         <button
