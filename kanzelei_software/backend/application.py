@@ -114,6 +114,8 @@ _API_GATEWAY_EXEMPT_PREFIXES = (
     "/openapi.json",
     "/auth/",
     "/api/auth/",
+    # Mandantenportal: eigene Auth (Login-Token, Portal-Bearer); nicht Kanzlei-JWT/Gateway
+    "/portal",
 )
 _API_GATEWAY_EXACT = frozenset(
     {
