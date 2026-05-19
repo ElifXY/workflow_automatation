@@ -12,19 +12,63 @@ function escapeHtml(s) {
     .replace(/"/g, "&quot;");
 }
 
-/** Plain-Text in einfaches HTML für Vorschau/Versand nach Bearbeitung */
-function plainToHtml(text) {
-  const body = escapeHtml(text || "")
-    .split(/\n\n+/)
-    .map((block) => {
-      const inner = block.split("\n").map(escapeHtml).join("<br>");
-      return `<p style="margin:0 0 14px;color:#333;line-height:1.75;font-size:14px;font-family:'Segoe UI',Arial,sans-serif;">${inner}</p>`;
+/** Signatur am Ende des Plain-Texts — steht bereits im HTML-Footer */
+function ohneHtmlSignatur(blocks) {
+  const copy = [...blocks];
+  while (copy.length > 1) {
+    const last = copy[copy.length - 1].toLowerCase();
+    if (
+      last.startsWith("mit freundlichen")
+      || (last.includes("@") && copy[copy.length - 1].length < 160)
+    ) {
+      copy.pop();
+    } else {
+      break;
+    }
+  }
+  return copy;
+}
+
+function plainBloeckeZuHtml(blocks) {
+  return blocks
+    .map((block, i) => {
+      const isAnrede = i === 0 && /^(sehr geehrte|guten tag|hallo|liebe)/i.test(block);
+      const style = isAnrede
+        ? "font-size:16px;color:#222;margin:0 0 10px;"
+        : "font-size:14px;color:#555;margin:0 0 14px;line-height:1.75;";
+      const inner = escapeHtml(block).split("\n").join("<br>");
+      return `<p style="${style}">${inner}</p>`;
     })
-    .join("");
-  return `<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"></head>
-<body style="margin:0;padding:24px;background:#fff;font-family:'Segoe UI',Arial,sans-serif;">
-${body || "<p></p>"}
+    .join("\n            ");
+}
+
+/**
+ * Bearbeiteten Plain-Text in die KI-HTML-Vorlage einsetzen (Header, CTA, Footer bleiben).
+ */
+function mergePlainIntoTemplate(templateHtml, plainText) {
+  const tpl = (templateHtml || "").trim();
+  if (!tpl || !plainText?.trim()) return tpl;
+
+  if (!tpl.includes("padding:32px")) {
+    const blocks = ohneHtmlSignatur(
+      plainText.split(/\n\n+/).map((s) => s.trim()).filter(Boolean)
+    );
+    return `<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:24px;background:#f4f4f5;font-family:'Segoe UI',Arial,sans-serif;">
+${plainBloeckeZuHtml(blocks)}
 </body></html>`;
+  }
+
+  const blocks = ohneHtmlSignatur(
+    plainText.split(/\n\n+/).map((s) => s.trim()).filter(Boolean)
+  );
+  const bodyInner = plainBloeckeZuHtml(blocks);
+
+  const replaced = tpl.replace(
+    /(<td style="padding:32px;">)[\s\S]*?(<\/td>)/,
+    `$1\n            ${bodyInner}\n          $2`
+  );
+  return replaced !== tpl ? replaced : tpl;
 }
 
 const tabBtn = (active) => ({
@@ -66,11 +110,13 @@ export default function KiEmailComposer({
     setEmpfaenger(mandantEmail || "");
   }, [mandantEmail, mandantName]);
 
+  const basisHtml = original?.html || preview?.email_html || "";
+
   const vorschauHtml = useMemo(() => {
     if (htmlGeaendert && editHtml.trim()) return editHtml;
-    if (textGeaendert) return plainToHtml(editText);
-    return preview?.email_html || plainToHtml(preview?.email_text) || "";
-  }, [htmlGeaendert, editHtml, textGeaendert, editText, preview]);
+    if (textGeaendert) return mergePlainIntoTemplate(basisHtml, editText);
+    return basisHtml || "";
+  }, [htmlGeaendert, editHtml, textGeaendert, editText, basisHtml]);
 
   const applyPreview = (d) => {
     setPreview(d);
@@ -120,11 +166,12 @@ export default function KiEmailComposer({
       return;
     }
     const finalText = editText.trim() || preview?.email_text || "";
-    let finalHtml = preview?.email_html || "";
+    const tpl = original?.html || preview?.email_html || "";
+    let finalHtml = tpl;
     if (htmlGeaendert) {
       finalHtml = editHtml.trim();
     } else if (textGeaendert) {
-      finalHtml = plainToHtml(editText);
+      finalHtml = mergePlainIntoTemplate(tpl, editText);
     }
 
     setSending(true);
@@ -312,6 +359,9 @@ export default function KiEmailComposer({
                 onChange={(e) => {
                   setEditText(e.target.value);
                   setTextGeaendert(true);
+                  if (!htmlGeaendert) {
+                    setEditHtml(mergePlainIntoTemplate(basisHtml, e.target.value));
+                  }
                 }}
                 rows={compact ? 12 : 16}
                 placeholder="E-Mail-Text…"
