@@ -1,8 +1,46 @@
-// KI-E-Mail: Vorschau (HTML), Empfänger wählbar, Versand
-import { useState, useEffect } from "react";
+// KI-E-Mail: Vorschau, Bearbeiten (Text/HTML), Empfänger, Versand
+import { useState, useEffect, useMemo } from "react";
 import { getEmailPreview, sendEmail } from "../api";
 
 const emailOk = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test((v || "").trim());
+
+function escapeHtml(s) {
+  return String(s || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/** Plain-Text in einfaches HTML für Vorschau/Versand nach Bearbeitung */
+function plainToHtml(text) {
+  const body = escapeHtml(text || "")
+    .split(/\n\n+/)
+    .map((block) => {
+      const inner = block.split("\n").map(escapeHtml).join("<br>");
+      return `<p style="margin:0 0 14px;color:#333;line-height:1.75;font-size:14px;font-family:'Segoe UI',Arial,sans-serif;">${inner}</p>`;
+    })
+    .join("");
+  return `<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:24px;background:#fff;font-family:'Segoe UI',Arial,sans-serif;">
+${body || "<p></p>"}
+</body></html>`;
+}
+
+const tabBtn = (active) => ({
+  padding: "6px 12px",
+  borderRadius: 8,
+  fontSize: 12,
+  fontWeight: 500,
+  cursor: "pointer",
+  border: active
+    ? "1px solid color-mix(in srgb, var(--accent) 40%, transparent)"
+    : "1px solid var(--border2)",
+  background: active
+    ? "color-mix(in srgb, var(--accent) 14%, var(--bg3))"
+    : "transparent",
+  color: active ? "var(--accent)" : "var(--text2)",
+});
 
 export default function KiEmailComposer({
   mandantName,
@@ -11,10 +49,16 @@ export default function KiEmailComposer({
   onSent,
 }) {
   const [preview, setPreview] = useState(null);
+  const [original, setOriginal] = useState(null);
   const [loading, setLoading] = useState(false);
   const [sending, setSending] = useState(false);
   const [empfaenger, setEmpfaenger] = useState(mandantEmail || "");
   const [betreff, setBetreff] = useState("");
+  const [editText, setEditText] = useState("");
+  const [editHtml, setEditHtml] = useState("");
+  const [inhaltTab, setInhaltTab] = useState("vorschau"); // vorschau | text | html
+  const [textGeaendert, setTextGeaendert] = useState(false);
+  const [htmlGeaendert, setHtmlGeaendert] = useState(false);
   const [gesendet, setGesendet] = useState(false);
   const [fehler, setFehler] = useState(null);
 
@@ -22,13 +66,33 @@ export default function KiEmailComposer({
     setEmpfaenger(mandantEmail || "");
   }, [mandantEmail, mandantName]);
 
+  const vorschauHtml = useMemo(() => {
+    if (htmlGeaendert && editHtml.trim()) return editHtml;
+    if (textGeaendert) return plainToHtml(editText);
+    return preview?.email_html || plainToHtml(preview?.email_text) || "";
+  }, [htmlGeaendert, editHtml, textGeaendert, editText, preview]);
+
+  const applyPreview = (d) => {
+    setPreview(d);
+    setOriginal({
+      text: d.email_text || "",
+      html: d.email_html || "",
+      betreff: d.betreff || "",
+    });
+    setEditText(d.email_text || "");
+    setEditHtml(d.email_html || "");
+    setTextGeaendert(false);
+    setHtmlGeaendert(false);
+    setBetreff(d.betreff || `Mitteilung — ${mandantName}`);
+    setInhaltTab("vorschau");
+  };
+
   const ladeVorschau = async () => {
     setLoading(true);
     setFehler(null);
     try {
       const d = await getEmailPreview(mandantName);
-      setPreview(d);
-      setBetreff(d.betreff || `Mitteilung — ${mandantName}`);
+      applyPreview(d);
       if (!empfaenger.trim() && d.empfaenger) {
         setEmpfaenger(d.empfaenger);
       }
@@ -39,20 +103,38 @@ export default function KiEmailComposer({
     }
   };
 
+  const zuruecksetzen = () => {
+    if (!original) return;
+    setEditText(original.text);
+    setEditHtml(original.html);
+    setBetreff(original.betreff);
+    setTextGeaendert(false);
+    setHtmlGeaendert(false);
+    setInhaltTab("vorschau");
+  };
+
   const handleSenden = async () => {
     const to = empfaenger.trim();
     if (!emailOk(to)) {
       alert("Bitte eine gültige E-Mail-Adresse eingeben oder die Mandanten-Adresse übernehmen.");
       return;
     }
+    const finalText = editText.trim() || preview?.email_text || "";
+    let finalHtml = preview?.email_html || "";
+    if (htmlGeaendert) {
+      finalHtml = editHtml.trim();
+    } else if (textGeaendert) {
+      finalHtml = plainToHtml(editText);
+    }
+
     setSending(true);
     setFehler(null);
     try {
       await sendEmail(mandantName, {
         empfaenger: to,
         betreff: betreff || preview?.betreff || null,
-        email_html: preview?.email_html || null,
-        email_text: preview?.email_text || null,
+        email_html: finalHtml || null,
+        email_text: finalText || null,
         force: true,
       });
       setGesendet(true);
@@ -78,11 +160,13 @@ export default function KiEmailComposer({
     boxSizing: "border-box",
   };
 
+  const geaendert = textGeaendert || htmlGeaendert;
+
   return (
     <div>
       <div style={{ fontSize: 12, color: "var(--text3)", lineHeight: 1.55, marginBottom: 12 }}>
-        Professionelle E-Mail an den Mandanten — mit Ihrem Kanzlei-Namen (Einstellungen),
-        Anrede nach Ansprechpartner und offenen Punkten aus dem System.
+        E-Mail wird für den Mandanten formuliert. Unter „Text bearbeiten“ oder „HTML“ können Sie den Inhalt
+        anpassen, bevor Sie senden.
       </div>
 
       {gesendet && (
@@ -168,24 +252,119 @@ export default function KiEmailComposer({
           </div>
 
           <div style={{ marginBottom: 12 }}>
-            <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 6,
-              textTransform: "uppercase", letterSpacing: "0.06em" }}>
-              Vorschau (so erhält der Mandant die E-Mail)
-            </div>
             <div style={{
-              border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden",
-              background: "#f4f4f5", maxHeight: compact ? 320 : 420,
+              display: "flex", flexWrap: "wrap", alignItems: "center",
+              justifyContent: "space-between", gap: 8, marginBottom: 8,
             }}>
-              <iframe
-                title="E-Mail-Vorschau"
-                srcDoc={preview.email_html || preview.email_text || ""}
-                sandbox=""
+              <div style={{ fontSize: 11, color: "var(--text3)",
+                textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                Inhalt {geaendert && (
+                  <span style={{ color: "var(--accent)", textTransform: "none", letterSpacing: 0 }}>
+                    (bearbeitet)
+                  </span>
+                )}
+              </div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                <button type="button" style={tabBtn(inhaltTab === "vorschau")} onClick={() => setInhaltTab("vorschau")}>
+                  Vorschau
+                </button>
+                <button type="button" style={tabBtn(inhaltTab === "text")} onClick={() => setInhaltTab("text")}>
+                  Text bearbeiten
+                </button>
+                <button type="button" style={tabBtn(inhaltTab === "html")} onClick={() => setInhaltTab("html")}>
+                  HTML
+                </button>
+                {geaendert && (
+                  <button
+                    type="button"
+                    onClick={zuruecksetzen}
+                    style={{
+                      ...tabBtn(false),
+                      color: "var(--orange)",
+                    }}
+                  >
+                    KI-Text wiederherstellen
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {inhaltTab === "vorschau" && (
+              <div style={{
+                border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden",
+                background: "#f4f4f5", maxHeight: compact ? 320 : 420,
+              }}>
+                <iframe
+                  title="E-Mail-Vorschau"
+                  srcDoc={vorschauHtml}
+                  sandbox=""
+                  style={{
+                    width: "100%", height: compact ? 300 : 400, border: "none",
+                    background: "#fff",
+                  }}
+                />
+              </div>
+            )}
+
+            {inhaltTab === "text" && (
+              <textarea
+                value={editText}
+                onChange={(e) => {
+                  setEditText(e.target.value);
+                  setTextGeaendert(true);
+                }}
+                rows={compact ? 12 : 16}
+                placeholder="E-Mail-Text…"
                 style={{
-                  width: "100%", height: compact ? 300 : 400, border: "none",
-                  background: "#fff",
+                  width: "100%",
+                  background: "var(--bg)",
+                  border: `1px solid ${textGeaendert ? "color-mix(in srgb, var(--accent) 50%, var(--border))" : "var(--border)"}`,
+                  borderRadius: 10,
+                  color: "var(--text)",
+                  padding: "12px 14px",
+                  fontSize: 13,
+                  lineHeight: 1.75,
+                  fontFamily: "var(--font-body)",
+                  resize: "vertical",
+                  outline: "none",
+                  boxSizing: "border-box",
+                  minHeight: 200,
                 }}
               />
-            </div>
+            )}
+
+            {inhaltTab === "html" && (
+              <textarea
+                value={editHtml}
+                onChange={(e) => {
+                  setEditHtml(e.target.value);
+                  setHtmlGeaendert(true);
+                }}
+                rows={compact ? 14 : 18}
+                spellCheck={false}
+                style={{
+                  width: "100%",
+                  background: "var(--bg)",
+                  border: `1px solid ${htmlGeaendert ? "color-mix(in srgb, var(--accent) 50%, var(--border))" : "var(--border)"}`,
+                  borderRadius: 10,
+                  color: "var(--text2)",
+                  padding: "12px 14px",
+                  fontSize: 11,
+                  lineHeight: 1.5,
+                  fontFamily: "ui-monospace, Consolas, monospace",
+                  resize: "vertical",
+                  outline: "none",
+                  boxSizing: "border-box",
+                  minHeight: 220,
+                }}
+              />
+            )}
+
+            {inhaltTab === "text" && (
+              <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 6 }}>
+                Absätze mit einer Leerzeile trennen. Unter „Vorschau“ sehen Sie das Ergebnis.
+              </div>
+            )}
           </div>
 
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -217,7 +396,7 @@ export default function KiEmailComposer({
             </button>
             <button
               type="button"
-              onClick={() => { setPreview(null); setFehler(null); }}
+              onClick={() => { setPreview(null); setFehler(null); setOriginal(null); }}
               style={{
                 padding: "10px 14px", borderRadius: 10,
                 border: "1px solid var(--border2)", background: "transparent",
