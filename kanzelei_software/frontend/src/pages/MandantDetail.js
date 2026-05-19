@@ -529,41 +529,17 @@ const DokumenteSection = ({ name, dokumente, onRefresh }) => {
 // PORTAL SECTION
 // ═══════════════════════════════════════════════════════════
 
-const PORTAL_ADMIN_KEY_STORAGE = "kanzlei_portal_admin_key";
-
 const PortalSection = ({ name, showToast }) => {
   const portalBasis = typeof window !== "undefined"
     ? `${window.location.origin}/portal`
     : "/portal";
-  const [adminKey, setAdminKey] = useState(
-    () => (typeof sessionStorage !== "undefined"
-      ? sessionStorage.getItem(PORTAL_ADMIN_KEY_STORAGE) || ""
-      : "")
-  );
   const [lastLink, setLastLink] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const speichereKey = (key) => {
-    const k = (key || "").trim();
-    if (!k) return;
-    setAdminKey(k);
-    try { sessionStorage.setItem(PORTAL_ADMIN_KEY_STORAGE, k); } catch { /* ignore */ }
-  };
-
   const generiereLink = async () => {
-    let key = adminKey.trim();
-    if (!key) {
-      const eingegeben = window.prompt(
-        "Portal-Admin-Key (in .env: PORTAL_ADMIN_KEY, Standard oft „kanzlei-admin-2024“):",
-        ""
-      );
-      if (!eingegeben) return;
-      key = eingegeben.trim();
-      speichereKey(key);
-    }
     setLoading(true);
     try {
-      const d = await generierePortalToken(name, key);
+      const d = await generierePortalToken(name);
       setLastLink(d.link || "");
       if (d.link) await navigator.clipboard.writeText(d.link);
       showToast("✓ Zugangslink kopiert (7 Tage gültig)", "success");
@@ -580,6 +556,7 @@ const PortalSection = ({ name, showToast }) => {
       <div style={{ fontSize: 12, color: "var(--text2)", lineHeight: 1.6, marginBottom: 12 }}>
         Separate Oberfläche für Ihre Mandanten: Dokumente hochladen, Fragen beantworten,
         Unterschrift. Aktivierung unter <strong style={{ color: "var(--text)" }}>Einstellungen → Mandanten-Portal</strong>.
+        Zugangslinks erstellen Sie eingeloggt per Klick — ohne technischen Schlüssel.
       </div>
       <div>
         <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 4,
@@ -603,21 +580,6 @@ const PortalSection = ({ name, showToast }) => {
           <Btn size="xs" variant="subtle" onClick={() => window.open(portalBasis, "_blank", "noopener")}>
             Portal öffnen
           </Btn>
-        </div>
-      </div>
-      <div style={{ marginBottom: 10 }}>
-        <div>
-          <div>
-            <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 4 }}>
-              Admin-Key (einmalig, wird lokal gespeichert)
-            </div>
-            <Input
-              placeholder="PORTAL_ADMIN_KEY aus .env"
-              value={adminKey}
-              onChange={setAdminKey}
-              type="password"
-            />
-          </div>
         </div>
       </div>
       <Btn variant="primary" size="sm" loading={loading} onClick={generiereLink}

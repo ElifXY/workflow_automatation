@@ -815,12 +815,11 @@ export const exportKomplett       = (name) =>
 // PORTAL ADMIN
 // ═══════════════════════════════════════════════════════════════
 
-export const generierePortalToken = (mandant, adminKey) =>
-  apiFetch(`/portal/admin/token/${encodeURIComponent(mandant)}?admin_key=${encodeURIComponent(adminKey)}`,
-           { method: "POST" });
+export const generierePortalToken = (mandant) =>
+  apiFetch(`/portal/admin/token/${encodeURIComponent(mandant)}`, { method: "POST" });
 
-export const portalUnterschriftenAlle = (adminKey, mandant = null) =>
-  apiFetch(`/portal/unterschriften/alle?admin_key=${encodeURIComponent(adminKey)}${mandant ? `&mandant=${encodeURIComponent(mandant)}` : ""}`);
+export const portalUnterschriftenAlle = (mandant = null) =>
+  apiFetch(`/portal/unterschriften/alle${mandant ? `?mandant=${encodeURIComponent(mandant)}` : ""}`);
 
 export const portalMandantStatus = (name) =>
   apiFetch(`/portal/mandant/${encodeURIComponent(name)}/status`);

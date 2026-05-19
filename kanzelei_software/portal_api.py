@@ -1,6 +1,6 @@
 # ============================================================
 # KANZLEI AI — MANDANTENPORTAL API v2.0
-# Datei: portal_api.py  |  Port: 8001
+# Datei: portal_api.py — Router wird in api.app eingebunden (ein Uvicorn, typ. Port 8000).
 #
 # NEU in v2.0:
 #   ✓ Digitale Unterschrift (eIDAS EES — rechtssicher für D/EU)
@@ -11,32 +11,40 @@
 #   ✓ Ablehnen mit Begründung
 # ============================================================
 
-import os, sys, secrets, hashlib, logging, base64, json, uuid
+import os, sys, secrets, hashlib, hmac, logging, base64, json, uuid
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from fastapi import FastAPI, HTTPException, Depends, Header, status, Query, Request
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, HTTPException, Depends, Header, status, Query, Request, APIRouter
 from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from core.daten_speicher import DatenSpeicher
+from modules.settings_manager import setting_holen
 
 load_dotenv()
 log = logging.getLogger("kanzlei_portal")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+_plog = (os.getenv("PORTAL_LOG_DIR") or os.getenv("API_LOG_DIR") or "").strip()
+if _plog:
+    os.makedirs(_plog, exist_ok=True)
+    _pfh = logging.FileHandler(os.path.join(_plog, "portal.log"), encoding="utf-8")
+    _pfh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    log.addHandler(_pfh)
 
-app = FastAPI(title="Kanzlei AI — Mandantenportal", version="2.0.0",
-              docs_url="/portal/docs", redoc_url=None)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
-                   allow_methods=["*"], allow_headers=["*"])
+# Router wird in die Haupt-App (api.py / backend.api) eingebunden — CORS dort.
+portal_router = APIRouter(tags=["Portal"])
 
 ds = DatenSpeicher()
 SECRET_KEY    = os.getenv("PORTAL_SECRET", secrets.token_hex(32))
 TOKEN_STUNDEN = int(os.getenv("PORTAL_TOKEN_STUNDEN", "168"))
 UPLOAD_MAX_MB = int(os.getenv("PORTAL_UPLOAD_MAX_MB", "20"))
+
+_PORTAL_GATEWAY_KEY = (os.getenv("PORTAL_GATEWAY_KEY") or os.getenv("API_GATEWAY_KEY") or "").strip()
+_PORTAL_GW_EXEMPT_PREFIXES = ("/portal/docs", "/portal/openapi.json", "/openapi.json")
+_PORTAL_GW_EXACT = frozenset({"/portal/health"})
 
 
 # ── TOKEN ────────────────────────────────────────────────────
@@ -63,6 +71,8 @@ def verifiziere_token(token: str) -> Optional[str]:
         return None
 
 def hole_mandant(authorization: Optional[str] = Header(None)) -> str:
+    if not bool(setting_holen("portal_aktiv")):
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Mandantenportal ist deaktiviert")
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Login erforderlich")
     mandant = verifiziere_token(authorization.replace("Bearer ", ""))
@@ -116,6 +126,7 @@ class DokumentUpload(BaseModel):
     inhalt_b64:   str
     beschreibung: Optional[str] = ""
     kategorie:    Optional[str] = "Sonstiges"
+    projektnummer: Optional[str] = ""
 
 class MultiUpload(BaseModel):
     dateien: List[DokumentUpload]
@@ -153,7 +164,7 @@ class SimulationRequest(BaseModel):
 # ÖFFENTLICHE ENDPUNKTE
 # ============================================================
 
-@app.get("/portal", response_class=HTMLResponse, tags=["Portal"])
+@portal_router.get("/portal", response_class=HTMLResponse, tags=["Portal"])
 def portal_startseite():
     try:
         with open("portal.html", "r", encoding="utf-8") as f:
@@ -164,11 +175,11 @@ def portal_startseite():
             <h2 style="color:#c8a96e">Kanzlei AI — Mandantenportal</h2>
             <p>portal.html nicht gefunden.</p></body></html>""")
 
-@app.get("/portal/health")
+@portal_router.get("/portal/health")
 def health():
     return {"status": "ok", "version": "2.0.0"}
 
-@app.post("/portal/login", tags=["Portal"])
+@portal_router.post("/portal/login", tags=["Portal"])
 def portal_login(token: str = Query(...)):
     mandant = verifiziere_token(token)
     if not mandant:
@@ -195,33 +206,18 @@ def portal_login(token: str = Query(...)):
         "offene_freigaben":      offen_freigaben,
     }
 
-@app.post("/portal/admin/token/{mandant}", tags=["Admin"])
-def generiere_token(mandant: str, admin_key: str = Query(...)):
-    if not secrets.compare_digest(admin_key, os.getenv("PORTAL_ADMIN_KEY","kanzlei-admin-2024")):
-        raise HTTPException(403, "Ungültiger Admin-Key")
-    if mandant not in ds.hole_mandanten():
-        raise HTTPException(404, f"Mandant '{mandant}' nicht gefunden")
-    token    = erstelle_token(mandant)
-    port     = os.getenv("PORTAL_PORT", "8001")
-    base_url = os.getenv("PORTAL_BASE_URL", f"http://localhost:{port}")
-    ds.log_eintrag(f"PORTAL_TOKEN_ERSTELLT | {mandant}")
-    return {
-        "mandant":     mandant,
-        "token":       token,
-        "link":        f"{base_url}/portal?token={token}",
-        "gueltig_bis": (datetime.now() + timedelta(hours=TOKEN_STUNDEN)).isoformat(),
-    }
+# POST /portal/admin/token/{mandant} — nur in api.py (JWT), nicht hier (vermeidet Admin-Key in der UI)
 
 
 # ── MANDANTEN-DATEN ──────────────────────────────────────────
 
-@app.get("/portal/meine-daten", tags=["Portal"])
+@portal_router.get("/portal/meine-daten", tags=["Portal"])
 def meine_daten(mandant: str = Depends(hole_mandant)):
     m = ds.hole_mandanten().get(mandant, {})
     return {"name":mandant,"email":m.get("email",""),"telefon":m.get("telefon",""),
             "branche":m.get("branche",""),"umsatz":m.get("umsatz",0)}
 
-@app.get("/portal/aufgaben", tags=["Portal"])
+@portal_router.get("/portal/aufgaben", tags=["Portal"])
 def meine_aufgaben(mandant: str = Depends(hole_mandant)):
     aufgaben = [a for a in ds.hole_fristen().values() if a.get("mandant")==mandant]
     jetzt    = datetime.now()
@@ -235,7 +231,7 @@ def meine_aufgaben(mandant: str = Depends(hole_mandant)):
     result.sort(key=lambda x:(x["erledigt"],x["tage"] or 9999))
     return {"aufgaben":result,"offen":sum(1 for a in result if not a["erledigt"])}
 
-@app.get("/portal/dokumente", tags=["Portal"])
+@portal_router.get("/portal/dokumente", tags=["Portal"])
 def fehlende_dokumente(mandant: str = Depends(hole_mandant)):
     m = ds.hole_mandanten().get(mandant,{})
     fehlende = m.get("fehlende_dokumente_liste",[])
@@ -248,16 +244,27 @@ def fehlende_dokumente(mandant: str = Depends(hole_mandant)):
 # ============================================================
 
 def _verarbeite_upload(mandant: str, data: DokumentUpload) -> Dict:
+    max_mb = int(setting_holen("portal_upload_max_mb") or UPLOAD_MAX_MB or 20)
+    if bool(setting_holen("portal_projektnummer_pflicht")) and not str(data.projektnummer or "").strip():
+        raise HTTPException(400, "Projektnummer ist als Pflichtfeld aktiviert")
     try:
         inhalt = base64.b64decode(data.inhalt_b64)
-        if len(inhalt) > UPLOAD_MAX_MB * 1024 * 1024:
-            raise HTTPException(413, f"Datei zu groß (max. {UPLOAD_MAX_MB} MB)")
-    except HTTPException: raise
-    except Exception: raise HTTPException(400, "Ungültiger Dateiinhalt")
+        if len(inhalt) > max_mb * 1024 * 1024:
+            raise HTTPException(413, f"Datei zu groß (max. {max_mb} MB)")
+        from core.upload_security import validate_binary_upload, sanitize_filename
 
+        validate_binary_upload(inhalt, max_bytes=max_mb * 1024 * 1024)
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except Exception as e:
+        raise HTTPException(400, "Ungültiger Dateiinhalt") from e
+
+    safe_name = sanitize_filename(data.dateiname)
     upload_dir = os.path.join("data","uploads",mandant.replace(" ","_"))
     os.makedirs(upload_dir, exist_ok=True)
-    dateiname  = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{data.dateiname}"
+    dateiname  = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{safe_name}"
     dateipfad  = os.path.join(upload_dir, dateiname)
     with open(dateipfad,"wb") as f: f.write(inhalt)
 
@@ -268,6 +275,7 @@ def _verarbeite_upload(mandant: str, data: DokumentUpload) -> Dict:
         "original":data.dateiname,"dateipfad":dateipfad,
         "groesse_kb":round(len(inhalt)/1024,1),
         "kategorie":data.kategorie or "Sonstiges",
+        "projektnummer": str(data.projektnummer or "").strip(),
         "beschreibung":data.beschreibung or "",
         "hochgeladen_am":datetime.now().isoformat(),
     }
@@ -292,11 +300,11 @@ def _verarbeite_upload(mandant: str, data: DokumentUpload) -> Dict:
             "groesse_kb":round(len(inhalt)/1024,1),
             "automatisch_zugeordnet":gefunden,"verbleibende_docs":len(fehlende)}
 
-@app.post("/portal/dokumente/hochladen", tags=["Portal"])
+@portal_router.post("/portal/dokumente/hochladen", tags=["Portal"])
 def dokument_hochladen(data: DokumentUpload, mandant: str = Depends(hole_mandant)):
     return _verarbeite_upload(mandant, data)
 
-@app.post("/portal/dokumente/bulk-upload", tags=["Portal"])
+@portal_router.post("/portal/dokumente/bulk-upload", tags=["Portal"])
 def bulk_upload(data: MultiUpload, mandant: str = Depends(hole_mandant)):
     """Mehrere Dokumente auf einmal hochladen."""
     ergebnisse = []
@@ -307,7 +315,7 @@ def bulk_upload(data: MultiUpload, mandant: str = Depends(hole_mandant)):
     ds.log_eintrag(f"PORTAL_BULK_UPLOAD | {mandant} | {erfolgreich}/{len(data.dateien)}")
     return {"ergebnisse":ergebnisse,"erfolgreich":erfolgreich,"gesamt":len(data.dateien)}
 
-@app.get("/portal/dokumente/meine-uploads", tags=["Portal"])
+@portal_router.get("/portal/dokumente/meine-uploads", tags=["Portal"])
 def meine_uploads(mandant: str = Depends(hole_mandant)):
     p = _portal()
     uploads = sorted(
@@ -320,13 +328,15 @@ def meine_uploads(mandant: str = Depends(hole_mandant)):
 # ✍ DIGITALE UNTERSCHRIFT
 # ============================================================
 
-@app.post("/portal/unterschrift/anfragen", tags=["Unterschrift"])
+@portal_router.post("/portal/unterschrift/anfragen", tags=["Unterschrift"])
 def unterschrift_anfragen(data: UnterschriftAnfragen):
     """
     KANZLEI sendet Dokument zur Unterzeichnung.
     Rechtsbasis: Einfache Elektronische Signatur (EES) nach eIDAS Art. 3 Nr. 10.
     Gültig für: Vollmachten, Mandatsverträge, Jahresabschluss-Freigaben.
     """
+    if not bool(setting_holen("portal_unterschrift_aktiv")):
+        raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
     if not secrets.compare_digest(data.admin_key, os.getenv("PORTAL_ADMIN_KEY","kanzlei-admin-2024")):
         raise HTTPException(403, "Ungültiger Admin-Key")
     if data.mandant not in ds.hole_mandanten():
@@ -355,18 +365,21 @@ def unterschrift_anfragen(data: UnterschriftAnfragen):
     return {"unterschrift_id":uid,"mandant":data.mandant,"dokument":data.dokumentname,
             "gueltig_bis":p["portal"]["unterschriften"][uid]["gueltig_bis"],"status":"ausstehend"}
 
-@app.get("/portal/unterschrift/offen", tags=["Unterschrift"])
+@portal_router.get("/portal/unterschrift/offen", tags=["Unterschrift"])
 def offene_unterschriften(mandant: str = Depends(hole_mandant)):
     """Mandant sieht alle offenen Unterschriftsanfragen."""
+    if not bool(setting_holen("portal_unterschrift_aktiv")):
+        raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
     p     = _portal()
     jetzt = datetime.now()
     offene = []
     for uid, u in p["portal"]["unterschriften"].items():
         if u.get("mandant") != mandant: continue
         try:
-            if jetzt > datetime.fromisoformat(u["gueltig_bis"]) and u["status"]=="ausstehend":
+            if jetzt > datetime.fromisoformat(u["gueltig_bis"]) and u["status"] == "ausstehend":
                 u["status"] = "abgelaufen"
-        except Exception: pass
+        except (TypeError, ValueError) as exc:
+            log.warning("offene_unterschriften: gueltig_bis ungueltig id=%s: %s", uid[:12], exc)
         if u["status"] in ["ausstehend","abgelaufen"]:
             offene.append({"id":uid,"dokumentname":u["dokumentname"],"betreff":u["betreff"],
                            "hinweis":u["hinweis"],"status":u["status"],
@@ -375,9 +388,11 @@ def offene_unterschriften(mandant: str = Depends(hole_mandant)):
     return {"unterschriften":sorted(offene,key=lambda x:x["erstellt_am"],reverse=True),
             "anzahl":len(offene)}
 
-@app.get("/portal/unterschrift/{uid}/dokument", tags=["Unterschrift"])
+@portal_router.get("/portal/unterschrift/{uid}/dokument", tags=["Unterschrift"])
 def dokument_herunterladen(uid: str, mandant: str = Depends(hole_mandant)):
     """Zu unterzeichnendes Dokument abrufen."""
+    if not bool(setting_holen("portal_unterschrift_aktiv")):
+        raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
     p = _portal()
     u = p["portal"]["unterschriften"].get(uid)
     if not u: raise HTTPException(404, "Nicht gefunden")
@@ -386,7 +401,7 @@ def dokument_herunterladen(uid: str, mandant: str = Depends(hole_mandant)):
     return {"dokument_b64":u.get("dokument_b64",""),"dokumenttyp":u.get("dokumenttyp","pdf"),
             "dokumentname":u.get("dokumentname","")}
 
-@app.post("/portal/unterschrift/{uid}/leisten", tags=["Unterschrift"])
+@portal_router.post("/portal/unterschrift/{uid}/leisten", tags=["Unterschrift"])
 def unterschrift_leisten(uid: str, data: UnterschriftLeisten,
                           request: Request, mandant: str = Depends(hole_mandant)):
     """
@@ -394,6 +409,8 @@ def unterschrift_leisten(uid: str, data: UnterschriftLeisten,
     Audit-Trail: IP, Zeitpunkt, User-Agent, Browser-Infos werden erfasst.
     Das Ergebnis ist rechtsgültig nach eIDAS EES.
     """
+    if not bool(setting_holen("portal_unterschrift_aktiv")):
+        raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
     p = _portal()
     u = p["portal"]["unterschriften"].get(uid)
     if not u: raise HTTPException(404, "Nicht gefunden")
@@ -401,10 +418,15 @@ def unterschrift_leisten(uid: str, data: UnterschriftLeisten,
     if u.get("status") != "ausstehend": raise HTTPException(400, f"Status: {u.get('status')}")
     if not data.bestaetigung: raise HTTPException(400, "Bitte Kenntnisnahme bestätigen")
     try:
-        if datetime.now() > datetime.fromisoformat(u["gueltig_bis"]):
-            raise HTTPException(410, "Unterschriftsfrist abgelaufen")
-    except HTTPException: raise
-    except Exception: pass
+        deadline = datetime.fromisoformat(u["gueltig_bis"])
+    except (TypeError, ValueError) as exc:
+        log.warning("unterschrift_leisten: gueltig_bis ungueltig uid=%s: %s", uid[:12], exc)
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "Interne Fristangabe ungültig — bitte neue Unterschriftsanfrage anfordern.",
+        ) from exc
+    if datetime.now() > deadline:
+        raise HTTPException(410, "Unterschriftsfrist abgelaufen")
 
     client_ip  = request.client.host if request.client else "unbekannt"
     user_agent = request.headers.get("user-agent","")[:200]
@@ -443,9 +465,11 @@ def unterschrift_leisten(uid: str, data: UnterschriftLeisten,
             "hinweis":"Ihre Unterschrift wurde erfasst und an die Kanzlei übermittelt.",
             "audit_id":uid}
 
-@app.post("/portal/unterschrift/{uid}/ablehnen", tags=["Unterschrift"])
+@portal_router.post("/portal/unterschrift/{uid}/ablehnen", tags=["Unterschrift"])
 def unterschrift_ablehnen(uid: str, grund: str = Query(""),
                            mandant: str = Depends(hole_mandant)):
+    if not bool(setting_holen("portal_unterschrift_aktiv")):
+        raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
     p = _portal()
     u = p["portal"]["unterschriften"].get(uid)
     if not u or u.get("mandant") != mandant: raise HTTPException(404, "Nicht gefunden")
@@ -458,9 +482,11 @@ def unterschrift_ablehnen(uid: str, grund: str = Query(""),
     ds.log_eintrag(f"UNTERSCHRIFT_ABGELEHNT | {mandant} | {u['dokumentname']}")
     return {"status":"abgelehnt"}
 
-@app.get("/portal/unterschrift/{uid}/status", tags=["Unterschrift"])
+@portal_router.get("/portal/unterschrift/{uid}/status", tags=["Unterschrift"])
 def unterschrift_status(uid: str, admin_key: str = Query(...)):
     """KANZLEI: Status + Audit-Trail einer Unterschriftsanfrage."""
+    if not bool(setting_holen("portal_unterschrift_aktiv")):
+        raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
     if not secrets.compare_digest(admin_key, os.getenv("PORTAL_ADMIN_KEY","kanzlei-admin-2024")):
         raise HTTPException(403, "Ungültiger Admin-Key")
     p = _portal()
@@ -471,8 +497,10 @@ def unterschrift_status(uid: str, admin_key: str = Query(...)):
         result["unterschrift_b64"] = u.get("unterschrift_b64")
     return result
 
-@app.get("/portal/unterschrift/alle", tags=["Unterschrift"])
+@portal_router.get("/portal/unterschrift/alle", tags=["Unterschrift"])
 def alle_unterschriften(admin_key: str = Query(...), mandant: Optional[str] = Query(None)):
+    if not bool(setting_holen("portal_unterschrift_aktiv")):
+        raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
     if not secrets.compare_digest(admin_key, os.getenv("PORTAL_ADMIN_KEY","kanzlei-admin-2024")):
         raise HTTPException(403, "Ungültiger Admin-Key")
     p    = _portal()
@@ -492,7 +520,7 @@ def alle_unterschriften(admin_key: str = Query(...), mandant: Optional[str] = Qu
 # FREIGABEN
 # ============================================================
 
-@app.post("/portal/freigabe/anfragen", tags=["Freigaben"])
+@portal_router.post("/portal/freigabe/anfragen", tags=["Freigaben"])
 def freigabe_anfragen(data: FreigabeAnfragen):
     if not secrets.compare_digest(data.admin_key, os.getenv("PORTAL_ADMIN_KEY","kanzlei-admin-2024")):
         raise HTTPException(403, "Ungültiger Admin-Key")
@@ -506,7 +534,7 @@ def freigabe_anfragen(data: FreigabeAnfragen):
     ds.log_eintrag(f"FREIGABE_ANGEFRAGT | {data.mandant} | {data.titel}")
     return {"freigabe_id":fid,"status":"ausstehend"}
 
-@app.get("/portal/freigaben", tags=["Freigaben"])
+@portal_router.get("/portal/freigaben", tags=["Freigaben"])
 def meine_freigaben(mandant: str = Depends(hole_mandant)):
     p = _portal()
     freigaben = [f for f in p["portal"]["freigaben"].values()
@@ -515,7 +543,7 @@ def meine_freigaben(mandant: str = Depends(hole_mandant)):
     result = [{k:v for k,v in f.items() if k!="dokument_b64"} for f in freigaben]
     return {"freigaben":result,"anzahl":len(result)}
 
-@app.post("/portal/freigaben/{fid}/freigeben", tags=["Freigaben"])
+@portal_router.post("/portal/freigaben/{fid}/freigeben", tags=["Freigaben"])
 def freigabe_erteilen(fid: str, kommentar: str = Query(""),
                        mandant: str = Depends(hole_mandant)):
     p = _portal()
@@ -533,7 +561,7 @@ def freigabe_erteilen(fid: str, kommentar: str = Query(""),
 # NACHRICHTEN & SIMULATION
 # ============================================================
 
-@app.post("/portal/nachricht", tags=["Portal"])
+@portal_router.post("/portal/nachricht", tags=["Portal"])
 def nachricht_senden(data: NachrichtCreate, mandant: str = Depends(hole_mandant)):
     ds.kommunikation_hinzufuegen(mandant,{"typ":"portal_nachricht","betreff":data.betreff,
         "text":data.inhalt,"timestamp":datetime.now().isoformat(),"gelesen":False})
@@ -543,7 +571,7 @@ def nachricht_senden(data: NachrichtCreate, mandant: str = Depends(hole_mandant)
     ds.log_eintrag(f"PORTAL_NACHRICHT | {mandant} | {data.betreff[:50]}")
     return {"status":"gesendet"}
 
-@app.get("/portal/nachrichten", tags=["Portal"])
+@portal_router.get("/portal/nachrichten", tags=["Portal"])
 def meine_nachrichten(mandant: str = Depends(hole_mandant)):
     komm = ds.hole_kommunikation(mandant)
     sichtbar = sorted(
@@ -552,7 +580,7 @@ def meine_nachrichten(mandant: str = Depends(hole_mandant)):
         key=lambda x: x.get("timestamp",""), reverse=True)
     return {"nachrichten":sichtbar[:20]}
 
-@app.post("/portal/simulation", tags=["Portal"])
+@portal_router.post("/portal/simulation", tags=["Portal"])
 def simulation(data: SimulationRequest, mandant: str = Depends(hole_mandant)):
     m         = ds.hole_mandanten().get(mandant,{})
     basis     = m.get("umsatz",0) - m.get("betriebsausgaben",0)
@@ -564,3 +592,54 @@ def simulation(data: SimulationRequest, mandant: str = Depends(hole_mandant)):
             "steuerlast_aktuell":st_alt,"steuerlast_simuliert":st_neu,
             "steuerersparnis":ersparnis,"monatliche_ersparnis":round(ersparnis/12,2),
             "hinweis":"Schätzung (30% Ø-Steuersatz). Individuelle Beratung empfohlen."}
+
+
+def register_portal_with_app(main_app: FastAPI) -> None:
+    """Portal-Routen, Gateway und Production-Checks an die zentrale FastAPI-App hängen."""
+    if getattr(main_app.state, "_portal_merged", False):
+        return
+    setattr(main_app.state, "_portal_merged", True)
+    main_app.include_router(portal_router)
+
+    @main_app.middleware("http")
+    async def optional_portal_gateway(request: Request, call_next):
+        if not _PORTAL_GATEWAY_KEY:
+            return await call_next(request)
+        if request.method == "OPTIONS":
+            return await call_next(request)
+        path = request.url.path
+        if path in _PORTAL_GW_EXACT:
+            return await call_next(request)
+        if any(path.startswith(p) for p in _PORTAL_GW_EXEMPT_PREFIXES):
+            return await call_next(request)
+        hdr = request.headers.get("X-Api-Gateway-Key") or ""
+        if len(hdr) == len(_PORTAL_GATEWAY_KEY) and hmac.compare_digest(
+            hdr.encode("utf-8"), _PORTAL_GATEWAY_KEY.encode("utf-8")
+        ):
+            return await call_next(request)
+        auth = request.headers.get("Authorization") or ""
+        if auth.startswith("Bearer "):
+            tok = auth.removeprefix("Bearer ").strip()
+            if tok and verifiziere_token(tok):
+                return await call_next(request)
+        return JSONResponse(
+            status_code=403,
+            content={"ok": False, "error": "Zugriff verweigert", "code": 403},
+        )
+
+    @main_app.on_event("startup")
+    async def portal_production_checks():
+        environment = (os.getenv("ENVIRONMENT") or os.getenv("APP_ENV") or "development").lower()
+        if environment != "production":
+            return
+        sec = (os.getenv("PORTAL_SECRET") or "").strip()
+        sl = sec.lower()
+        if len(sec) < 32 or any(x in sl for x in ("dev-portal", "placeholder", "change-in-prod")):
+            raise RuntimeError(
+                "Production: PORTAL_SECRET muss mindestens 32 Zeichen haben und keine Dev-Platzhalter enthalten."
+            )
+        gw = (os.getenv("PORTAL_GATEWAY_KEY") or os.getenv("API_GATEWAY_KEY") or "").strip()
+        if len(gw) < 32:
+            raise RuntimeError(
+                "Production: API_GATEWAY_KEY oder PORTAL_GATEWAY_KEY (mindestens 32 Zeichen) ist erforderlich."
+            )

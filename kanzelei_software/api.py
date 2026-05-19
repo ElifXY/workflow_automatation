@@ -6241,21 +6241,18 @@ def export_komplett(name: str, _user: dict = Depends(get_current_user)):
 @app.post("/portal/admin/token/{mandant}", tags=["Portal"],
           summary="Zugangs-Link für Mandantenportal generieren")
 def generiere_portal_token(
-    mandant:   str,
-    admin_key: str = Query(..., description="Admin-Key aus .env"),
+    mandant: str,
     _user: dict = Depends(get_current_user),
 ):
     """
     Generiert einen sicheren Login-Link für das Mandantenportal.
-    Link ist 7 Tage gültig und kann per Email an den Mandanten gesendet werden.
+    Nur für eingeloggte Kanzlei-Benutzer (JWT) — kein separater Admin-Key nötig.
+    Link ist 7 Tage gültig und kann per E-Mail an den Mandanten gesendet werden.
     """
-    import os, secrets as sc
+    import os
     from modules.settings_manager import setting_holen
     if not bool(setting_holen("portal_aktiv")):
         raise HTTPException(503, "Mandantenportal ist deaktiviert")
-    expected = os.getenv("PORTAL_ADMIN_KEY", "kanzlei-admin-2024")
-    if not sc.compare_digest(admin_key, expected):
-        raise HTTPException(403, "Ungültiger Admin-Key")
     store = get_ds(_user)
     get_mandant_or_404(mandant, store)
     try:
@@ -7915,18 +7912,13 @@ def dokument_wiederherstellen(dok_id: str, _user: dict = Depends(get_current_use
 @app.get("/portal/unterschriften/alle", tags=["Portal"],
          summary="Alle Unterschriften-Anfragen (für Kanzlei-Übersicht)")
 def portal_unterschriften_alle(
-    mandant:   Optional[str] = Query(None),
-    admin_key: str           = Query(...),
+    mandant: Optional[str] = Query(None),
     _user: dict = Depends(get_current_user),
 ):
-    """Kanzlei sieht Status aller Unterschriften direkt im Haupt-System."""
-    import secrets as _s
+    """Kanzlei sieht Status aller Unterschriften direkt im Haupt-System (JWT)."""
     from modules.settings_manager import setting_holen
     if not bool(setting_holen("portal_unterschrift_aktiv")):
         raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
-    expected = os.getenv("PORTAL_ADMIN_KEY", "kanzlei-admin-2024")
-    if not _s.compare_digest(admin_key, expected):
-        raise HTTPException(403, "Ungültiger Admin-Key")
 
     store = get_ds(_user)
     alle = store.portal_liste("unterschrift")
@@ -7972,7 +7964,7 @@ def portal_mandant_status(name: str, _user: dict = Depends(get_current_user)):
         "unterschriften_erledigt":   sum(1 for s in signs if s["status"]=="unterschrieben"),
         "bot_fragen_offen":          sum(1 for f in fragen if f["status"]=="offen"),
         "bot_fragen_beantwortet":    sum(1 for f in fragen if f["status"]=="beantwortet"),
-        "portal_link_generieren":    f"/portal/admin/token/{name}?admin_key=...",
+        "portal_link_generieren":    f"POST /portal/admin/token/{name}",
         "portal_aktiv": bool(setting_holen("portal_aktiv")),
         "portal_unterschrift_aktiv": bool(setting_holen("portal_unterschrift_aktiv")),
         "portal_upload_max_mb": int(setting_holen("portal_upload_max_mb") or 20),
