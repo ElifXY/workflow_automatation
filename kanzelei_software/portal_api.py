@@ -47,7 +47,9 @@ UPLOAD_MAX_MB = int(os.getenv("PORTAL_UPLOAD_MAX_MB", "20"))
 
 _PORTAL_GATEWAY_KEY = (os.getenv("PORTAL_GATEWAY_KEY") or os.getenv("API_GATEWAY_KEY") or "").strip()
 _PORTAL_GW_EXEMPT_PREFIXES = ("/portal/docs", "/portal/openapi.json", "/openapi.json")
-_PORTAL_GW_EXACT = frozenset({"/portal/health"})
+_PORTAL_GW_EXACT = frozenset({"/portal", "/portal/health", "/portal/login"})
+# Kanzlei-Haupt-App (JWT), nicht Mandanten-Portal-Token:
+_PORTAL_KANZLEI_PREFIXES = ("/portal/admin/", "/portal/mandant/", "/portal/unterschriften/")
 
 
 # ── TOKEN ────────────────────────────────────────────────────
@@ -606,11 +608,16 @@ def register_portal_with_app(main_app: FastAPI) -> None:
 
     @main_app.middleware("http")
     async def optional_portal_gateway(request: Request, call_next):
+        path = request.url.path
+        # Nur echte Mandanten-Routen — /ready, /mandanten, /portal/admin/… nicht blockieren
+        if not path.startswith("/portal"):
+            return await call_next(request)
+        if path.startswith(_PORTAL_KANZLEI_PREFIXES):
+            return await call_next(request)
         if not _PORTAL_GATEWAY_KEY:
             return await call_next(request)
         if request.method == "OPTIONS":
             return await call_next(request)
-        path = request.url.path
         if path in _PORTAL_GW_EXACT:
             return await call_next(request)
         if any(path.startswith(p) for p in _PORTAL_GW_EXEMPT_PREFIXES):
