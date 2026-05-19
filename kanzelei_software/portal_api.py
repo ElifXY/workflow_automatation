@@ -185,6 +185,7 @@ def health():
     return {"status": "ok", "version": "2.0.0"}
 
 @portal_router.post("/portal/login", tags=["Portal"])
+@portal_router.get("/portal/login", tags=["Portal"])
 def portal_login(token: str = Query(...)):
     mandant = verifiziere_token(token)
     if not mandant:
