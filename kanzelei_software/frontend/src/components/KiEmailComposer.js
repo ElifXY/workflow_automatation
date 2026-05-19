@@ -104,6 +104,7 @@ export default function KiEmailComposer({
   const [textGeaendert, setTextGeaendert] = useState(false);
   const [htmlGeaendert, setHtmlGeaendert] = useState(false);
   const [gesendet, setGesendet] = useState(false);
+  const [kiGeneriert, setKiGeneriert] = useState(false);
   const [fehler, setFehler] = useState(null);
 
   useEffect(() => {
@@ -130,6 +131,7 @@ export default function KiEmailComposer({
     setTextGeaendert(false);
     setHtmlGeaendert(false);
     setBetreff(d.betreff || `Mitteilung — ${mandantName}`);
+    setKiGeneriert(!!d.ki_generiert);
     setInhaltTab("vorschau");
   };
 
@@ -212,8 +214,9 @@ export default function KiEmailComposer({
   return (
     <div>
       <div style={{ fontSize: 12, color: "var(--text3)", lineHeight: 1.55, marginBottom: 12 }}>
-        E-Mail wird für den Mandanten formuliert. Unter „Text bearbeiten“ oder „HTML“ können Sie den Inhalt
-        anpassen, bevor Sie senden.
+        {kiGeneriert
+          ? "Anrede, Betreff und Formulierung wurden von der KI erstellt (OpenAI). Sie können alles vor dem Versand anpassen."
+          : "E-Mail wird für den Mandanten formuliert (Vorlage, falls keine KI konfiguriert ist). Unter „Text“ oder „HTML“ können Sie den Inhalt anpassen."}
       </div>
 
       {gesendet && (
@@ -305,7 +308,18 @@ export default function KiEmailComposer({
             }}>
               <div style={{ fontSize: 11, color: "var(--text3)",
                 textTransform: "uppercase", letterSpacing: "0.06em" }}>
-                Inhalt {geaendert && (
+                Inhalt
+                {kiGeneriert && !geaendert && (
+                  <span style={{
+                    marginLeft: 8, padding: "2px 8px", borderRadius: 6, fontSize: 10,
+                    textTransform: "none", letterSpacing: 0,
+                    background: "color-mix(in srgb, var(--accent) 14%, transparent)",
+                    color: "var(--accent)",
+                  }}>
+                    KI
+                  </span>
+                )}
+                {geaendert && (
                   <span style={{ color: "var(--accent)", textTransform: "none", letterSpacing: 0 }}>
                     (bearbeitet)
                   </span>

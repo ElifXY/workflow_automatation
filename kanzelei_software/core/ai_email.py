@@ -4,7 +4,8 @@
 # ============================================================
 
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Tuple, List
+from typing import Optional, Dict, Tuple, List, Any
+import json
 import logging
 import os
 import re
@@ -169,12 +170,12 @@ def _baue_aufgaben_inhalt(
         return "", ""
 
     plain: List[str] = [
-        "Zu Ihrem Mandat liegen folgende offene Fristen und Aufgaben vor:",
+        "Ihnen liegen folgende offene Fristen und Aufgaben vor:",
         "",
     ]
     html_parts: List[str] = [
         '<p style="margin:0 0 10px;color:#333;line-height:1.65;">'
-        "Zu Ihrem Mandat liegen folgende offene Fristen und Aufgaben vor:</p>",
+        "Ihnen liegen folgende offene Fristen und Aufgaben vor:</p>",
     ]
     lis: List[str] = []
 
@@ -255,6 +256,253 @@ def _analysiere_inhalt(
     return ton, aufgaben_text, aufgaben_html, dokumente_text, tage_text, _anrede_name(mandant, m)
 
 
+EMAIL_KI_SYSTEM = """Du bist erfahrene/r Steuerberater/in und schreibst E-Mails an Mandanten.
+Schreibe auf Deutsch, professionell, klar und direkt an den Empfänger (Sie-Form).
+
+WICHTIG:
+- Schreibe AN den Mandanten, nicht über ihn in der dritten Person.
+- Nutze die exakten Aufgaben-BESCHREIBUNGEN aus den Daten (nicht erfinden, nicht verkürzen).
+- Jeder Punkt in "punkte" muss die konkrete Aufgabe und das Fristdatum verständlich nennen.
+- Kein Kanzlei-AI-Branding, kein Hinweis auf automatische Generierung.
+- Ton passend zu Dringlichkeit (freundlich bis dringend).
+
+Antworte NUR mit gültigem JSON (kein Markdown drumherum):
+{
+  "betreff": "Betreffzeile für die E-Mail",
+  "anrede": "z.B. Sehr geehrte/r Herr Mustermann,",
+  "einleitung": "1-2 Sätze Einleitung",
+  "aufgaben_einleitung": "z.B. Ihnen liegen folgende offene Fristen und Aufgaben vor:",
+  "punkte": ["Formulierter Punkt mit Beschreibung und Frist", "..."],
+  "dokumente_hinweis": "optionaler Satz zu fehlenden Unterlagen oder null",
+  "kontakt_hinweis": "optionaler Satz wenn lange keine Rückmeldung oder null",
+  "schluss": "1 Satz vor der Grußformel, z.B. Bei Rückfragen erreichen Sie uns gerne.",
+  "ton": "freundlich|hoeflich|nachdrücklich|dringend|premium|premium_dringend"
+}"""
+
+
+def _ki_email_aktiv(ds) -> bool:
+    if not (os.getenv("OPENAI_API_KEY") or "").strip():
+        return False
+    try:
+        v = ds.setting_holen("ki_email_generierung_aktiv", True)
+        if isinstance(v, str):
+            return v.strip().lower() in ("1", "true", "yes", "ja", "on")
+        return bool(v)
+    except Exception:
+        return True
+
+
+def _sammle_email_daten(mandant: str, m: Dict, aufgaben: Dict, ds) -> Dict[str, Any]:
+    heute = datetime.now().strftime("%Y-%m-%d")
+    meine = [
+        a for a in aufgaben.values()
+        if a.get("mandant") == mandant and not a.get("erledigt")
+    ]
+    try:
+        tage_ohne = ds.berechne_tage_ohne_antwort(mandant)
+    except Exception:
+        tage_ohne = 0
+
+    punkte = []
+    for a in sorted(meine, key=lambda x: (x.get("frist") or "9999")):
+        besch = (a.get("beschreibung") or a.get("kategorie") or "").strip()
+        punkte.append({
+            "beschreibung": besch or "Ohne Beschreibung",
+            "frist":        a.get("frist"),
+            "frist_de":     _format_frist_de(a.get("frist")),
+            "prioritaet":   a.get("prioritaet") or "normal",
+            "ueberfaellig": bool((a.get("frist") or "9999") < heute),
+            "tage_bis":     _tage_bis_frist(a.get("frist")),
+        })
+
+    fehlende = m.get("fehlende_dokumente_liste", [])
+    if not isinstance(fehlende, list):
+        fehlende = []
+
+    return {
+        "mandant_name":     mandant,
+        "ansprechpartner":  (m.get("ansprechpartner") or m.get("kontakt") or "").strip(),
+        "firma":            (m.get("firma") or mandant or "").strip(),
+        "branche":          (m.get("branche") or "").strip(),
+        "tage_ohne_antwort": tage_ohne,
+        "aufgaben":         punkte,
+        "fehlende_dokumente": fehlende[:10],
+        "heute":            _format_frist_de(heute),
+    }
+
+
+def _generiere_email_ki(
+    mandant: str,
+    m: Dict,
+    aufgaben: Dict,
+    ds,
+    anrede_name: str,
+    kanzlei_name: str,
+) -> Optional[Dict[str, Any]]:
+    """Vollständige E-Mail per OpenAI; None = Fallback auf Regeln."""
+    import httpx
+
+    daten = _sammle_email_daten(mandant, m, aufgaben, ds)
+    user_msg = (
+        f"Kanzlei-Absender: {kanzlei_name}\n"
+        f"Empfänger-Anrede-Name: {anrede_name}\n"
+        f"Mandantendaten (JSON):\n{json.dumps(daten, ensure_ascii=False, indent=2)}"
+    )
+    model = os.getenv("OPENAI_MODEL_DEFAULT", "gpt-4o-mini")
+
+    try:
+        with httpx.Client(timeout=45.0) as client:
+            r = client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "max_tokens": 900,
+                    "temperature": 0.35,
+                    "response_format": {"type": "json_object"},
+                    "messages": [
+                        {"role": "system", "content": EMAIL_KI_SYSTEM},
+                        {"role": "user", "content": user_msg},
+                    ],
+                },
+            )
+        if r.status_code != 200:
+            log.warning(f"KI-Email OpenAI HTTP {r.status_code}")
+            return None
+        raw = r.json()["choices"][0]["message"]["content"].strip()
+        if "```" in raw:
+            m_json = re.search(r"\{.*\}", raw, re.DOTALL)
+            raw = m_json.group(0) if m_json else raw
+        payload = json.loads(raw)
+        if not isinstance(payload.get("punkte"), list):
+            payload["punkte"] = []
+        return payload
+    except Exception as e:
+        log.warning(f"KI-Email Generierung fehlgeschlagen: {e}")
+        return None
+
+
+def _ki_punkte_nach_html(punkte: List[str], einleitung: str) -> str:
+    lis = "".join(
+        f'<li style="margin-bottom:8px;">{_esc_html(p)}</li>'
+        for p in punkte if (p or "").strip()
+    )
+    intro = f'<p style="margin:0 0 10px;color:#333;line-height:1.65;">{_esc_html(einleitung)}</p>'
+    if not lis:
+        return intro + '<p style="margin:0;color:#333;">Derzeit keine offenen Punkte.</p>'
+    return intro + (
+        '<ul style="margin:4px 0 0;padding-left:20px;color:#333;line-height:1.65;">'
+        + lis + "</ul>"
+    )
+
+
+def _ki_punkte_nach_plain(punkte: List[str], einleitung: str) -> str:
+    lines = [einleitung, ""]
+    for p in punkte:
+        if (p or "").strip():
+            lines.append(f"  • {p.strip()}")
+    return "\n".join(lines).strip()
+
+
+def _erstelle_aus_ki_payload(
+    payload: Dict[str, Any],
+    mandant: str,
+    m: Dict,
+    ds,
+) -> Dict[str, Any]:
+    kanzlei_name, kanzlei_email, kanzlei_telefon = _kanzlei_meta(ds)
+    anrede_name = _anrede_name(mandant, m)
+    ton = payload.get("ton") or "hoeflich"
+    if ton not in ("freundlich", "hoeflich", "nachdrücklich", "dringend", "premium", "premium_dringend"):
+        ton = "hoeflich"
+
+    punkte = [str(p).strip() for p in (payload.get("punkte") or []) if str(p).strip()]
+    aufg_einl = (payload.get("aufgaben_einleitung") or "").strip() or (
+        "Ihnen liegen folgende offene Fristen und Aufgaben vor:"
+    )
+    aufgaben_html = _ki_punkte_nach_html(punkte, aufg_einl)
+    aufgaben_text = _ki_punkte_nach_plain(punkte, aufg_einl)
+
+    dokumente_text = (payload.get("dokumente_hinweis") or "").strip()
+    if not dokumente_text:
+        fehlende = m.get("fehlende_dokumente_liste", [])
+        if isinstance(fehlende, list) and fehlende:
+            dokumente_text = "Für die weitere Bearbeitung benötigen wir noch: " + ", ".join(fehlende[:5])
+
+    tage_text = (payload.get("kontakt_hinweis") or "").strip()
+
+    anrede = (payload.get("anrede") or "").strip()
+    if not anrede:
+        anrede = (
+            f"Sehr geehrte/r {anrede_name},"
+            if anrede_name != "Damen und Herren"
+            else "Sehr geehrte Damen und Herren,"
+        )
+
+    einleitung = (payload.get("einleitung") or "").strip()
+    schluss = (payload.get("schluss") or "").strip() or (
+        "Bei Rückfragen erreichen Sie uns jederzeit per E-Mail oder telefonisch."
+    )
+
+    html_body = _html_email(
+        anrede_name, ton, aufgaben_text, aufgaben_html,
+        dokumente_text, tage_text,
+        kanzlei_name, kanzlei_email, kanzlei_telefon,
+        custom_anrede=anrede,
+        custom_einleitung=einleitung,
+        custom_schluss=schluss,
+    )
+
+    plain_lines = [anrede, "", einleitung, "", aufgaben_text]
+    if dokumente_text:
+        plain_lines.extend(["", "Unterlagen:", dokumente_text])
+    if tage_text:
+        plain_lines.extend(["", tage_text])
+    plain_lines.extend(["", schluss, "", f"Mit freundlichen Grüßen", kanzlei_name, kanzlei_email])
+    plain_body = "\n".join(plain_lines).strip()
+
+    betreff = (payload.get("betreff") or "").strip() or _betreff(ton, anrede_name)
+
+    return {
+        "email_text":    plain_body,
+        "email_html":    html_body,
+        "betreff":       betreff,
+        "empfaenger":    m.get("email", ""),
+        "anrede_name":   anrede_name,
+        "ton":           ton,
+        "ki_generiert":  True,
+    }
+
+
+def _erstelle_email_regelbasiert(
+    mandant: str, m: Dict, aufgaben: Dict, ds
+) -> Dict[str, Any]:
+    kanzlei_name, kanzlei_email, kanzlei_telefon = _kanzlei_meta(ds)
+    ton, aufgaben_text, aufgaben_html, dokumente_text, tage_text, anrede_name = _analysiere_inhalt(
+        mandant, m, aufgaben, ds
+    )
+    html_body = _html_email(
+        anrede_name, ton, aufgaben_text, aufgaben_html, dokumente_text, tage_text,
+        kanzlei_name, kanzlei_email, kanzlei_telefon,
+    )
+    plain_body = _plain_email(
+        anrede_name, ton, aufgaben_text, dokumente_text, tage_text,
+        kanzlei_name, kanzlei_email,
+    )
+    return {
+        "email_text":   plain_body,
+        "email_html":   html_body,
+        "betreff":      _betreff(ton, anrede_name),
+        "empfaenger":   m.get("email", ""),
+        "anrede_name":  anrede_name,
+        "ton":          ton,
+        "ki_generiert": False,
+    }
+
+
 def _html_email(
     anrede_name: str,
     ton: str,
@@ -265,6 +513,9 @@ def _html_email(
     kanzlei_name: str,
     kanzlei_email: str,
     kanzlei_telefon: str = "",
+    custom_anrede: Optional[str] = None,
+    custom_einleitung: Optional[str] = None,
+    custom_schluss: Optional[str] = None,
 ) -> str:
     farben = {
         "freundlich":       {"accent": "#5b8de8", "label": "Mitteilung"},
@@ -285,10 +536,14 @@ def _html_email(
 
     c = farben.get(ton, farben["freundlich"])
     accent, label = c["accent"], c["label"]
-    anrede = (
+    anrede = custom_anrede or (
         f"Sehr geehrte/r {anrede_name},"
         if anrede_name != "Damen und Herren"
         else "Sehr geehrte Damen und Herren,"
+    )
+    einleitung_text = custom_einleitung or einleitungen.get(ton, einleitungen["freundlich"])
+    schluss_text = custom_schluss or (
+        "Bei Rückfragen erreichen Sie uns jederzeit per E-Mail oder telefonisch."
     )
 
     blocks = []
@@ -351,11 +606,9 @@ def _html_email(
         <tr>
           <td style="padding:32px;">
             <p style="font-size:16px;color:#222;margin:0 0 10px;">{anrede}</p>
-            <p style="font-size:14px;color:#555;margin:0 0 20px;line-height:1.75;">{einleitungen.get(ton, einleitungen["freundlich"])}</p>
+            <p style="font-size:14px;color:#555;margin:0 0 20px;line-height:1.75;">{einleitung_text}</p>
             {body_html}
-            <p style="font-size:14px;color:#555;margin:24px 0 0;line-height:1.75;">
-              Bei Rückfragen erreichen Sie uns jederzeit per E-Mail oder telefonisch.
-            </p>
+            <p style="font-size:14px;color:#555;margin:24px 0 0;line-height:1.75;">{schluss_text}</p>
           </td>
         </tr>
         <tr>
@@ -436,15 +689,9 @@ def _betreff(ton: str, anrede_name: str) -> str:
 
 
 def generate_ai_email(mandant: str, m: Dict, aufgaben: Dict, ds) -> str:
-    """HTML-E-Mail für einen Mandanten."""
-    kanzlei_name, kanzlei_email, kanzlei_telefon = _kanzlei_meta(ds)
-    ton, aufgaben_text, aufgaben_html, dokumente_text, tage_text, anrede_name = _analysiere_inhalt(
-        mandant, m, aufgaben, ds
-    )
-    return _html_email(
-        anrede_name, ton, aufgaben_text, aufgaben_html, dokumente_text, tage_text,
-        kanzlei_name, kanzlei_email, kanzlei_telefon,
-    )
+    """HTML-E-Mail für einen Mandanten (KI wenn aktiv, sonst Regeln)."""
+    vorschau = erstelle_email_vorschau(mandant, m, aufgaben, ds)
+    return vorschau.get("email_html") or ""
 
 
 def generiere_email_text(
@@ -478,23 +725,12 @@ def generiere_email_text(
 
 
 def erstelle_email_vorschau(mandant: str, m: Dict, aufgaben: Dict, ds) -> Dict:
-    kanzlei_name, kanzlei_email, kanzlei_telefon = _kanzlei_meta(ds)
-    ton, aufgaben_text, aufgaben_html, dokumente_text, tage_text, anrede_name = _analysiere_inhalt(
-        mandant, m, aufgaben, ds
-    )
-    html_body = _html_email(
-        anrede_name, ton, aufgaben_text, aufgaben_html, dokumente_text, tage_text,
-        kanzlei_name, kanzlei_email, kanzlei_telefon,
-    )
-    plain_body = _plain_email(
-        anrede_name, ton, aufgaben_text, dokumente_text, tage_text,
-        kanzlei_name, kanzlei_email,
-    )
-    return {
-        "email_text":   plain_body,
-        "email_html":   html_body,
-        "betreff":      _betreff(ton, anrede_name),
-        "empfaenger":   m.get("email", ""),
-        "anrede_name":  anrede_name,
-        "ton":          ton,
-    }
+    anrede_name = _anrede_name(mandant, m)
+    kanzlei_name, _, _ = _kanzlei_meta(ds)
+
+    if _ki_email_aktiv(ds):
+        ki_payload = _generiere_email_ki(mandant, m, aufgaben, ds, anrede_name, kanzlei_name)
+        if ki_payload:
+            return _erstelle_aus_ki_payload(ki_payload, mandant, m, ds)
+
+    return _erstelle_email_regelbasiert(mandant, m, aufgaben, ds)

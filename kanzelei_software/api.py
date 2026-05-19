@@ -1835,6 +1835,7 @@ def email_vorschau(name: str, _user: dict = Depends(get_current_user)):
         "email_html":    vorschau["email_html"],
         "betreff":       vorschau["betreff"],
         "ton":           vorschau["ton"],
+        "ki_generiert":  bool(vorschau.get("ki_generiert")),
         "generiert_am":  datetime.now().isoformat(),
     }
 
