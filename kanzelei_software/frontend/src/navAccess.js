@@ -7,6 +7,7 @@ import { canonicalRole } from "./components/PermissionGate";
 export const NAV_TAB_IDS = [
   "dashboard",
   "mandanten",
+  "portalchat",
   "aufgaben",
   "ki",
   "profit",
@@ -24,6 +25,7 @@ export const NAV_TAB_IDS = [
 const DEFAULT_STEUERBERATER = new Set([
   "dashboard",
   "mandanten",
+  "portalchat",
   "aufgaben",
   "ki",
   "profit",
@@ -38,9 +40,13 @@ const DEFAULT_STEUERBERATER = new Set([
   "settings",
 ]);
 
+/** Neue Menüpunkte: in bestehenden Tenant-Einstellungen automatisch sichtbar */
+const NAV_TABS_AUTO_ENABLE = ["portalchat"];
+
 const DEFAULT_MITARBEITER = new Set([
   "dashboard",
   "mandanten",
+  "portalchat",
   "aufgaben",
   "ki",
   "dokumente",
@@ -63,6 +69,7 @@ export function effectiveTabSet(role, settings) {
   if (Array.isArray(raw) && raw.length > 0) {
     const allowed = new Set(raw.map((x) => String(x).toLowerCase()));
     allowed.add("dashboard");
+    for (const id of NAV_TABS_AUTO_ENABLE) allowed.add(id);
     return allowed;
   }
   if (c === "steuerberater") return DEFAULT_STEUERBERATER;
@@ -70,14 +77,18 @@ export function effectiveTabSet(role, settings) {
 }
 
 export function hasNavTab(role, tabId, settings) {
+  const id = String(tabId || "").toLowerCase();
+  // Mandanten-Portal/Chat: immer sichtbar für Steuerberater-Suite (auch alte Tenant-Nav-Listen)
+  if (id === "portalchat") return true;
   const set = effectiveTabSet(role, settings);
   if (set == null) return true;
-  return set.has(String(tabId || "").toLowerCase());
+  return set.has(id);
 }
 
 export const NAV_TAB_LABELS = {
   dashboard: "Dashboard",
   mandanten: "Mandanten",
+  portalchat: "Mandanten-Portal",
   aufgaben: "Aufgaben",
   ki: "KI-Assistent",
   profit: "Profit Monitor",

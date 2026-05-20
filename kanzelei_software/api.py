@@ -155,9 +155,64 @@ def _billing_enabled() -> bool:
 
 # ── Rate-Limiting (In-Memory) ─────────────────────────────────
 _rate_store: Dict[str, List[float]] = {}
-RATE_LIMIT   = int(os.getenv("API_RATE_LIMIT", "60"))   # Requests/Minute
+# SPA: viele parallele GETs (Dashboard, Chat-Polling) — 60/min war zu streng
+RATE_LIMIT   = int(os.getenv("API_RATE_LIMIT", "300"))   # Requests/Minute pro IP
 RATE_WINDOW  = 60  # Sekunden
 _tenant_rate_store: Dict[str, List[float]] = {}
+
+# Tenant-Limit: Schreibzugriffe und teure Endpunkte zählen; normale Lese-GETs nicht
+_TENANT_RL_EXEMPT_GET_PREFIXES = (
+    "/settings",
+    "/kpis",
+    "/heute",
+    "/empfehlungen",
+    "/mandanten",
+    "/aufgaben",
+    "/kommunikation",
+    "/billing/",
+    "/saas/",
+    "/ready",
+    "/health",
+    "/portal/mandant/",
+    "/portal/unterschriften/",
+    "/prognose/",
+    "/dashboard",
+)
+_TENANT_RL_EXEMPT_EXACT = frozenset({"/ready", "/health", "/portal/health"})
+
+
+def _effective_tenant_rate_limit() -> int:
+    """Mindestens 600/min für SPA — alte Werte (z. B. 60) blockieren normale Nutzung."""
+    try:
+        v = int(global_setting_holen("api_rate_limit_pro_minute") or 0)
+    except Exception:
+        v = 0
+    if v <= 0:
+        v = 600
+    elif v < 200:
+        v = 600
+    env_rl = (os.getenv("TENANT_API_RATE_LIMIT") or "").strip()
+    if env_rl.isdigit():
+        v = max(0, int(env_rl))
+    # Auch gespeicherte/env-Werte unter 200 (z. B. 60) würden die SPA blockieren
+    if 0 < v < 200:
+        v = 600
+    return v
+
+
+def _tenant_rate_counts(path: str, method: str) -> bool:
+    """Ob die Anfrage gegen das Tenant-Minutenlimit zählt."""
+    m = (method or "GET").upper()
+    if m in ("OPTIONS", "HEAD"):
+        return False
+    p = str(path or "/")
+    if p in _TENANT_RL_EXEMPT_EXACT:
+        return False
+    if m == "GET":
+        for prefix in _TENANT_RL_EXEMPT_GET_PREFIXES:
+            if p.startswith(prefix) or p == prefix.rstrip("/"):
+                return False
+    return True
 
 def _get_client_ip(request: Request) -> str:
     forwarded = request.headers.get("X-Forwarded-For")
@@ -563,6 +618,10 @@ class AufgabeCreate(BaseModel):
     prioritaet:   Optional[str] = Field("normal")
     kategorie:    Optional[str] = None
     notiz:        Optional[str] = None
+    portal_sichtbar: Optional[bool] = Field(
+        False,
+        description="Mandant sieht und kann die Aufgabe im Portal-Chat abhaken",
+    )
 
 
 class AufgabeUpdate(BaseModel):
@@ -1438,6 +1497,8 @@ def _required_permission_for_path(path: str, method: str) -> Optional[str]:
         return "aufgaben:write" if m in {"POST", "PUT", "PATCH", "DELETE"} else "aufgaben:read"
     if p.startswith("/email/"):
         return "email:send" if m in {"POST", "PUT", "PATCH", "DELETE"} else "kommunikation:read"
+    if p.startswith("/portal/mandant/"):
+        return "portal:write" if m in {"POST", "PUT", "PATCH", "DELETE"} else "portal:read"
     return None
 
 
@@ -1478,15 +1539,8 @@ async def auth_guard_middleware(request: Request, call_next):
         )
 
     current_kid = str(current_user.get("tenant_id") or current_user.get("kanzlei_id") or "")
-    # Tenant-individuelles API-Limit (pro Minute, pro Kanzlei). Optional: TENANT_API_RATE_LIMIT überschreibt Settings.
-    try:
-        tenant_limit = int(global_setting_holen("api_rate_limit_pro_minute") or 300)
-    except Exception:
-        tenant_limit = 300
-    _env_rl = (os.getenv("TENANT_API_RATE_LIMIT") or "").strip()
-    if _env_rl.isdigit():
-        tenant_limit = max(0, int(_env_rl))
-    if tenant_limit > 0:
+    tenant_limit = _effective_tenant_rate_limit()
+    if tenant_limit > 0 and _tenant_rate_counts(path, request.method):
         now = time.time()
         bucket = _tenant_rate_store.get(current_kid, [])
         bucket = [t for t in bucket if now - t < RATE_WINDOW]
@@ -1497,6 +1551,7 @@ async def auth_guard_middleware(request: Request, call_next):
                     "ok": False,
                     "error": f"Tenant Rate-Limit erreicht ({tenant_limit}/min)",
                     "code": 429,
+                    "retry_after": RATE_WINDOW,
                 },
             )
         bucket.append(now)
@@ -7975,6 +8030,240 @@ def portal_mandant_status(name: str, _user: dict = Depends(get_current_user)):
         "portal_upload_max_mb": int(setting_holen("portal_upload_max_mb") or 20),
         "portal_projektnummer_pflicht": bool(setting_holen("portal_projektnummer_pflicht")),
     }
+
+
+class PortalUnterschriftAnfrage(BaseModel):
+    dokumentname: str = Field(..., min_length=1, max_length=255)
+    dokument_b64: str = Field(..., min_length=10)
+    dokumenttyp: str = "application/pdf"
+    betreff: str = Field(default="Bitte unterzeichnen", max_length=200)
+    hinweis: str = Field(default="", max_length=2000)
+    gueltig_tage: int = Field(default=30, ge=1, le=365)
+
+
+class PortalAntwortBody(BaseModel):
+    betreff: str = Field(..., min_length=1, max_length=200)
+    text: str = Field(..., min_length=1, max_length=5000)
+
+
+@app.get("/portal/mandant/{name}/uploads", tags=["Portal"],
+         summary="Portal-Uploads eines Mandanten (Kanzlei-Ansicht)")
+def portal_mandant_uploads(name: str, _user: dict = Depends(get_current_user)):
+    store = get_ds(_user)
+    get_mandant_or_404(name, store)
+    uploads = sorted(
+        store.portal_liste("upload", mandant=name),
+        key=lambda x: x.get("hochgeladen_am", ""),
+        reverse=True,
+    )
+    return ok_compat({"mandant": name, "uploads": uploads, "anzahl": len(uploads)})
+
+
+@app.post("/portal/mandant/{name}/unterschrift-anfragen", tags=["Portal"],
+          summary="Unterschrift beim Mandanten anfordern (ohne Admin-Key)")
+def portal_mandant_unterschrift_anfragen(
+    name: str,
+    data: PortalUnterschriftAnfrage,
+    _user: dict = Depends(get_current_user),
+):
+    from portal_api import erstelle_unterschrift_anfrage
+
+    store = get_ds(_user)
+    get_mandant_or_404(name, store)
+    result = erstelle_unterschrift_anfrage(
+        store,
+        name,
+        data.dokumentname.strip(),
+        data.dokument_b64,
+        data.dokumenttyp,
+        data.betreff,
+        data.hinweis,
+        data.gueltig_tage,
+    )
+    return ok_compat(result)
+
+
+@app.post("/kommunikation/{name}/portal-antwort", tags=["Kommunikation"],
+          summary="Antwort an Mandant (erscheint im Portal)")
+def kommunikation_portal_antwort(
+    name: str,
+    data: PortalAntwortBody,
+    _user: dict = Depends(get_current_user),
+):
+    store = get_ds(_user)
+    get_mandant_or_404(name, store)
+    text_voll = f"Betreff: {data.betreff.strip()}\n\n{data.text.strip()}"
+    from modules import portal_chat as pc
+
+    msg = pc.chat_text_nachricht(store, name, text_voll, "kanzlei")
+    store.kommunikation_hinzufuegen(name, {
+        "typ": "kanzlei_antwort",
+        "text": text_voll,
+        "richtung": "ausgehend",
+        "timestamp": msg["zeit"],
+    })
+    store.log_eintrag(f"PORTAL_ANTWORT | {name} | {data.betreff[:50]}")
+    return ok_compat({"status": "gesendet", "mandant": name, "nachricht": msg})
+
+
+class PortalChatText(BaseModel):
+    text: str = Field(..., min_length=1, max_length=5000)
+
+
+class PortalChatAufgabe(BaseModel):
+    beschreibung: str = Field(..., min_length=1, max_length=500)
+    frist: str = Field(..., example="2026-06-30")
+    hinweis: str = Field(default="", max_length=2000)
+    prioritaet: Optional[str] = "normal"
+
+
+class PortalChatDokument(BaseModel):
+    dokument_name: str = Field(..., min_length=2, max_length=200)
+    beschreibung: str = Field(default="", max_length=2000)
+    frist: Optional[str] = None
+
+
+@app.get("/portal/mandant/{name}/chat", tags=["Portal-Chat"],
+         summary="Chat-Verlauf mit Mandant (Kanzlei)")
+def portal_mandant_chat(
+    name: str,
+    limit: int = Query(200, ge=1, le=500),
+    seit: Optional[str] = Query(None),
+    _user: dict = Depends(get_current_user),
+):
+    from modules import portal_chat as pc
+
+    store = get_ds(_user)
+    get_mandant_or_404(name, store)
+    nachrichten = pc.list_chat(store, name, limit=limit, seit_id=seit)
+    return ok_compat({"mandant": name, "nachrichten": nachrichten, "anzahl": len(nachrichten)})
+
+
+@app.post("/portal/mandant/{name}/chat", tags=["Portal-Chat"],
+          summary="Nachricht im Portal-Chat senden")
+def portal_mandant_chat_senden(
+    name: str,
+    data: PortalChatText,
+    _user: dict = Depends(get_current_user),
+):
+    from modules import portal_chat as pc
+
+    store = get_ds(_user)
+    get_mandant_or_404(name, store)
+    msg = pc.chat_text_nachricht(store, name, data.text.strip(), "kanzlei")
+    store.log_eintrag(f"PORTAL_CHAT_KANZLEI | {name}")
+    return ok_compat({"status": "gesendet", "nachricht": msg})
+
+
+@app.post("/portal/mandant/{name}/chat/aufgabe", tags=["Portal-Chat"],
+          summary="Aufgabe im Chat an Mandant zuweisen (abhackbar)")
+def portal_mandant_chat_aufgabe(
+    name: str,
+    data: PortalChatAufgabe,
+    _user: dict = Depends(get_current_user),
+):
+    from modules import portal_chat as pc
+
+    store = get_ds(_user)
+    get_mandant_or_404(name, store)
+    svc = AufgabenService(store)
+    created = svc.create(
+        name,
+        AufgabeCreate(
+            beschreibung=data.beschreibung,
+            frist=data.frist,
+            prioritaet=data.prioritaet,
+            portal_sichtbar=True,
+        ),
+        portal_sichtbar=True,
+    )
+    aid = created.get("id")
+    msg = pc.chat_aufgabe(
+        store, name, aid, data.beschreibung, data.frist, hinweis=data.hinweis.strip()
+    )
+    return ok_compat({"status": "erstellt", "aufgabe_id": aid, "nachricht": msg})
+
+
+@app.post("/portal/mandant/{name}/chat/dokument-anfrage", tags=["Portal-Chat"],
+          summary="Dokument im Chat anfordern")
+def portal_mandant_chat_dokument(
+    name: str,
+    data: PortalChatDokument,
+    _user: dict = Depends(get_current_user),
+):
+    from modules import portal_chat as pc
+
+    store = get_ds(_user)
+    m = get_mandant_or_404(name, store)
+    fehlende = list(m.get("fehlende_dokumente_liste") or [])
+    if data.dokument_name not in fehlende:
+        fehlende.append(data.dokument_name)
+        m["fehlende_dokumente_liste"] = fehlende
+        store.mandant_speichern(name, m)
+    msg = pc.chat_dokument_anfrage(
+        store, name, data.dokument_name, data.beschreibung, data.frist or ""
+    )
+    store.log_eintrag(f"PORTAL_CHAT_DOK | {name} | {data.dokument_name}")
+    return ok_compat({"status": "angefordert", "nachricht": msg})
+
+
+@app.post("/portal/mandant/{name}/chat/unterschrift", tags=["Portal-Chat"],
+          summary="Unterschrift im Chat anfordern")
+def portal_mandant_chat_unterschrift(
+    name: str,
+    data: PortalUnterschriftAnfrage,
+    _user: dict = Depends(get_current_user),
+):
+    from portal_api import erstelle_unterschrift_anfrage
+    from modules import portal_chat as pc
+
+    store = get_ds(_user)
+    get_mandant_or_404(name, store)
+    result = erstelle_unterschrift_anfrage(
+        store,
+        name,
+        data.dokumentname.strip(),
+        data.dokument_b64,
+        data.dokumenttyp,
+        data.betreff,
+        data.hinweis,
+        data.gueltig_tage,
+    )
+    return ok_compat(result)
+
+
+class PortalChatUpload(BaseModel):
+    dateiname: str = Field(..., min_length=1, max_length=255)
+    inhalt_b64: str = Field(..., min_length=8)
+    dateityp: str = Field(default="application/pdf")
+    beschreibung: str = Field(default="", max_length=2000)
+    kategorie: str = Field(default="Sonstiges", max_length=80)
+
+
+@app.post("/portal/mandant/{name}/chat/upload", tags=["Portal-Chat"],
+          summary="Dokument für Mandant im Chat bereitstellen (Kanzlei)")
+def portal_mandant_chat_upload(
+    name: str,
+    data: PortalChatUpload,
+    _user: dict = Depends(get_current_user),
+):
+    from portal_api import DokumentUpload, _verarbeite_upload
+
+    store = get_ds(_user)
+    get_mandant_or_404(name, store)
+    result = _verarbeite_upload(
+        name,
+        DokumentUpload(
+            dateiname=data.dateiname.strip(),
+            dateityp=data.dateityp or "application/pdf",
+            inhalt_b64=data.inhalt_b64,
+            beschreibung=data.beschreibung or "",
+            kategorie=data.kategorie or "Sonstiges",
+        ),
+        upload_von="kanzlei",
+    )
+    store.log_eintrag(f"PORTAL_CHAT_UPLOAD_KANZLEI | {name} | {data.dateiname[:80]}")
+    return ok_compat(result)
 
 
 # ============================================================

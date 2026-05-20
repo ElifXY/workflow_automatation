@@ -77,6 +77,7 @@ PERMISSION_CATALOG: tuple[str, ...] = (
     "audit:read",
     "engine:run", "engine:read",
     "email:send",
+    "portal:read", "portal:write",
     "reports:read",
     "tenant:manage",
 )
@@ -92,6 +93,7 @@ _BASE_ROLE_PERMISSIONS: Dict[str, Set[str]] = {
         "mandanten:read", "mandanten:write",
         "aufgaben:read", "aufgaben:write",
         "kommunikation:read", "kommunikation:write",
+        "portal:read", "portal:write",
         "belege:read", "belege:write",
         "dokumente:read", "dokumente:write",
         "rechnungen:read", "rechnungen:write",
@@ -107,6 +109,7 @@ _BASE_ROLE_PERMISSIONS: Dict[str, Set[str]] = {
         "mandanten:read",
         "aufgaben:read", "aufgaben:write",
         "kommunikation:read", "kommunikation:write",
+        "portal:read", "portal:write",
         "belege:read", "belege:write",
         "dokumente:read", "dokumente:write",
         "rechnungen:read",

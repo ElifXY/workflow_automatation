@@ -43,7 +43,9 @@ PERMISSION_NAV_TABS: Dict[str, FrozenSet[str]] = {
     "audit:read": frozenset({"settings"}),
     "engine:run": frozenset({"ki", "steuerbot"}),
     "engine:read": frozenset({"ki", "steuerbot"}),
-    "email:send": frozenset({"mandanten"}),
+    "email:send": frozenset({"mandanten", "portalchat"}),
+    "portal:read": frozenset({"portalchat", "mandanten"}),
+    "portal:write": frozenset({"portalchat", "mandanten"}),
     "reports:read": frozenset({"dashboard", "analytics", "empfehlungen", "profit"}),
     "tenant:manage": frozenset({"settings"}),
 }
@@ -58,6 +60,12 @@ def merged_settings_for_user(user: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         raw = {}
     merged: Dict[str, Any] = {**DEFAULT_SETTINGS, **raw}
     merged.update(FESTGESCHRIEBEN)
+    try:
+        from modules.settings_manager import _normalize_nav_lists
+
+        _normalize_nav_lists(merged)
+    except Exception:
+        pass
     return merged
 
 
@@ -71,6 +79,7 @@ def _allowed_tab_ids(canonical_role: str, merged: Dict[str, Any]) -> Optional[Se
         raw = list(DEFAULT_SETTINGS.get(key) or [])
     tabs = {str(x).strip().lower() for x in raw if str(x).strip()}
     tabs.add("dashboard")
+    tabs.add("portalchat")
     return tabs
 
 

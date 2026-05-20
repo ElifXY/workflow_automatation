@@ -62,8 +62,9 @@ class AufgabenService:
             "historie_ttl_tage": historie_erledigte_aufgaben_tage(self.store),
         }
 
-    def create(self, name: str, data) -> Dict[str, Any]:
+    def create(self, name: str, data, *, portal_sichtbar: bool = False) -> Dict[str, Any]:
         aufgabe_id = str(uuid.uuid4())
+        portal_flag = portal_sichtbar or bool(getattr(data, "portal_sichtbar", False))
         aufgabe = {
             "id": aufgabe_id,
             "mandant": name,
@@ -75,6 +76,7 @@ class AufgabenService:
             "notiz": data.notiz or "",
             "erledigt": False,
             "erstellt_am": datetime.now().isoformat(),
+            "portal_sichtbar": portal_flag,
         }
         if not self.store.aufgabe_speichern(aufgabe_id, aufgabe):
             raise HTTPException(

@@ -23,6 +23,7 @@ from pydantic import AliasChoices, BaseModel, Field
 from dotenv import load_dotenv
 from core.daten_speicher import DatenSpeicher
 from modules.settings_manager import setting_holen
+from modules import portal_chat as pc
 
 load_dotenv()
 log = logging.getLogger("kanzlei_portal")
@@ -42,6 +43,31 @@ portal_router = APIRouter(tags=["Portal"])
 
 ds = DatenSpeicher()
 SECRET_KEY    = os.getenv("PORTAL_SECRET", secrets.token_hex(32))
+
+
+def _store_for_mandant(mandant: str) -> DatenSpeicher:
+    """DatenSpeicher der Kanzlei, zu der der Mandant gehört (Multi-Tenant)."""
+    try:
+        if mandant in ds.hole_mandanten():
+            return ds
+        from core.daten_speicher import _pg_mandanten_mode, _pg_conn
+
+        if _pg_mandanten_mode():
+            conn = _pg_conn()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT kanzlei_id FROM mandanten WHERE name = %s AND aktiv = 1 LIMIT 1",
+                    (mandant,),
+                )
+                row = cur.fetchone()
+            if row:
+                kid = row["kanzlei_id"] if isinstance(row, dict) else row[0]
+                st = DatenSpeicher(kanzlei_id=kid)
+                if mandant in st.hole_mandanten():
+                    return st
+    except Exception as e:
+        log.warning("_store_for_mandant(%s): %s", mandant, e)
+    return ds
 TOKEN_STUNDEN = int(os.getenv("PORTAL_TOKEN_STUNDEN", "168"))
 UPLOAD_MAX_MB = int(os.getenv("PORTAL_UPLOAD_MAX_MB", "20"))
 
@@ -70,7 +96,8 @@ def verifiziere_token(token: str) -> Optional[str]:
         hmac_ok = hashlib.sha256(f"{SECRET_KEY}:{payload}".encode()).hexdigest()[:32]
         if not secrets.compare_digest(hmac_recv, hmac_ok): return None
         if datetime.now() > datetime.strptime(ablauf_str, "%Y%m%d%H%M"): return None
-        if mandant not in ds.hole_mandanten(): return None
+        if mandant not in _store_for_mandant(mandant).hole_mandanten():
+            return None
         return mandant
     except Exception:
         return None
@@ -88,35 +115,41 @@ def hole_mandant(authorization: Optional[str] = Header(None)) -> str:
 
 # ── PORTAL DATEN ─────────────────────────────────────────────
 
-def _portal() -> Dict:
+def _portal_store(store: DatenSpeicher, mandant: Optional[str] = None) -> Dict:
     return {
         "portal": {
             "uploads": {
-                x["id"]: x for x in ds.portal_liste("upload") if x.get("id")
+                x["id"]: x for x in store.portal_liste("upload", mandant=mandant) if x.get("id")
             },
             "unterschriften": {
-                x["id"]: x for x in ds.portal_liste("unterschrift") if x.get("id")
+                x["id"]: x for x in store.portal_liste("unterschrift", mandant=mandant) if x.get("id")
             },
             "freigaben": {
-                x["id"]: x for x in ds.portal_liste("freigabe") if x.get("id")
+                x["id"]: x for x in store.portal_liste("freigabe", mandant=mandant) if x.get("id")
             },
         }
     }
 
-def _save_portal(data: Dict):
+
+def _portal() -> Dict:
+    return _portal_store(ds)
+
+
+def _save_portal(data: Dict, store: Optional[DatenSpeicher] = None):
+    st = store or ds
     portal = (data or {}).get("portal", {})
     for x in (portal.get("uploads") or {}).values():
         rid = x.get("id")
         if rid:
-            ds.portal_speichern("upload", rid, x.get("mandant", ""), x)
+            st.portal_speichern("upload", rid, x.get("mandant", ""), x)
     for x in (portal.get("unterschriften") or {}).values():
         rid = x.get("id")
         if rid:
-            ds.portal_speichern("unterschrift", rid, x.get("mandant", ""), x)
+            st.portal_speichern("unterschrift", rid, x.get("mandant", ""), x)
     for x in (portal.get("freigaben") or {}).values():
         rid = x.get("id")
         if rid:
-            ds.portal_speichern("freigabe", rid, x.get("mandant", ""), x)
+            st.portal_speichern("freigabe", rid, x.get("mandant", ""), x)
 
 
 # ── MODELS ───────────────────────────────────────────────────
@@ -208,13 +241,14 @@ def portal_login(token: str = Query(...)):
     mandant = verifiziere_token(token)
     if not mandant:
         raise HTTPException(401, "Ungültiger oder abgelaufener Zugangslink")
-    m = ds.hole_mandanten().get(mandant, {})
+    store = _store_for_mandant(mandant)
+    m = store.hole_mandanten().get(mandant, {})
 
-    p = _portal()
     offen_unterschriften = sum(
-        1 for u in p["portal"]["unterschriften"].values()
-        if u.get("mandant") == mandant and u.get("status") == "ausstehend"
+        1 for u in store.portal_liste("unterschrift", mandant=mandant)
+        if u.get("status") == "ausstehend"
     )
+    p = _portal_store(store, mandant)
     offen_freigaben = sum(
         1 for f in p["portal"]["freigaben"].values()
         if f.get("mandant") == mandant and f.get("status") == "ausstehend"
@@ -243,21 +277,72 @@ def meine_daten(mandant: str = Depends(hole_mandant)):
 
 @portal_router.get("/portal/aufgaben", tags=["Portal"])
 def meine_aufgaben(mandant: str = Depends(hole_mandant)):
-    aufgaben = [a for a in ds.hole_fristen().values() if a.get("mandant")==mandant]
-    jetzt    = datetime.now()
-    result   = []
-    for a in aufgaben:
-        try:    tage = (datetime.strptime(a["frist"],"%Y-%m-%d")-jetzt).days; dringend = not a.get("erledigt") and tage<=3
-        except: tage = None; dringend = False
-        result.append({"beschreibung":a.get("beschreibung",""),"frist":a.get("frist",""),
-                        "erledigt":a.get("erledigt",False),"prioritaet":a.get("prioritaet","normal"),
-                        "tage":tage,"dringend":dringend})
-    result.sort(key=lambda x:(x["erledigt"],x["tage"] or 9999))
-    return {"aufgaben":result,"offen":sum(1 for a in result if not a["erledigt"])}
+    """Nur Aufgaben, die die Kanzlei explizit im Portal-Chat zugewiesen hat."""
+    from core.aufgabe_erledigt import aufgabe_ist_erledigt, aufgabe_ist_offen
+
+    store = _store_for_mandant(mandant)
+    jetzt = datetime.now()
+    result = []
+    for a in store.hole_aufgaben_fuer_mandant(mandant):
+        if not a.get("portal_sichtbar"):
+            continue
+        erledigt = aufgabe_ist_erledigt(a)
+        try:
+            tage = (datetime.strptime(a["frist"], "%Y-%m-%d") - jetzt).days
+            dringend = aufgabe_ist_offen(a) and tage <= 3
+        except Exception:
+            tage = None
+            dringend = False
+        result.append({
+            "id": a.get("id"),
+            "beschreibung": a.get("beschreibung", ""),
+            "frist": a.get("frist", ""),
+            "erledigt": erledigt,
+            "prioritaet": a.get("prioritaet", "normal"),
+            "tage": tage,
+            "dringend": dringend,
+        })
+    result.sort(key=lambda x: (x["erledigt"], x["tage"] or 9999))
+    return {"aufgaben": result, "offen": sum(1 for a in result if not a["erledigt"])}
+
+
+@portal_router.post("/portal/aufgaben/{aufgabe_id}/erledigen", tags=["Portal"])
+def portal_aufgabe_erledigen(aufgabe_id: str, mandant: str = Depends(hole_mandant)):
+    from core.aufgabe_erledigt import aufgabe_ist_erledigt
+
+    store = _store_for_mandant(mandant)
+    alle = store.hole_fristen()
+    if aufgabe_id not in alle:
+        raise HTTPException(404, "Aufgabe nicht gefunden")
+    a = dict(alle[aufgabe_id])
+    if a.get("mandant") != mandant:
+        raise HTTPException(403, "Kein Zugriff")
+    if not a.get("portal_sichtbar"):
+        raise HTTPException(403, "Diese Aufgabe ist nicht im Portal sichtbar")
+    war_erledigt = aufgabe_ist_erledigt(a)
+    a["erledigt"] = 0 if war_erledigt else 1
+    if a["erledigt"]:
+        a["erledigt_am"] = datetime.now().isoformat()
+        a["erledigt_von"] = "mandant_portal"
+    else:
+        a.pop("erledigt_am", None)
+        a.pop("erledigt_von", None)
+    if not store.aufgabe_speichern(aufgabe_id, a):
+        raise HTTPException(500, "Aufgabe konnte nicht gespeichert werden")
+    try:
+        pc.chat_aufgabe_erledigt(store, mandant, aufgabe_id, a.get("beschreibung", ""), bool(a["erledigt"]))
+        for row in store.portal_liste("chat", mandant=mandant):
+            if row.get("typ") == "aufgabe" and (row.get("refs") or {}).get("aufgabe_id") == aufgabe_id:
+                pc.update_chat_meta(store, mandant, row["id"], {"aufgabe_erledigt": bool(a["erledigt"])})
+    except Exception as e:
+        log.warning("chat nach aufgabe: %s", e)
+    store.log_eintrag(f"PORTAL_AUFGABE_TOGGLE | {mandant} | {aufgabe_id[:8]} | erledigt={a['erledigt']}")
+    return {"status": "erledigt" if a["erledigt"] else "offen", "id": aufgabe_id}
 
 @portal_router.get("/portal/dokumente", tags=["Portal"])
 def fehlende_dokumente(mandant: str = Depends(hole_mandant)):
-    m = ds.hole_mandanten().get(mandant,{})
+    store = _store_for_mandant(mandant)
+    m = store.hole_mandanten().get(mandant, {})
     fehlende = m.get("fehlende_dokumente_liste",[])
     return {"fehlende_dokumente":fehlende,"anzahl":len(fehlende),
             "hinweis":"Bitte hochladen." if fehlende else "Alle vollständig ✓"}
@@ -267,7 +352,8 @@ def fehlende_dokumente(mandant: str = Depends(hole_mandant)):
 # DOKUMENT-UPLOAD
 # ============================================================
 
-def _verarbeite_upload(mandant: str, data: DokumentUpload) -> Dict:
+def _verarbeite_upload(mandant: str, data: DokumentUpload, *, upload_von: str = "mandant") -> Dict:
+    store = _store_for_mandant(mandant)
     max_mb = int(setting_holen("portal_upload_max_mb") or UPLOAD_MAX_MB or 20)
     if bool(setting_holen("portal_projektnummer_pflicht")) and not str(data.projektnummer or "").strip():
         raise HTTPException(400, "Projektnummer ist als Pflichtfeld aktiviert")
@@ -292,33 +378,54 @@ def _verarbeite_upload(mandant: str, data: DokumentUpload) -> Dict:
     dateipfad  = os.path.join(upload_dir, dateiname)
     with open(dateipfad,"wb") as f: f.write(inhalt)
 
-    p = _portal()
     uid = str(uuid.uuid4())
-    p["portal"]["uploads"][uid] = {
-        "id":uid,"mandant":mandant,"dateiname":dateiname,
-        "original":data.dateiname,"dateipfad":dateipfad,
-        "groesse_kb":round(len(inhalt)/1024,1),
-        "kategorie":data.kategorie or "Sonstiges",
+    upload_rec = {
+        "id": uid, "mandant": mandant, "dateiname": dateiname,
+        "original": data.dateiname, "dateipfad": dateipfad,
+        "groesse_kb": round(len(inhalt) / 1024, 1),
+        "kategorie": data.kategorie or "Sonstiges",
         "projektnummer": str(data.projektnummer or "").strip(),
-        "beschreibung":data.beschreibung or "",
-        "hochgeladen_am":datetime.now().isoformat(),
+        "beschreibung": data.beschreibung or "",
+        "hochgeladen_am": datetime.now().isoformat(),
+        "status": "hochgeladen",
     }
-    _save_portal(p)
+    if not store.portal_speichern("upload", uid, mandant, upload_rec):
+        raise HTTPException(500, "Upload konnte nicht gespeichert werden")
 
-    # Fehlende Docs abgleichen
-    m = ds.hole_mandanten().get(mandant,{})
-    fehlende = m.get("fehlende_dokumente_liste",[])
-    gefunden = next((d for d in fehlende if d.lower() in data.dateiname.lower() or data.dateiname.lower() in d.lower()),None)
+    m = store.hole_mandanten().get(mandant, {})
+    fehlende = list(m.get("fehlende_dokumente_liste") or [])
+    gefunden = next(
+        (d for d in fehlende if d.lower() in data.dateiname.lower() or data.dateiname.lower() in d.lower()),
+        None,
+    )
     if gefunden:
         fehlende.remove(gefunden)
         m["fehlende_dokumente_liste"] = fehlende
         m["letzte_antwort"] = datetime.now().isoformat()
-        ds.mandant_speichern(mandant, m)
+        store.mandant_speichern(mandant, m)
 
-    ds.kommunikation_hinzufuegen(mandant,{
-        "typ":"portal_upload","text":f"Hochgeladen: {data.dateiname} ({round(len(inhalt)/1024,1)} KB)",
-        "kategorie":data.kategorie,"timestamp":datetime.now().isoformat()})
-    ds.log_eintrag(f"PORTAL_UPLOAD | {mandant} | {data.dateiname} | {len(inhalt)} bytes")
+    richtung = "ausgehend" if upload_von == "kanzlei" else "eingehend"
+    store.kommunikation_hinzufuegen(mandant, {
+        "typ": "portal_upload",
+        "text": f"Hochgeladen: {data.dateiname} ({round(len(inhalt) / 1024, 1)} KB)",
+        "kategorie": data.kategorie,
+        "timestamp": datetime.now().isoformat(),
+        "richtung": richtung,
+    })
+    store.log_eintrag(f"PORTAL_UPLOAD | {mandant} | {data.dateiname} | {len(inhalt)} bytes | von={upload_von}")
+    try:
+        pc.chat_upload(
+            store, mandant, uid, data.dateiname, round(len(inhalt) / 1024, 1), sender=upload_von
+        )
+        if gefunden:
+            for row in store.portal_liste("chat", mandant=mandant):
+                if row.get("typ") != "dokument_anfrage":
+                    continue
+                doc = (row.get("refs") or {}).get("dokument_name") or (row.get("meta") or {}).get("dokument_name", "")
+                if doc and (doc.lower() in gefunden.lower() or gefunden.lower() in doc.lower()):
+                    pc.update_chat_meta(store, mandant, row["id"], {"dokument_offen": False})
+    except Exception as e:
+        log.warning("chat_upload: %s", e)
 
     return {"status":"ok","upload_id":uid,"dateiname":dateiname,
             "groesse_kb":round(len(inhalt)/1024,1),
@@ -341,60 +448,102 @@ def bulk_upload(data: MultiUpload, mandant: str = Depends(hole_mandant)):
 
 @portal_router.get("/portal/dokumente/meine-uploads", tags=["Portal"])
 def meine_uploads(mandant: str = Depends(hole_mandant)):
-    p = _portal()
+    store = _store_for_mandant(mandant)
     uploads = sorted(
-        [u for u in p["portal"]["uploads"].values() if u.get("mandant")==mandant],
-        key=lambda x: x.get("hochgeladen_am",""), reverse=True)
-    return {"uploads":uploads,"anzahl":len(uploads)}
+        store.portal_liste("upload", mandant=mandant),
+        key=lambda x: x.get("hochgeladen_am", ""),
+        reverse=True,
+    )
+    return {"uploads": uploads, "anzahl": len(uploads)}
 
 
 # ============================================================
 # ✍ DIGITALE UNTERSCHRIFT
 # ============================================================
 
-@portal_router.post("/portal/unterschrift/anfragen", tags=["Unterschrift"])
-def unterschrift_anfragen(data: UnterschriftAnfragen):
-    """
-    KANZLEI sendet Dokument zur Unterzeichnung.
-    Rechtsbasis: Einfache Elektronische Signatur (EES) nach eIDAS Art. 3 Nr. 10.
-    Gültig für: Vollmachten, Mandatsverträge, Jahresabschluss-Freigaben.
-    """
+def erstelle_unterschrift_anfrage(
+    store: DatenSpeicher,
+    mandant: str,
+    dokumentname: str,
+    dokument_b64: str,
+    dokumenttyp: str = "application/pdf",
+    betreff: str = "Bitte unterzeichnen",
+    hinweis: str = "",
+    gueltig_tage: int = 30,
+) -> Dict:
+    """Kanzlei fordert Unterschrift beim Mandanten an (JWT oder Legacy Admin-Key-Route)."""
     if not bool(setting_holen("portal_unterschrift_aktiv")):
         raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
-    if not secrets.compare_digest(data.admin_key, os.getenv("PORTAL_ADMIN_KEY","kanzlei-admin-2024")):
-        raise HTTPException(403, "Ungültiger Admin-Key")
-    if data.mandant not in ds.hole_mandanten():
-        raise HTTPException(404, f"Mandant '{data.mandant}' nicht gefunden")
+    if mandant not in store.hole_mandanten():
+        raise HTTPException(404, f"Mandant '{mandant}' nicht gefunden")
+    if not (dokumentname or "").strip() or not (dokument_b64 or "").strip():
+        raise HTTPException(400, "Dokumentname und Datei sind erforderlich")
 
     uid = str(uuid.uuid4())
-    p   = _portal()
-    p["portal"]["unterschriften"][uid] = {
-        "id":            uid,
-        "mandant":       data.mandant,
-        "dokumentname":  data.dokumentname,
-        "dokument_b64":  data.dokument_b64,
-        "dokumenttyp":   data.dokumenttyp,
-        "betreff":       data.betreff,
-        "hinweis":       data.hinweis,
-        "status":        "ausstehend",
-        "erstellt_am":   datetime.now().isoformat(),
-        "gueltig_bis":   (datetime.now()+timedelta(days=data.gueltig_tage)).isoformat(),
-        "audit_trail":   [{"aktion":"anfrage_erstellt","zeitpunkt":datetime.now().isoformat()}],
-        "unterschrift_b64":  None,
+    gueltig_bis = (datetime.now() + timedelta(days=gueltig_tage)).isoformat()
+    payload = {
+        "id": uid,
+        "mandant": mandant,
+        "dokumentname": dokumentname.strip(),
+        "dokument_b64": dokument_b64,
+        "dokumenttyp": dokumenttyp or "application/pdf",
+        "betreff": betreff or "Bitte unterzeichnen",
+        "hinweis": hinweis or "",
+        "status": "ausstehend",
+        "erstellt_am": datetime.now().isoformat(),
+        "gueltig_bis": gueltig_bis,
+        "audit_trail": [{"aktion": "anfrage_erstellt", "zeitpunkt": datetime.now().isoformat()}],
+        "unterschrift_b64": None,
         "unterschrieben_am": None,
-        "unterzeichner_info":None,
+        "unterzeichner_info": None,
     }
-    _save_portal(p)
-    ds.log_eintrag(f"UNTERSCHRIFT_ANFRAGE | {data.mandant} | {data.dokumentname} | ID:{uid[:8]}")
-    return {"unterschrift_id":uid,"mandant":data.mandant,"dokument":data.dokumentname,
-            "gueltig_bis":p["portal"]["unterschriften"][uid]["gueltig_bis"],"status":"ausstehend"}
+    if not store.portal_speichern("unterschrift", uid, mandant, payload):
+        raise HTTPException(500, "Unterschrift konnte nicht angelegt werden")
+    store.kommunikation_hinzufuegen(mandant, {
+        "typ": "unterschrift_anfrage",
+        "text": f"Unterschrift angefordert: {dokumentname} — {betreff}",
+        "timestamp": datetime.now().isoformat(),
+        "richtung": "ausgehend",
+    })
+    store.log_eintrag(f"UNTERSCHRIFT_ANFRAGE | {mandant} | {dokumentname} | ID:{uid[:8]}")
+    try:
+        pc.chat_unterschrift_anfrage(store, mandant, uid, dokumentname, betreff, hinweis)
+    except Exception as e:
+        log.warning("chat_unterschrift_anfrage: %s", e)
+    return {
+        "unterschrift_id": uid,
+        "mandant": mandant,
+        "dokument": dokumentname,
+        "gueltig_bis": gueltig_bis,
+        "status": "ausstehend",
+    }
+
+
+@portal_router.post("/portal/unterschrift/anfragen", tags=["Unterschrift"])
+def unterschrift_anfragen(data: UnterschriftAnfragen):
+    """Legacy: Admin-Key in .env (optional). Kanzlei-UI nutzt POST /portal/mandant/{name}/unterschrift-anfragen."""
+    expected = (os.getenv("PORTAL_ADMIN_KEY") or "").strip()
+    if expected and not secrets.compare_digest((data.admin_key or "").strip(), expected):
+        raise HTTPException(403, "Ungültiger Admin-Key")
+    store = _store_for_mandant(data.mandant)
+    return erstelle_unterschrift_anfrage(
+        store,
+        data.mandant,
+        data.dokumentname,
+        data.dokument_b64,
+        data.dokumenttyp,
+        data.betreff,
+        data.hinweis,
+        data.gueltig_tage,
+    )
 
 @portal_router.get("/portal/unterschrift/offen", tags=["Unterschrift"])
 def offene_unterschriften(mandant: str = Depends(hole_mandant)):
     """Mandant sieht alle offenen Unterschriftsanfragen."""
     if not bool(setting_holen("portal_unterschrift_aktiv")):
         raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
-    p     = _portal()
+    store = _store_for_mandant(mandant)
+    p = _portal_store(store, mandant)
     jetzt = datetime.now()
     offene = []
     for uid, u in p["portal"]["unterschriften"].items():
@@ -409,16 +558,18 @@ def offene_unterschriften(mandant: str = Depends(hole_mandant)):
                            "hinweis":u["hinweis"],"status":u["status"],
                            "erstellt_am":u["erstellt_am"],"gueltig_bis":u["gueltig_bis"],
                            "hat_dokument":bool(u.get("dokument_b64"))})
-    return {"unterschriften":sorted(offene,key=lambda x:x["erstellt_am"],reverse=True),
-            "anzahl":len(offene)}
+    if offene:
+        _save_portal(p, store)
+    return {"unterschriften": sorted(offene, key=lambda x: x["erstellt_am"], reverse=True),
+            "anzahl": len(offene)}
 
 @portal_router.get("/portal/unterschrift/{uid}/dokument", tags=["Unterschrift"])
 def dokument_herunterladen(uid: str, mandant: str = Depends(hole_mandant)):
     """Zu unterzeichnendes Dokument abrufen."""
     if not bool(setting_holen("portal_unterschrift_aktiv")):
         raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
-    p = _portal()
-    u = p["portal"]["unterschriften"].get(uid)
+    store = _store_for_mandant(mandant)
+    u = store.portal_holen("unterschrift", uid) or {}
     if not u: raise HTTPException(404, "Nicht gefunden")
     if u.get("mandant") != mandant: raise HTTPException(403, "Kein Zugriff")
     if u.get("status") == "abgelaufen": raise HTTPException(410, "Frist abgelaufen")
@@ -435,12 +586,16 @@ def unterschrift_leisten(uid: str, data: UnterschriftLeisten,
     """
     if not bool(setting_holen("portal_unterschrift_aktiv")):
         raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
-    p = _portal()
-    u = p["portal"]["unterschriften"].get(uid)
-    if not u: raise HTTPException(404, "Nicht gefunden")
-    if u.get("mandant") != mandant: raise HTTPException(403, "Kein Zugriff")
-    if u.get("status") != "ausstehend": raise HTTPException(400, f"Status: {u.get('status')}")
-    if not data.bestaetigung: raise HTTPException(400, "Bitte Kenntnisnahme bestätigen")
+    store = _store_for_mandant(mandant)
+    u = store.portal_holen("unterschrift", uid) or {}
+    if not u:
+        raise HTTPException(404, "Nicht gefunden")
+    if u.get("mandant") != mandant:
+        raise HTTPException(403, "Kein Zugriff")
+    if u.get("status") != "ausstehend":
+        raise HTTPException(400, f"Status: {u.get('status')}")
+    if not data.bestaetigung:
+        raise HTTPException(400, "Bitte Kenntnisnahme bestätigen")
     try:
         deadline = datetime.fromisoformat(u["gueltig_bis"])
     except (TypeError, ValueError) as exc:
@@ -469,20 +624,33 @@ def unterschrift_leisten(uid: str, data: UnterschriftLeisten,
             "eidas_typ": "EES",  # Einfache Elektronische Signatur
         }
     })
-    u["audit_trail"].append({
-        "aktion":    "unterschrieben",
+    trail = list(u.get("audit_trail") or [])
+    trail.append({
+        "aktion": "unterschrieben",
         "zeitpunkt": jetzt.isoformat(),
-        "ip":        data.ip_adresse or client_ip,
-        "user_agent":user_agent[:100],
-        "details":   f"Digital unterzeichnet von {mandant} — eIDAS EES",
+        "ip": data.ip_adresse or client_ip,
+        "user_agent": user_agent[:100],
+        "details": f"Digital unterzeichnet von {mandant} — eIDAS EES",
     })
-    _save_portal(p)
+    u["audit_trail"] = trail
+    if not store.portal_speichern("unterschrift", uid, mandant, u):
+        raise HTTPException(500, "Unterschrift konnte nicht gespeichert werden")
 
-    ds.kommunikation_hinzufuegen(mandant,{
-        "typ":"dokument_unterschrieben",
-        "text":f"Dokument unterzeichnet: {u['dokumentname']}",
-        "unterschrift_id":uid,"timestamp":jetzt.isoformat()})
-    ds.log_eintrag(f"UNTERSCHRIEBEN | {mandant} | {u['dokumentname']} | IP:{client_ip}")
+    store.kommunikation_hinzufuegen(mandant, {
+        "typ": "dokument_unterschrieben",
+        "text": f"Dokument unterzeichnet: {u['dokumentname']}",
+        "unterschrift_id": uid,
+        "timestamp": jetzt.isoformat(),
+        "richtung": "eingehend",
+    })
+    store.log_eintrag(f"UNTERSCHRIEBEN | {mandant} | {u['dokumentname']} | IP:{client_ip}")
+    try:
+        pc.chat_unterschrift_status(store, mandant, uid, u["dokumentname"], "unterschrieben")
+        for row in store.portal_liste("chat", mandant=mandant):
+            if row.get("typ") == "unterschrift_anfrage" and (row.get("refs") or {}).get("unterschrift_id") == uid:
+                pc.update_chat_meta(store, mandant, row["id"], {"unterschrift_status": "unterschrieben"})
+    except Exception as e:
+        log.warning("chat nach unterschrift: %s", e)
 
     return {"status":"unterschrieben","dokumentname":u["dokumentname"],
             "zeitpunkt":jetzt.isoformat(),
@@ -582,29 +750,75 @@ def freigabe_erteilen(fid: str, kommentar: str = Query(""),
 
 
 # ============================================================
-# NACHRICHTEN & SIMULATION
+# PORTAL-CHAT
+# ============================================================
+
+class ChatTextBody(BaseModel):
+    text: str = Field(..., min_length=1, max_length=5000)
+
+
+@portal_router.get("/portal/chat", tags=["Portal-Chat"])
+def portal_chat_verlauf(
+    mandant: str = Depends(hole_mandant),
+    limit: int = Query(200, ge=1, le=500),
+    seit: Optional[str] = Query(None, description="Nachrichten nach dieser Chat-ID"),
+):
+    store = _store_for_mandant(mandant)
+    nachrichten = pc.list_chat(store, mandant, limit=limit, seit_id=seit)
+    return {"nachrichten": nachrichten, "anzahl": len(nachrichten)}
+
+
+@portal_router.post("/portal/chat", tags=["Portal-Chat"])
+def portal_chat_senden(data: ChatTextBody, mandant: str = Depends(hole_mandant)):
+    if not bool(setting_holen("portal_nachrichten_aktiv")):
+        raise HTTPException(503, "Chat im Mandantenportal ist deaktiviert")
+    store = _store_for_mandant(mandant)
+    text = data.text.strip()
+    msg = pc.chat_text_nachricht(store, mandant, text, "mandant")
+    store.kommunikation_hinzufuegen(mandant, {
+        "typ": "portal_nachricht",
+        "text": text,
+        "richtung": "eingehend",
+        "timestamp": msg["zeit"],
+    })
+    m = dict(store.hole_mandanten().get(mandant) or {})
+    if m:
+        m["letzte_antwort"] = datetime.now().isoformat()
+        store.mandant_speichern(mandant, m)
+    store.log_eintrag(f"PORTAL_CHAT | {mandant} | mandant")
+    return {"status": "gesendet", "nachricht": msg}
+
+
+# ============================================================
+# NACHRICHTEN & SIMULATION (Legacy — Chat bevorzugt)
 # ============================================================
 
 @portal_router.post("/portal/nachricht", tags=["Portal"])
 def nachricht_senden(data: NachrichtCreate, mandant: str = Depends(hole_mandant)):
     try:
+        store = _store_for_mandant(mandant)
         if not bool(setting_holen("portal_nachrichten_aktiv")):
             raise HTTPException(503, "Nachrichten im Mandantenportal sind deaktiviert")
         betreff = (data.betreff or "").strip()
         inhalt = (data.inhalt or "").strip()
         text_voll = f"Betreff: {betreff}\n\n{inhalt}" if betreff else inhalt
-        if not ds.kommunikation_hinzufuegen(mandant, {
+        ts = datetime.now().isoformat()
+        if not store.kommunikation_hinzufuegen(mandant, {
             "typ": "portal_nachricht",
             "text": text_voll,
             "richtung": "eingehend",
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": ts,
         }):
             raise HTTPException(500, "Nachricht konnte nicht gespeichert werden")
-        m = dict(ds.hole_mandanten().get(mandant) or {})
+        try:
+            pc.chat_text_nachricht(store, mandant, text_voll, "mandant")
+        except Exception as e:
+            log.warning("chat legacy nachricht: %s", e)
+        m = dict(store.hole_mandanten().get(mandant) or {})
         if m:
             m["letzte_antwort"] = datetime.now().isoformat()
-            ds.mandant_speichern(mandant, m)
-        ds.log_eintrag(f"PORTAL_NACHRICHT | {mandant} | {betreff[:50]}")
+            store.mandant_speichern(mandant, m)
+        store.log_eintrag(f"PORTAL_NACHRICHT | {mandant} | {betreff[:50]}")
         return {"status": "gesendet"}
     except HTTPException:
         raise
@@ -614,11 +828,12 @@ def nachricht_senden(data: NachrichtCreate, mandant: str = Depends(hole_mandant)
 
 @portal_router.get("/portal/nachrichten", tags=["Portal"])
 def meine_nachrichten(mandant: str = Depends(hole_mandant)):
-    komm = ds.hole_kommunikation(mandant)
+    store = _store_for_mandant(mandant)
+    komm = store.hole_kommunikation(mandant)
     sichtbar = sorted(
         [_komm_zeile_normalisieren(k) for k in komm if k.get("typ") in [
-            "portal_nachricht", "auto_email", "dokument_unterschrieben", "portal_upload",
-            "freigabe_erteilt", "unterschrift_abgelehnt",
+            "portal_nachricht", "kanzlei_antwort", "auto_email", "dokument_unterschrieben",
+            "portal_upload", "freigabe_erteilt", "unterschrift_abgelehnt", "unterschrift_anfrage",
         ]],
         key=lambda x: x.get("timestamp", ""),
         reverse=True,

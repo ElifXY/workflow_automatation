@@ -614,94 +614,12 @@ const EmailSection = ({ name, email }) => (
   </Card>
 );
 
-const KommunikationSection = ({ name, showToast }) => {
-  const [items, setItems] = useState([]);
-  const [loading, setLoading] = useState(true);
-
-  const laden = useCallback(async () => {
-    setLoading(true);
-    try {
-      const raw = await getKommunikation(name, 40);
-      const list = raw?.kommunikation || raw?.data?.kommunikation || [];
-      setItems(Array.isArray(list) ? list : []);
-    } catch (e) {
-      showToast?.(e.message || "Kommunikation konnte nicht geladen werden", "error");
-      setItems([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [name, showToast]);
-
-  useEffect(() => { laden(); }, [laden]);
-
-  const portalNachrichten = items.filter(
-    (k) => k.typ === "portal_nachricht" || k.richtung === "eingehend"
-  );
-
-  const parseNachricht = (n) => {
-    const text = (n.text || "").trim();
-    const m = text.match(/^Betreff:\s*(.+?)(?:\n\n|\n$)/s);
-    if (m) {
-      return {
-        betreff: m[1].trim(),
-        body: text.slice(m[0].length).trim(),
-      };
-    }
-    return { betreff: n.betreff || "Nachricht", body: text };
-  };
-
-  return (
-    <Card>
-      <SectionTitle>Kommunikation & Portal-Nachrichten</SectionTitle>
-      <div style={{ fontSize: 12, color: "var(--text3)", marginBottom: 10, lineHeight: 1.55 }}>
-        Nachrichten aus dem Mandantenportal landen hier. Zusätzlich im Excel-Export unter „Kommunikation“.
-      </div>
-      <Btn size="xs" variant="ghost" onClick={laden} loading={loading} style={{ marginBottom: 10 }}>
-        Aktualisieren
-      </Btn>
-      {loading && !portalNachrichten.length ? (
-        <div style={{ fontSize: 12, color: "var(--text3)" }}>Lade Nachrichten…</div>
-      ) : portalNachrichten.length === 0 ? (
-        <div style={{ fontSize: 12, color: "var(--text3)" }}>Noch keine Portal-Nachrichten von diesem Mandanten.</div>
-      ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 320, overflowY: "auto" }}>
-          {portalNachrichten.slice(0, 20).map((n, i) => {
-            const { betreff, body } = parseNachricht(n);
-            const ts = n.timestamp || n.erstellt_am || "";
-            const datum = ts
-              ? new Date(ts).toLocaleString("de-DE", { dateStyle: "short", timeStyle: "short" })
-              : "";
-            return (
-              <div
-                key={n.id || `${i}-${ts}`}
-                style={{
-                  padding: "10px 12px",
-                  background: "var(--bg)",
-                  border: "1px solid var(--border)",
-                  borderRadius: 10,
-                  borderLeft: "3px solid var(--accent)",
-                }}
-              >
-                <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", marginBottom: 4 }}>
-                  💬 {betreff}
-                </div>
-                <div style={{ fontSize: 12, color: "var(--text2)", lineHeight: 1.55, whiteSpace: "pre-wrap" }}>
-                  {body || "—"}
-                </div>
-                {datum && (
-                  <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 6 }}>{datum}</div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </Card>
-  );
-};
-
-
 // ═══════════════════════════════════════════════════════════
+// SIMULATION SECTION (Portal-Chat: Sidebar → Mandanten-Chat)
+// ═══════════════════════════════════════════════════════════
+
+const _simulationSectionPlaceholder = null; /* removed duplicate block below */
+
 // SIMULATION SECTION
 // ═══════════════════════════════════════════════════════════
 
@@ -1223,7 +1141,20 @@ export default function MandantDetail() {
 
             <EmailSection name={name} email={mandant.email} />
 
-            <KommunikationSection name={name} showToast={showToast} />
+            <Card>
+              <SectionTitle>Portal-Chat</SectionTitle>
+              <div style={{ fontSize: 12, color: "var(--text3)", marginBottom: 12, lineHeight: 1.55 }}>
+                Vollständiger Chat-Verlauf mit Aufgaben, Dokument- und Unterschrift-Anfragen —
+                in der Seitenleiste unter <strong style={{ color: "var(--accent)" }}>Mandanten-Portal</strong>.
+              </div>
+              <Btn
+                size="sm"
+                variant="primary"
+                onClick={() => navigate("/", { state: { tab: "portalchat", chatMandant: name } })}
+              >
+                Chat mit {name} öffnen
+              </Btn>
+            </Card>
 
             <WorkflowSection name={name} onRefresh={ladeAlles} />
 

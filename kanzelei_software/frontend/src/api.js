@@ -824,6 +824,56 @@ export const portalUnterschriftenAlle = (mandant = null) =>
 export const portalMandantStatus = (name) =>
   apiFetch(`/portal/mandant/${encodeURIComponent(name)}/status`);
 
+export const getPortalUploads = (name) =>
+  apiFetch(`/portal/mandant/${encodeURIComponent(name)}/uploads`);
+
+export const portalUnterschriftAnfragen = (name, body) =>
+  apiFetch(`/portal/mandant/${encodeURIComponent(name)}/unterschrift-anfragen`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const sendPortalAntwort = (name, betreff, text) =>
+  apiFetch(`/kommunikation/${encodeURIComponent(name)}/portal-antwort`, {
+    method: "POST",
+    body: JSON.stringify({ betreff, text }),
+  });
+
+export const getPortalChat = (name, seit = null) =>
+  apiFetch(
+    `/portal/mandant/${encodeURIComponent(name)}/chat${seit ? `?seit=${encodeURIComponent(seit)}` : ""}`
+  );
+
+export const sendPortalChat = (name, text) =>
+  apiFetch(`/portal/mandant/${encodeURIComponent(name)}/chat`, {
+    method: "POST",
+    body: JSON.stringify({ text }),
+  });
+
+export const sendPortalChatAufgabe = (name, body) =>
+  apiFetch(`/portal/mandant/${encodeURIComponent(name)}/chat/aufgabe`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const sendPortalChatDokument = (name, body) =>
+  apiFetch(`/portal/mandant/${encodeURIComponent(name)}/chat/dokument-anfrage`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const sendPortalChatUnterschrift = (name, body) =>
+  apiFetch(`/portal/mandant/${encodeURIComponent(name)}/chat/unterschrift`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const sendPortalChatUpload = (name, body) =>
+  apiFetch(`/portal/mandant/${encodeURIComponent(name)}/chat/upload`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
 // ═══════════════════════════════════════════════════════════════
 // PROAKTIVER BOT
 // ═══════════════════════════════════════════════════════════════

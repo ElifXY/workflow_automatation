@@ -48,6 +48,8 @@ import ResetPassword     from "./pages/ResetPassword";
 import VerifyEmail       from "./pages/VerifyEmail";
 import MandantDetail     from "./pages/MandantDetail";
 import KiEmailComposer   from "./components/KiEmailComposer";
+import PortalChat          from "./components/PortalChat";
+import PortalChatMandantList from "./components/PortalChatMandantList";
 import { hasRoleReal, getEffectiveRole } from "./components/PermissionGate";
 import { hasNavTab } from "./navAccess";
 import { useContentLayoutWidth, readContentLayoutWidth } from "./useContentLayoutWidth";
@@ -375,6 +377,7 @@ const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 const MOBILE_TAB_TITLE = {
   dashboard: "Dashboard",
   mandanten: "Mandanten",
+  portalchat: "Mandanten-Portal",
   aufgaben: "Aufgaben",
   ki: "KI-Assistent",
   profit: "Profit",
@@ -405,6 +408,8 @@ const Sidebar = ({
   onCloseMobile,
   onOpenMobile,
   onDesktopCollapse,
+  chatMandant,
+  onChatMandantChange,
 }) => {
   const kritisch = kpis.filter(k => k.status === "KRITISCH").length;
   const wichtig  = kpis.filter(k => k.status === "WICHTIG").length;
@@ -416,6 +421,7 @@ const Sidebar = ({
   const navItems = [
     { id:"dashboard",    label:"Dashboard",        icon:"⬛" },
     { id:"mandanten",    label:"Mandanten",        icon:"◉",  badge:kpis.length },
+    { id:"portalchat",   label:"Mandanten-Portal", icon:"💬" },
     { id:"aufgaben",     label:"Aufgaben",          icon:"▦",  badge:kritisch||null },
     { id:"ki",           label:"KI-Assistent",     icon:"✦" },
     { id:"profit",       label:"Profit Monitor",   icon:"📈" },
@@ -553,7 +559,16 @@ const Sidebar = ({
         </div>
       )}
 
-      <div style={{ flex:1, padding:isMobile ? "0 10px" : isCompact?"0 8px":"0 12px", overflowY:"auto", WebkitOverflowScrolling: "touch" }}>
+      <div style={{
+        flex: 1,
+        padding: isMobile ? "0 10px" : isCompact ? "0 8px" : "0 12px",
+        overflowY: "auto",
+        WebkitOverflowScrolling: "touch",
+        display: "flex",
+        flexDirection: "column",
+        minHeight: 0,
+      }}>
+        <div style={{ flexShrink: activeTab === "portalchat" ? 0 : undefined }}>
         {navItems.map(item => {
           const active = activeTab === item.id;
           return (
@@ -604,6 +619,21 @@ const Sidebar = ({
             </button>
           );
         })}
+        </div>
+        {activeTab === "portalchat" ? (
+          <>
+            <Divider />
+            <div style={{ flex: 1, minHeight: 120, display: "flex", flexDirection: "column", paddingTop: 4 }}>
+              <PortalChatMandantList
+                mandanten={kpis}
+                selected={chatMandant}
+                onSelect={onChatMandantChange}
+                isCompact={isCompact}
+                isMobile={isMobile}
+              />
+            </div>
+          </>
+        ) : null}
       </div>
 
       <Divider />
@@ -2225,13 +2255,43 @@ function AppInner() {
     return clamp(Number.isFinite(stored) ? stored : fallback, initialMin, initialMax);
   });
   const [activeTab,    setActiveTab]    = useState("dashboard");
+  const [chatMandant, setChatMandant] = useState(() => {
+    try {
+      return localStorage.getItem("kanzlei_chat_mandant") || "";
+    } catch {
+      return "";
+    }
+  });
+  const setChatMandantPersist = useCallback((name) => {
+    setChatMandant(name || "");
+    try {
+      if (name) localStorage.setItem("kanzlei_chat_mandant", name);
+      else localStorage.removeItem("kanzlei_chat_mandant");
+    } catch {}
+  }, []);
+
   useEffect(() => {
     const tab = location.state?.tab;
+    const cm = location.state?.chatMandant;
+    if (cm) setChatMandantPersist(cm);
     if (tab && hasNavTab(appRole, tab, navSettings)) {
       setActiveTab(tab);
       window.history.replaceState({}, document.title);
     }
-  }, [location.state?.tab, appRole, navSettings]);
+  }, [location.state?.tab, location.state?.chatMandant, appRole, navSettings, setChatMandantPersist]);
+
+  useEffect(() => {
+    if (!kpis.length) return;
+    const names = kpis.map((k) => k.mandant).filter(Boolean);
+    if (chatMandant && names.includes(chatMandant)) return;
+    if (names.length) setChatMandantPersist(names[0]);
+  }, [kpis, chatMandant, setChatMandantPersist]);
+
+  useEffect(() => {
+    if (activeTab === "portalchat" && !isMobile) {
+      setSidebarWidth((w) => clamp(Math.max(w, 260), sidebarMinWidth, sidebarMaxWidth));
+    }
+  }, [activeTab, isMobile, sidebarMinWidth, sidebarMaxWidth]);
   const [kpis,         setKpis]         = useState([]);
   const [heute,        setHeute]        = useState([]);
   const [empfehlungen, setEmpfehlungen] = useState([]);
@@ -2380,7 +2440,7 @@ function AppInner() {
 
   useEffect(() => {
     ladeAlles(true);
-    // Auto-Reload alle 15s — pausiert beim Tippen/Formularen/Save
+    // Auto-Reload alle 45s — pausiert beim Tippen/Formularen/Save (schont API Rate-Limit)
     refreshRef.current = setInterval(() => {
       if (
         !typingRef.current &&
@@ -2390,7 +2450,7 @@ function AppInner() {
       ) {
         ladeAlles();
       }
-    }, 15000);
+    }, 45000);
     return () => clearInterval(refreshRef.current);
   }, [ladeAlles]);
 
@@ -2475,6 +2535,48 @@ function AppInner() {
         return <RisikoDashboard kpis={kpis} heute={heute} onEmail={openEmailModal} onTab={setActiveTab} onRefresh={ladeAlles} isMobile={isMobile} />;
 
       // ── MANDANTEN ──────────────────────────────────────────
+      case "portalchat":
+        return (
+          <div style={{
+            flex: 1,
+            display: "flex",
+            flexDirection: "column",
+            minHeight: 0,
+            overflow: "hidden",
+            padding: isMobile ? "12px 12px 0" : "16px 20px 0",
+          }}>
+            {isMobile ? (
+              <div style={{ marginBottom: 10, flexShrink: 0 }}>
+                <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 4 }}>Mandant</div>
+                <select
+                  value={chatMandant || ""}
+                  onChange={(e) => setChatMandantPersist(e.target.value)}
+                  style={{
+                    width: "100%",
+                    padding: "10px 12px",
+                    borderRadius: 8,
+                    border: "1px solid var(--border)",
+                    background: "var(--bg2)",
+                    color: "var(--text)",
+                    fontSize: 14,
+                  }}
+                >
+                  <option value="">— Mandant wählen —</option>
+                  {kpis.map((k) => k.mandant).filter(Boolean).map((n) => (
+                    <option key={n} value={n}>{n}</option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
+            <PortalChat
+              mandantName={chatMandant}
+              showToast={toast}
+              embedded
+              fillHeight
+            />
+          </div>
+        );
+
       case "mandanten":
         return (
           <div style={{ padding:contentPad, flex:1, overflowY:"auto" }}>
@@ -2575,6 +2677,8 @@ function AppInner() {
           activeTab={activeTab}
           setActiveTab={setActiveTab}
           kpis={kpis}
+          chatMandant={chatMandant}
+          onChatMandantChange={setChatMandantPersist}
           width={sidebarWidth}
           setWidth={setSidebarWidth}
           minWidth={sidebarMinWidth}

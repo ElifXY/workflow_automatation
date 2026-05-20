@@ -122,12 +122,12 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "rollen_einstellungen":        ["admin"],
     # Sidebar: welche Hauptbereiche Steuerberater bzw. Mitarbeitende sehen (Owner/Admin konfigurierbar)
     "rollen_nav_steuerberater": [
-        "dashboard", "mandanten", "aufgaben", "ki", "profit", "steuerbot",
+        "dashboard", "mandanten", "portalchat", "aufgaben", "ki", "profit", "steuerbot",
         "dokumente", "belege", "rechnungen", "automation", "empfehlungen",
         "analytics", "neu", "settings",
     ],
     "rollen_nav_mitarbeiter": [
-        "dashboard", "mandanten", "aufgaben", "ki", "dokumente", "belege",
+        "dashboard", "mandanten", "portalchat", "aufgaben", "ki", "dokumente", "belege",
         "rechnungen", "empfehlungen",
     ],
     "backup_aktiv":                True,
@@ -154,7 +154,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "lexoffice_aktiv":             False,
     "lexoffice_api_key":           "",
     "webhook_url":                 "",      # Outgoing Webhooks
-    "api_rate_limit_pro_minute":   300,
+    "api_rate_limit_pro_minute":   600,
 
     # ── KANZLEI-STAMMDATEN ────────────────────────────────────
     "kanzlei_name":                "Steuerkanzlei",
@@ -238,6 +238,23 @@ EMAIL_KEYS = {
 }
 URL_KEYS = {"webhook_url", "kanzlei_website"}
 NAV_KEYS = {"rollen_nav_steuerberater", "rollen_nav_mitarbeiter"}
+NAV_TABS_ALWAYS = ("dashboard", "portalchat")
+NAV_TAB_ORDER = [
+    "dashboard", "mandanten", "portalchat", "aufgaben", "ki", "profit", "steuerbot",
+    "dokumente", "belege", "rechnungen", "automation", "empfehlungen", "analytics", "neu", "settings",
+]
+
+
+def _normalize_nav_lists(settings: Dict[str, Any]) -> None:
+    """Bestehende Tenants: Mandanten-Portal in Sidebar nachrüsten."""
+    for key in NAV_KEYS:
+        raw = settings.get(key)
+        if not isinstance(raw, list):
+            continue
+        tabs = {str(x).strip().lower() for x in raw if str(x).strip()}
+        for tid in NAV_TABS_ALWAYS:
+            tabs.add(tid)
+        settings[key] = sorted(tabs, key=lambda x: NAV_TAB_ORDER.index(x) if x in NAV_TAB_ORDER else 999)
 
 
 # ============================================================
@@ -255,6 +272,7 @@ def _lade_settings() -> Dict:
         result.update(gespeichert)
         # Festgeschriebene Werte immer erzwingen
         result.update(FESTGESCHRIEBEN)
+        _normalize_nav_lists(result)
         return result
     except Exception as e:
         log.error(f"Settings-Ladefehler: {e}")
