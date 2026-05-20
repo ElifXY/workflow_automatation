@@ -8546,6 +8546,7 @@ class LohnMitarbeiterCreate(BaseModel):
     sv_nr:         str   = ""
     iban:          str   = ""
     eintritt:      Optional[str] = None
+    mandanten:     Optional[List[str]] = None
 
 class ZeitdatenImport(BaseModel):
     arbeitstage:    int   = 21

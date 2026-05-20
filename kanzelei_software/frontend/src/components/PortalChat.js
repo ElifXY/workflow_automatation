@@ -133,25 +133,23 @@ const ChatBubble = ({ msg, mandantName, showToast, onRefresh }) => {
         {body}
         {isKanzlei && !meta.geloescht && msg.id ? (
           <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
-            {(msg.typ === "text" || !msg.typ || msg.typ === "upload") ? (
-              <button
-                type="button"
-                style={{ fontSize: 10, padding: "3px 8px", borderRadius: 6, border: "1px solid var(--border)", background: "transparent", cursor: "pointer", color: "var(--text2)" }}
-                onClick={async () => {
-                  const neu = window.prompt("Nachricht bearbeiten:", msg.text || "");
-                  if (neu === null) return;
-                  const t = neu.trim();
-                  if (!t) { showToast?.("Text leer", "error"); return; }
-                  try {
-                    await patchPortalChat(mandantName, msg.id, t);
-                    showToast?.("Bearbeitet", "success");
-                    onRefresh?.();
-                  } catch (e) { showToast?.(e.message, "error"); }
-                }}
-              >
-                Bearbeiten
-              </button>
-            ) : null}
+            <button
+              type="button"
+              style={{ fontSize: 10, padding: "3px 8px", borderRadius: 6, border: "1px solid var(--border)", background: "transparent", cursor: "pointer", color: "var(--text2)" }}
+              onClick={async () => {
+                const neu = window.prompt("Nachricht bearbeiten:", msg.text || "");
+                if (neu === null) return;
+                const t = neu.trim();
+                if (!t) { showToast?.("Text leer", "error"); return; }
+                try {
+                  await patchPortalChat(mandantName, msg.id, t);
+                  showToast?.("Bearbeitet", "success");
+                  onRefresh?.();
+                } catch (e) { showToast?.(e.message, "error"); }
+              }}
+            >
+              Bearbeiten
+            </button>
             <button
               type="button"
               style={{ fontSize: 10, padding: "3px 8px", borderRadius: 6, border: "1px solid var(--border)", background: "transparent", cursor: "pointer", color: "var(--red)" }}

@@ -61,6 +61,16 @@ class LohnService:
     # MITARBEITER VERWALTEN
     # ============================================================
 
+    @staticmethod
+    def _mandanten_liste(mandant: str, mandanten: Optional[List[str]] = None) -> List[str]:
+        extra = [m.strip() for m in (mandanten or []) if m and str(m).strip()]
+        primary = (mandant or "").strip()
+        out: List[str] = []
+        for m in [primary, *extra]:
+            if m and m not in out:
+                out.append(m)
+        return out or ([primary] if primary else [])
+
     def mitarbeiter_anlegen(
         self,
         mandant:       str,
@@ -74,14 +84,18 @@ class LohnService:
         sv_nr:         str = "",
         iban:          str = "",
         eintritt:      str = None,
+        mandanten:     Optional[List[str]] = None,
     ) -> Dict:
         """Neuen Mitarbeiter für Lohnabrechnung anlegen."""
         data = self._lohn_daten()
         ma_id = str(uuid.uuid4())
+        mandanten_liste = self._mandanten_liste(mandant, mandanten)
+        haupt_mandant = mandanten_liste[0] if mandanten_liste else mandant
 
         mitarbeiter = {
             "id":             ma_id,
-            "mandant":        mandant,
+            "mandant":        haupt_mandant,
+            "mandanten":      mandanten_liste,
             "name":           name,
             "brutto_monat":   brutto_monat,
             "steuer_klasse":  steuer_klasse,
@@ -101,11 +115,19 @@ class LohnService:
         self.ds.log_eintrag(f"LOHN_MITARBEITER | {mandant} | {name} | €{brutto_monat}")
         return mitarbeiter
 
+    def _ma_hat_mandant(self, ma: Dict, mandant: str) -> bool:
+        if not mandant:
+            return True
+        liste = ma.get("mandanten") or []
+        if not liste and ma.get("mandant"):
+            liste = [ma["mandant"]]
+        return mandant in liste
+
     def mitarbeiter_liste(self, mandant: str = None) -> List[Dict]:
         data = self._lohn_daten()
-        ma   = list(data["lohnabrechnung"]["mitarbeiter"].values())
+        ma   = [m for m in data["lohnabrechnung"]["mitarbeiter"].values() if m.get("aktiv", True)]
         if mandant:
-            ma = [m for m in ma if m.get("mandant") == mandant and m.get("aktiv")]
+            ma = [m for m in ma if self._ma_hat_mandant(m, mandant)]
         return ma
 
     # ============================================================
@@ -212,8 +234,11 @@ class LohnService:
         abzuege_extra = zeitdaten.get("abzuege", 0.0)
 
         # ── Brutto angepasst ──────────────────────────────────
-        tagesbrutto       = brutto_monat / arbeitstage if arbeitstage > 0 else brutto_monat / 21
-        std_stundensatz   = brutto_monat / (ma["wochenstunden"] * 4.33)
+        wochenstunden = float(ma.get("wochenstunden") or 40.0)
+        if wochenstunden <= 0:
+            wochenstunden = 40.0
+        std_arbeitstage = max(arbeitstage, 1)
+        std_stundensatz = brutto_monat / (wochenstunden * 4.33) if wochenstunden > 0 else 0.0
 
         # Krankheitstage: Lohnfortzahlung 6 Wochen (EFZ)
         krank_abzug = 0.0  # Arbeitgeber zahlt voll bis 6 Wochen → kein Abzug für MA
@@ -229,36 +254,40 @@ class LohnService:
         zvE_jahr      = max(0, jahresbrutto - klasse["grundfreibetrag"])
 
         # Progressive Besteuerung (vereinfacht)
-        if zvE_jahr <= 17005:
+        if zvE_jahr <= 0:
+            lohnsteuer_jahr = 0.0
+        elif zvE_jahr <= 17005:
             lohnsteuer_jahr = 0.0
         elif zvE_jahr <= 66760:
             y = (zvE_jahr - 17005) / 10000
-            lohnsteuer_jahr = (939.68 * y + 1400) * y
+            lohnsteuer_jahr = max(0.0, (939.68 * y + 1400) * y)
         elif zvE_jahr <= 277826:
             z = (zvE_jahr - 66760) / 10000
-            lohnsteuer_jahr = (206.43 * z + 2397) * z + 9972
+            lohnsteuer_jahr = max(0.0, (206.43 * z + 2397) * z + 9972)
         else:
-            lohnsteuer_jahr = 0.45 * zvE_jahr - 18307
+            lohnsteuer_jahr = max(0.0, 0.45 * zvE_jahr - 18307)
 
-        lohnsteuer_monat = round(lohnsteuer_jahr / 12, 2)
+        lohnsteuer_monat = round(max(0.0, lohnsteuer_jahr / 12), 2)
         soli_monat       = round(max(0, lohnsteuer_monat * 0.055), 2)
 
         # ── Sozialversicherung ────────────────────────────────
         sv = SV_SAETZE
-        bemessungsgrundlage_kv = min(brutto_gesamt, sv["beitragsbemessungsgrenze_kv"])
-        bemessungsgrundlage_rv = min(brutto_gesamt, sv["beitragsbemessungsgrenze_rv"])
-
-        kv_an  = round(bemessungsgrundlage_kv * sv["krankenversicherung_an"], 2)
-        kv_ag  = round(bemessungsgrundlage_kv * sv["krankenversicherung_ag"], 2)
-        pv_an  = round(bemessungsgrundlage_kv * sv["pflegeversicherung_an"], 2)
-        pv_ag  = round(bemessungsgrundlage_kv * sv["pflegeversicherung_ag"], 2)
-        rv_an  = round(bemessungsgrundlage_rv * sv["rentenversicherung_an"], 2)
-        rv_ag  = round(bemessungsgrundlage_rv * sv["rentenversicherung_ag"], 2)
-        av_an  = round(bemessungsgrundlage_rv * sv["arbeitslosenversicherung_an"], 2)
-        av_ag  = round(bemessungsgrundlage_rv * sv["arbeitslosenversicherung_ag"], 2)
-
-        sv_gesamt_an  = kv_an + pv_an + rv_an + av_an
-        sv_gesamt_ag  = kv_ag + pv_ag + rv_ag + av_ag
+        if ma.get("sozialversicherung", True):
+            bemessungsgrundlage_kv = min(brutto_gesamt, sv["beitragsbemessungsgrenze_kv"])
+            bemessungsgrundlage_rv = min(brutto_gesamt, sv["beitragsbemessungsgrenze_rv"])
+            kv_an = round(bemessungsgrundlage_kv * sv["krankenversicherung_an"], 2)
+            kv_ag = round(bemessungsgrundlage_kv * sv["krankenversicherung_ag"], 2)
+            pv_an = round(bemessungsgrundlage_kv * sv["pflegeversicherung_an"], 2)
+            pv_ag = round(bemessungsgrundlage_kv * sv["pflegeversicherung_ag"], 2)
+            rv_an = round(bemessungsgrundlage_rv * sv["rentenversicherung_an"], 2)
+            rv_ag = round(bemessungsgrundlage_rv * sv["rentenversicherung_ag"], 2)
+            av_an = round(bemessungsgrundlage_rv * sv["arbeitslosenversicherung_an"], 2)
+            av_ag = round(bemessungsgrundlage_rv * sv["arbeitslosenversicherung_ag"], 2)
+            sv_gesamt_an = kv_an + pv_an + rv_an + av_an
+            sv_gesamt_ag = kv_ag + pv_ag + rv_ag + av_ag
+        else:
+            kv_an = kv_ag = pv_an = pv_ag = rv_an = rv_ag = av_an = av_ag = 0.0
+            sv_gesamt_an = sv_gesamt_ag = 0.0
 
         # ── Netto ─────────────────────────────────────────────
         gesamt_abzuege = lohnsteuer_monat + soli_monat + sv_gesamt_an + abzuege_extra

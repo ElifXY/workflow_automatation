@@ -261,9 +261,6 @@ def bearbeite_nachricht(
         raise ValueError("Nachricht wurde gelöscht")
     if row.get("sender") != editor:
         raise ValueError("Nur eigene Nachrichten bearbeiten")
-    typ = row.get("typ") or "text"
-    if typ not in ("text", "upload"):
-        raise ValueError("Dieser Nachrichtentyp kann nicht bearbeitet werden")
     row = dict(row)
     row["text"] = (text or "").strip()
     meta = dict(row.get("meta") or {})

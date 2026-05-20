@@ -107,9 +107,8 @@ function renderChatNachricht(n) {
 
   let actions = "";
   if (side === "mandant" && !meta.geloescht && n.id) {
-    const kannBearbeiten = n.typ === "text" || !n.typ || n.typ === "upload";
     actions = `<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
-      ${kannBearbeiten ? `<button type="button" class="btn btn-ghost btn-sm" onclick="chatBearbeiten('${n.id}')">Bearbeiten</button>` : ""}
+      <button type="button" class="btn btn-ghost btn-sm" onclick="chatBearbeiten('${n.id}')">Bearbeiten</button>
       <button type="button" class="btn btn-ghost btn-sm" onclick="chatLoeschen('${n.id}')">Löschen</button>
     </div>`;
   }

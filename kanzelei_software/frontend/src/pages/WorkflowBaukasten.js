@@ -457,16 +457,23 @@ const LohnTab = () => {
   const [mandanten,   setMandanten]   = useState([]);
   const [toast,       setToast]       = useState(null);
   const [showNeu,     setShowNeu]     = useState(false);
-  const [form,        setForm]        = useState({mandant:"",name:"",brutto_monat:0,
+  const [form,        setForm]        = useState({mandant:"",mandanten_zusatz:[],name:"",brutto_monat:0,
                                                     steuer_klasse:1,wochenstunden:40});
+  const [filterMandant, setFilterMandant] = useState("");
   const [monat,       setMonat]       = useState(new Date().toISOString().slice(0,7));
 
   const showToast = (t) => { setToast(t); setTimeout(()=>setToast(null),3500); };
 
   const laden = useCallback(async () => {
     try {
+      const maUrl = filterMandant
+        ? `/lohn/mitarbeiter?mandant=${encodeURIComponent(filterMandant)}`
+        : "/lohn/mitarbeiter";
+      const abUrl = filterMandant
+        ? `/lohn/abrechnungen?mandant=${encodeURIComponent(filterMandant)}&monat=${encodeURIComponent(monat)}`
+        : `/lohn/abrechnungen?monat=${encodeURIComponent(monat)}`;
       const [ma,ab,m] = await Promise.allSettled([
-        api("/lohn/mitarbeiter"), api("/lohn/abrechnungen"), api("/mandanten"),
+        api(maUrl), api(abUrl), api("/mandanten"),
       ]);
       if(ma.status==="fulfilled") setMitarbeiter(ma.value?.mitarbeiter||[]);
       if(ab.status==="fulfilled") setAbrechnungen(ab.value?.abrechnungen||[]);
@@ -475,13 +482,31 @@ const LohnTab = () => {
         setMandanten(Array.isArray(raw)?raw.map(x=>x.name):Object.keys(raw));
       }
     } catch(e){console.error(e);}
-  },[]);
+  },[filterMandant, monat]);
 
   useEffect(()=>{laden();},[laden]);
 
   const neuerMitarbeiter = async () => {
+    if (!form.mandant?.trim()) {
+      showToast("Bitte Haupt-Mandant wählen");
+      return;
+    }
     try {
-      await api("/lohn/mitarbeiter",{method:"POST",body:JSON.stringify(form)});
+      const mandanten = [
+        form.mandant.trim(),
+        ...(form.mandanten_zusatz || []).filter((m) => m && m !== form.mandant),
+      ];
+      await api("/lohn/mitarbeiter", {
+        method: "POST",
+        body: JSON.stringify({
+          mandant: form.mandant.trim(),
+          mandanten,
+          name: form.name,
+          brutto_monat: form.brutto_monat,
+          steuer_klasse: form.steuer_klasse,
+          wochenstunden: form.wochenstunden,
+        }),
+      });
       showToast("✓ Mitarbeiter angelegt");
       setShowNeu(false);
       laden();
@@ -504,8 +529,28 @@ const LohnTab = () => {
     } catch(e){showToast(e.message);}
   };
 
-  const oeffneLohnzettel = (id) => {
-    window.open(`${BASE}/lohn/abrechnung/${id}/html`,"_blank");
+  const oeffneLohnzettel = async (id) => {
+    try {
+      const token = localStorage.getItem("kanzlei_token") || localStorage.getItem("token");
+      const r = await fetch(`${BASE}/lohn/abrechnung/${encodeURIComponent(id)}/html`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.detail || err.error || `HTTP ${r.status}`);
+      }
+      const html = await r.text();
+      const w = window.open("", "_blank");
+      if (!w) {
+        showToast("Pop-up blockiert — bitte erlauben");
+        return;
+      }
+      w.document.open();
+      w.document.write(html);
+      w.document.close();
+    } catch (e) {
+      showToast(e.message || "Lohnzettel konnte nicht geöffnet werden");
+    }
   };
 
   const inp = (style={}) => ({
@@ -521,7 +566,14 @@ const LohnTab = () => {
         fontSize:13,border:`1px solid ${"var(--green)"}44`,borderLeft:`3px solid ${"var(--green)"}`}}>
         {toast}</div>}
 
-      <div style={{display:"flex",gap:10,marginBottom:20,alignItems:"center",flexWrap:"wrap"}}>
+      <div style={{display:"flex",gap:10,marginBottom:20,alignItems:"flex-end",flexWrap:"wrap"}}>
+        <div>
+          <div style={{fontSize:11,color:"var(--text3)",marginBottom:4}}>Mandant filtern</div>
+          <select value={filterMandant} onChange={e=>setFilterMandant(e.target.value)} style={{...inp(),width:"auto",minWidth:180}}>
+            <option value="">Alle Mandanten</option>
+            {mandanten.map(m=><option key={m} value={m}>{m}</option>)}
+          </select>
+        </div>
         <div>
           <div style={{fontSize:11,color:"var(--text3)",marginBottom:4}}>Abrechnungsmonat</div>
           <input type="month" value={monat} onChange={e=>setMonat(e.target.value)}
@@ -539,13 +591,34 @@ const LohnTab = () => {
           <div style={{fontFamily:"'DM Serif Display',serif",fontSize:17,
             color:"var(--accent)",marginBottom:14}}>Neuer Mitarbeiter</div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:12}}>
-            <div>
-              <div style={{fontSize:11,color:"var(--text3)",marginBottom:4}}>Mandant *</div>
+            <div style={{gridColumn:"1 / -1"}}>
+              <div style={{fontSize:11,color:"var(--text3)",marginBottom:4}}>Haupt-Mandant (Lohnbuchhaltung) *</div>
               <select value={form.mandant} onChange={e=>setForm(f=>({...f,mandant:e.target.value}))}
                 style={inp()}>
                 <option value="">— wählen —</option>
                 {mandanten.map(m=><option key={m} value={m}>{m}</option>)}
               </select>
+            </div>
+            <div style={{gridColumn:"1 / -1"}}>
+              <div style={{fontSize:11,color:"var(--text3)",marginBottom:6}}>
+                Weitere Mandanten (optional — z. B. Wechselmandant, Konzern)
+              </div>
+              <div style={{display:"flex",flexWrap:"wrap",gap:8,maxHeight:120,overflowY:"auto",
+                padding:10,border:"1px solid var(--border)",borderRadius:8}}>
+                {mandanten.filter(m=>m!==form.mandant).map(m=>{
+                  const on = (form.mandanten_zusatz||[]).includes(m);
+                  return (
+                    <label key={m} style={{display:"flex",alignItems:"center",gap:6,fontSize:12,cursor:"pointer"}}>
+                      <input type="checkbox" checked={on}
+                        onChange={()=>setForm(f=>{
+                          const z = f.mandanten_zusatz||[];
+                          return {...f,mandanten_zusatz:on?z.filter(x=>x!==m):[...z,m]};
+                        })}/>
+                      {m}
+                    </label>
+                  );
+                })}
+              </div>
             </div>
             <div>
               <div style={{fontSize:11,color:"var(--text3)",marginBottom:4}}>Name *</div>
@@ -593,7 +666,7 @@ const LohnTab = () => {
       ) : (
         <>
           {/* Batch-Buttons pro Mandant */}
-          {[...new Set(mitarbeiter.map(m=>m.mandant))].map(man=>(
+          {[...new Set(mitarbeiter.flatMap(m=>(m.mandanten&&m.mandanten.length)?m.mandanten:[m.mandant]))].map(man=>(
             <Btn key={man} size="xs" variant="subtle" style={{marginRight:6,marginBottom:10}}
                  onClick={()=>batchAbrechnen(man)}>
               Alle {man.split(" ")[0]} abrechnen
@@ -614,8 +687,8 @@ const LohnTab = () => {
                   <div style={{flex:1}}>
                     <div style={{fontWeight:600,color:"var(--text)"}}>{ma.name}</div>
                     <div style={{fontSize:12,color:"var(--text3)"}}>
-                      {ma.mandant} · €{ma.brutto_monat.toLocaleString("de-DE")}/Monat brutto
-                      · Kl. {ma.steuer_klasse}
+                      {(ma.mandanten&&ma.mandanten.length>1)?ma.mandanten.join(" · "):ma.mandant}
+                      {" "}· €{ma.brutto_monat.toLocaleString("de-DE")}/Monat brutto · Kl. {ma.steuer_klasse}
                     </div>
                     {ab && (
                       <div style={{fontSize:12,color:"var(--green)",marginTop:2}}>
