@@ -120,6 +120,65 @@ def list_chat(
     return enriched
 
 
+def _gelesen_key(reader: str) -> str:
+    return "gelesen_von_mandant_am" if reader == "mandant" else "gelesen_von_kanzlei_am"
+
+
+def _ist_ungelesen_fuer(row: Dict[str, Any], reader: str) -> bool:
+    """reader = wer liest (kanzlei|mandant); ungelesen = Nachricht vom anderen ohne Lesebestätigung."""
+    sender = row.get("sender") or ""
+    if sender not in ("kanzlei", "mandant") or sender == reader:
+        return False
+    if (row.get("meta") or {}).get("geloescht"):
+        return False
+    return not (row.get("meta") or {}).get(_gelesen_key(reader))
+
+
+def zaehle_ungelesen(store, mandant: str, reader: str) -> int:
+    ensure_chat_migrated(store, mandant)
+    return sum(
+        1
+        for r in store.portal_liste("chat", mandant=mandant)
+        if _ist_ungelesen_fuer(r, reader)
+    )
+
+
+def mark_chat_gelesen(store, mandant: str, reader: str) -> int:
+    """Alle Nachrichten des anderen als gelesen markieren. Gibt Anzahl zurück."""
+    now = _now()
+    gkey = _gelesen_key(reader)
+    n = 0
+    for row in store.portal_liste("chat", mandant=mandant):
+        if not _ist_ungelesen_fuer(row, reader):
+            continue
+        mid = row.get("id")
+        if not mid:
+            continue
+        meta = dict(row.get("meta") or {})
+        meta[gkey] = now
+        row = dict(row)
+        row["meta"] = meta
+        if store.portal_speichern("chat", mid, mandant, row):
+            n += 1
+    state_id = f"read_{mandant}"
+    state = store.portal_holen("chat_state", state_id) or {"mandant": mandant}
+    state[f"{reader}_last_read_at"] = now
+    store.portal_speichern("chat_state", state_id, mandant, state)
+    return n
+
+
+def total_unread_kanzlei(store) -> Dict[str, Any]:
+    alle = store.hole_mandanten() or {}
+    per_mandant: Dict[str, int] = {}
+    total = 0
+    for name in sorted(alle.keys()):
+        c = zaehle_ungelesen(store, name, "kanzlei")
+        if c:
+            per_mandant[name] = c
+            total += c
+    return {"total": total, "per_mandant": per_mandant}
+
+
 def list_inbox(store, mandanten_namen: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     """Übersicht aller Mandanten-Chats für die Kanzlei-Suite (WhatsApp-Liste)."""
     alle = store.hole_mandanten() or {}
@@ -148,9 +207,36 @@ def list_inbox(store, mandanten_namen: Optional[List[str]] = None) -> List[Dict[
             "letzter_sender": sender,
             "anzahl": len(rows),
             "hat_chat": bool(rows),
+            "ungelesen": zaehle_ungelesen(store, name, "kanzlei"),
         })
-    inbox.sort(key=lambda x: x.get("letzte_zeit") or "", reverse=True)
+    inbox.sort(
+        key=lambda x: (x.get("ungelesen", 0) > 0, x.get("letzte_zeit") or ""),
+        reverse=True,
+    )
     return inbox
+
+
+def erledige_dokument_anfrage(
+    store,
+    mandant: str,
+    msg_id: str,
+    *,
+    upload_id: Optional[str] = None,
+) -> bool:
+    """Dokument-Anfrage im Chat als erledigt markieren."""
+    row = store.portal_holen("chat", msg_id)
+    if not row or row.get("mandant") != mandant or row.get("typ") != "dokument_anfrage":
+        return False
+    row = dict(row)
+    meta = dict(row.get("meta") or {})
+    meta["dokument_offen"] = False
+    meta["dokument_erledigt_am"] = _now()
+    if upload_id:
+        refs = dict(row.get("refs") or {})
+        refs["upload_id"] = upload_id
+        row["refs"] = refs
+    row["meta"] = meta
+    return store.portal_speichern("chat", msg_id, mandant, row)
 
 
 def get_chat_message(store, mandant: str, msg_id: str) -> Optional[Dict[str, Any]]:
@@ -175,8 +261,9 @@ def bearbeite_nachricht(
         raise ValueError("Nachricht wurde gelöscht")
     if row.get("sender") != editor:
         raise ValueError("Nur eigene Nachrichten bearbeiten")
-    if (row.get("typ") or "text") != "text":
-        raise ValueError("Nur Textnachrichten bearbeitbar")
+    typ = row.get("typ") or "text"
+    if typ not in ("text", "upload"):
+        raise ValueError("Dieser Nachrichtentyp kann nicht bearbeitet werden")
     row = dict(row)
     row["text"] = (text or "").strip()
     meta = dict(row.get("meta") or {})
@@ -266,10 +353,12 @@ def _enrich_message(store, mandant: str, row: Dict[str, Any]) -> Dict[str, Any]:
             meta["dokumentname"] = u.get("dokumentname")
 
     if typ == "dokument_anfrage":
-        m = store.hole_mandanten().get(mandant, {}) or {}
-        fehlend = list(m.get("fehlende_dokumente_liste") or [])
-        doc = refs.get("dokument_name") or meta.get("dokument_name")
-        meta["dokument_offen"] = bool(doc and any(doc.lower() in d.lower() or d.lower() in doc.lower() for d in fehlend))
+        if meta.get("dokument_erledigt_am") or refs.get("upload_id"):
+            meta["dokument_offen"] = False
+        elif meta.get("dokument_offen") is False:
+            meta["dokument_offen"] = False
+        else:
+            meta["dokument_offen"] = True
 
     if meta.get("geloescht"):
         row["text"] = "(Nachricht gelöscht)"

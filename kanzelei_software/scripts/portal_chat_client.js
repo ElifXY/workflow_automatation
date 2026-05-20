@@ -87,7 +87,7 @@ function renderChatNachricht(n) {
       }
     </div>`;
   } else if (n.typ === "dokument_anfrage") {
-    const offen = meta.dokument_offen !== false;
+    const offen = meta.dokument_erledigt_am || refs.upload_id ? false : meta.dokument_offen !== false;
     inner = `<div class="chat-card"><strong>📄 Dokument anfordern</strong><br>${esc(
       meta.dokument_name || refs.dokument_name || n.text
     )}
@@ -106,14 +106,10 @@ function renderChatNachricht(n) {
   }
 
   let actions = "";
-  if (
-    side === "mandant" &&
-    (n.typ === "text" || !n.typ) &&
-    !meta.geloescht &&
-    n.id
-  ) {
-    actions = `<div style="margin-top:6px;display:flex;gap:6px">
-      <button type="button" class="btn btn-ghost btn-sm" onclick="chatBearbeiten('${n.id}')">Bearbeiten</button>
+  if (side === "mandant" && !meta.geloescht && n.id) {
+    const kannBearbeiten = n.typ === "text" || !n.typ || n.typ === "upload";
+    actions = `<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
+      ${kannBearbeiten ? `<button type="button" class="btn btn-ghost btn-sm" onclick="chatBearbeiten('${n.id}')">Bearbeiten</button>` : ""}
       <button type="button" class="btn btn-ghost btn-sm" onclick="chatLoeschen('${n.id}')">Löschen</button>
     </div>`;
   }

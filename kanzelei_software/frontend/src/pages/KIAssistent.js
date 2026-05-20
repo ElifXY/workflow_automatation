@@ -668,7 +668,7 @@ export default function KIAssistent() {
     <div style={{
       flex: 1, display: "flex", flexDirection: narrow ? "column" : "row",
       background: "var(--bg)", fontFamily: "'DM Sans', sans-serif",
-      height: "100%", minHeight: 0, minWidth: 0, maxWidth: "100%",
+      minHeight: 0, minWidth: 0, maxWidth: "100%", overflow: "hidden",
     }}>
       <style>{`
         ${FONTS}
@@ -693,6 +693,8 @@ export default function KIAssistent() {
             flexDirection: "column",
             flexShrink: 0,
             minHeight: 0,
+            height: "100%",
+            overflow: "hidden",
           }}
         >
           {threadListSection}
@@ -767,7 +769,7 @@ export default function KIAssistent() {
         </>
       ) : null}
 
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0, overflow: "hidden" }}>
       {/* ── Schnell-Leiste Verläufe ── */}
       <div
         style={{
@@ -841,7 +843,7 @@ export default function KIAssistent() {
       <div style={{
         background: "var(--bg2)", borderBottom: `1px solid var(--border)`,
         padding: `14px ${padX}px`, display: "flex", alignItems: "flex-start",
-        flexWrap: "wrap", gap: 12, position: "sticky", top: 0, zIndex: 10, flexShrink: 0,
+        flexWrap: "wrap", gap: 12, flexShrink: 0,
       }}>
         <div style={{ flex: "1 1 200px", minWidth: 0 }}>
           <div style={{

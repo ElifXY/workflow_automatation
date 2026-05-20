@@ -352,12 +352,22 @@ def fehlende_dokumente(mandant: str = Depends(hole_mandant)):
 # DOKUMENT-UPLOAD
 # ============================================================
 
+def _dokument_name_aus_chat_msg(store, mandant: str, chat_msg_id: str) -> Optional[str]:
+    row = store.portal_holen("chat", chat_msg_id)
+    if not row or row.get("mandant") != mandant or row.get("typ") != "dokument_anfrage":
+        return None
+    refs = row.get("refs") or {}
+    meta = row.get("meta") or {}
+    return refs.get("dokument_name") or meta.get("dokument_name")
+
+
 def _verarbeite_upload(
     mandant: str,
     data: DokumentUpload,
     *,
     upload_von: str = "mandant",
     portal_sichtbar: bool = True,
+    chat_msg_id: Optional[str] = None,
 ) -> Dict:
     store = _store_for_mandant(mandant)
     max_mb = int(setting_holen("portal_upload_max_mb") or UPLOAD_MAX_MB or 20)
@@ -401,12 +411,19 @@ def _verarbeite_upload(
 
     m = store.hole_mandanten().get(mandant, {})
     fehlende = list(m.get("fehlende_dokumente_liste") or [])
-    gefunden = next(
-        (d for d in fehlende if d.lower() in data.dateiname.lower() or data.dateiname.lower() in d.lower()),
-        None,
-    )
+    ziel_doc = None
+    if chat_msg_id:
+        ziel_doc = _dokument_name_aus_chat_msg(store, mandant, chat_msg_id)
+        if ziel_doc and ziel_doc not in fehlende:
+            fehlende.append(ziel_doc)
+    gefunden = ziel_doc
+    if not gefunden:
+        gefunden = next(
+            (d for d in fehlende if d.lower() in data.dateiname.lower() or data.dateiname.lower() in d.lower()),
+            None,
+        )
     if gefunden:
-        fehlende.remove(gefunden)
+        fehlende = [d for d in fehlende if d != gefunden]
         m["fehlende_dokumente_liste"] = fehlende
         m["letzte_antwort"] = datetime.now().isoformat()
         store.mandant_speichern(mandant, m)
@@ -432,12 +449,16 @@ def _verarbeite_upload(
             portal_sichtbar=sichtbar,
         )
         if gefunden:
+            if chat_msg_id:
+                pc.erledige_dokument_anfrage(store, mandant, chat_msg_id, upload_id=uid)
             for row in store.portal_liste("chat", mandant=mandant):
                 if row.get("typ") != "dokument_anfrage":
                     continue
+                if chat_msg_id and row.get("id") == chat_msg_id:
+                    continue
                 doc = (row.get("refs") or {}).get("dokument_name") or (row.get("meta") or {}).get("dokument_name", "")
                 if doc and (doc.lower() in gefunden.lower() or gefunden.lower() in doc.lower()):
-                    pc.update_chat_meta(store, mandant, row["id"], {"dokument_offen": False})
+                    pc.erledige_dokument_anfrage(store, mandant, row["id"], upload_id=uid)
     except Exception as e:
         log.warning("chat_upload: %s", e)
 
@@ -786,6 +807,12 @@ class ChatTextBody(BaseModel):
     text: str = Field(..., min_length=1, max_length=5000)
 
 
+@portal_router.get("/portal/chat/unread", tags=["Portal-Chat"])
+def portal_chat_unread_count(mandant: str = Depends(hole_mandant)):
+    store = _store_for_mandant(mandant)
+    return {"ungelesen": pc.zaehle_ungelesen(store, mandant, "mandant")}
+
+
 @portal_router.get("/portal/chat", tags=["Portal-Chat"])
 def portal_chat_verlauf(
     mandant: str = Depends(hole_mandant),
@@ -793,8 +820,32 @@ def portal_chat_verlauf(
     seit: Optional[str] = Query(None, description="Nachrichten nach dieser Chat-ID"),
 ):
     store = _store_for_mandant(mandant)
+    pc.mark_chat_gelesen(store, mandant, "mandant")
     nachrichten = pc.list_chat(store, mandant, limit=limit, seit_id=seit, nur_mandanten_portal=True)
-    return {"nachrichten": nachrichten, "anzahl": len(nachrichten)}
+    ungelesen = pc.zaehle_ungelesen(store, mandant, "mandant")
+    return {"nachrichten": nachrichten, "anzahl": len(nachrichten), "ungelesen": ungelesen}
+
+
+@portal_router.post("/portal/chat/dokument-anfrage/{msg_id}/hochladen", tags=["Portal-Chat"])
+def portal_chat_dokument_anfrage_upload(
+    msg_id: str,
+    data: DokumentUpload,
+    mandant: str = Depends(hole_mandant),
+):
+    """Direkt in der Chat-Karte das angeforderte Dokument hochladen → automatisch erledigt."""
+    store = _store_for_mandant(mandant)
+    if not _dokument_name_aus_chat_msg(store, mandant, msg_id):
+        raise HTTPException(404, "Dokument-Anfrage nicht gefunden")
+    return _verarbeite_upload(
+        mandant, data, upload_von="mandant", chat_msg_id=msg_id
+    )
+
+
+@portal_router.post("/portal/chat/read", tags=["Portal-Chat"])
+def portal_chat_als_gelesen(mandant: str = Depends(hole_mandant)):
+    store = _store_for_mandant(mandant)
+    n = pc.mark_chat_gelesen(store, mandant, "mandant")
+    return {"status": "ok", "markiert": n, "ungelesen": pc.zaehle_ungelesen(store, mandant, "mandant")}
 
 
 @portal_router.post("/portal/chat", tags=["Portal-Chat"])

@@ -379,6 +379,7 @@ input:focus,textarea:focus,select:focus{border-color:var(--accent)}
     </button>
     <button class="nav-item" id="nav-chat" onclick="wechsleTab('chat')">
       <span class="icon">💬</span><span>Chat</span>
+      <span class="nav-badge" id="badge-chat" style="display:none">0</span>
     </button>
   </nav>
 </div><!-- /#portal-screen -->
@@ -1055,14 +1056,20 @@ function renderChatNachricht(n) {
       }
     </div>`;
   } else if (n.typ === "dokument_anfrage") {
-    const offen = meta.dokument_offen !== false;
+    const offen = meta.dokument_erledigt_am || refs.upload_id ? false : meta.dokument_offen !== false;
     inner = `<div class="chat-card"><strong>📄 Dokument anfordern</strong><br>${esc(
       meta.dokument_name || refs.dokument_name || n.text
     )}
       ${
-        offen
-          ? `<button class="btn btn-ghost btn-sm btn-full" style="margin-top:8px" onclick="wechsleTab('dokumente')">Zum Upload</button>`
-          : `<span style="color:var(--green);font-size:12px"> ✓ eingereicht</span>`
+        offen && side === "mandant" && n.id
+          ? `<label class="btn btn-primary btn-sm btn-full" style="margin-top:8px;cursor:pointer;display:block;text-align:center">
+              <input type="file" style="display:none" accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,image/*,application/pdf"
+                onchange="chatDokumentAnfrageUpload('${n.id}', this)">
+              Dokument hier hochladen
+            </label>`
+          : offen
+            ? `<span style="color:var(--text3);font-size:12px;display:block;margin-top:8px">Ausstehend</span>`
+            : `<span style="color:var(--green);font-size:12px;display:block;margin-top:8px">✓ eingereicht</span>`
       }
     </div>`;
   } else if (n.typ === "upload") {
@@ -1074,9 +1081,10 @@ function renderChatNachricht(n) {
   }
 
   let actions = "";
-  if (side === "mandant" && (n.typ === "text" || !n.typ) && !meta.geloescht && n.id) {
-    actions = `<div style="margin-top:6px;display:flex;gap:6px">
-      <button type="button" class="btn btn-ghost btn-sm" onclick="chatBearbeiten('${n.id}')">Bearbeiten</button>
+  if (side === "mandant" && !meta.geloescht && n.id) {
+    const kannBearbeiten = n.typ === "text" || !n.typ || n.typ === "upload";
+    actions = `<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
+      ${kannBearbeiten ? `<button type="button" class="btn btn-ghost btn-sm" onclick="chatBearbeiten('${n.id}')">Bearbeiten</button>` : ""}
       <button type="button" class="btn btn-ghost btn-sm" onclick="chatLoeschen('${n.id}')">Löschen</button>
     </div>`;
   }
@@ -1084,9 +1092,61 @@ function renderChatNachricht(n) {
   if (side === "system") {
     return `<div class="chat-bubble system">${inner}<div class="chat-meta">${zeit}</div></div>`;
   }
+  let gelesen = "";
+  if (side === "mandant" && meta.gelesen_von_kanzlei_am) {
+    gelesen = ` · <span style="color:var(--green)">Gelesen ${formatChatZeit(meta.gelesen_von_kanzlei_am)}</span>`;
+  } else if (side === "kanzlei" && meta.gelesen_von_mandant_am) {
+    gelesen = ` · <span style="color:var(--green)">Gelesen ${formatChatZeit(meta.gelesen_von_mandant_am)}</span>`;
+  }
   return `<div class="chat-bubble ${side}">${inner}${actions}<div class="chat-meta">${
     sender === "kanzlei" ? "Kanzlei" : "Sie"
-  } · ${zeit}</div></div>`;
+  } · ${zeit}${gelesen}</div></div>`;
+}
+
+function updateChatBadge(count) {
+  const b = document.getElementById("badge-chat");
+  if (!b) return;
+  const n = Number(count) || 0;
+  if (n > 0) {
+    b.style.display = "block";
+    b.textContent = n > 99 ? "99+" : String(n);
+  } else {
+    b.style.display = "none";
+  }
+}
+
+async function pollChatUnread() {
+  try {
+    const d = await api("/portal/chat/unread");
+    updateChatBadge(d.ungelesen);
+  } catch (e) {
+    console.warn("chat unread", e);
+  }
+}
+
+async function chatDokumentAnfrageUpload(msgId, input) {
+  const file = input?.files?.[0];
+  if (!file) return;
+  input.value = "";
+  try {
+    const b64 = await fileToB64(file);
+    await api(`/portal/chat/dokument-anfrage/${encodeURIComponent(msgId)}/hochladen`, {
+      method: "POST",
+      body: JSON.stringify({
+        dateiname: file.name,
+        dateityp: file.type || "application/octet-stream",
+        inhalt_b64: b64,
+        beschreibung: "Dokument-Anfrage im Chat",
+        kategorie: "Sonstiges",
+      }),
+    });
+    toast("Dokument hochgeladen — Anfrage erledigt", "success");
+    await ladeChat();
+    await pollChatUnread();
+    if (typeof ladeUebersicht === "function") await ladeUebersicht();
+  } catch (e) {
+    toast(e.message || "Upload fehlgeschlagen", "error");
+  }
 }
 
 async function ladeChat() {
@@ -1094,6 +1154,7 @@ async function ladeChat() {
   if (!el) return;
   try {
     const d = await api("/portal/chat");
+    updateChatBadge(d.ungelesen);
     const lst = (d.nachrichten || [])
       .slice()
       .sort((a, b) => (a.zeit || "").localeCompare(b.zeit || ""));
@@ -1198,7 +1259,9 @@ async function chatAufgabeToggle(aid) {
 
 function startChatPoll() {
   if (_chatPoll) clearInterval(_chatPoll);
+  pollChatUnread();
   _chatPoll = setInterval(() => {
+    pollChatUnread();
     if (document.getElementById("tab-chat")?.classList.contains("active")) ladeChat();
   }, 20000);
 }

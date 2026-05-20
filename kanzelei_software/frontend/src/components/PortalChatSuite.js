@@ -38,6 +38,7 @@ export default function PortalChatSuite({
   onSelectMandant,
   showToast,
   isMobile,
+  onInboxChange,
 }) {
   const [inbox, setInbox] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -84,13 +85,14 @@ export default function PortalChatSuite({
         rows.sort((a, b) => (b.letzte_zeit || "").localeCompare(a.letzte_zeit || ""));
       }
       setInbox(rows);
+      onInboxChange?.();
     } catch (e) {
       showToast?.(e.message || "Chat-Liste konnte nicht geladen werden", "error");
       setInbox([]);
     } finally {
       setLoading(false);
     }
-  }, [showToast]);
+  }, [showToast, onInboxChange]);
 
   useEffect(() => {
     laden();
@@ -128,8 +130,12 @@ export default function PortalChatSuite({
         display: "flex",
         flexDirection: "column",
         minHeight: 0,
+        height: isMobile ? undefined : "100%",
+        alignSelf: "stretch",
+        flexShrink: 0,
         flex: isMobile ? 1 : undefined,
         background: "var(--bg2)",
+        overflow: "hidden",
       }}
     >
       <div style={{ padding: "14px 14px 10px", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
@@ -223,8 +229,29 @@ export default function PortalChatSuite({
                     {previewLabel(row)}
                   </div>
                 </div>
-                <div style={{ fontSize: 11, color: "var(--text3)", flexShrink: 0 }}>
-                  {fmtZeitKurz(row.letzte_zeit)}
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0 }}>
+                  <div style={{ fontSize: 11, color: "var(--text3)" }}>
+                    {fmtZeitKurz(row.letzte_zeit)}
+                  </div>
+                  {row.ungelesen > 0 ? (
+                    <span
+                      style={{
+                        minWidth: 20,
+                        height: 20,
+                        padding: "0 6px",
+                        borderRadius: 10,
+                        background: "var(--accent)",
+                        color: "#fff",
+                        fontSize: 11,
+                        fontWeight: 700,
+                        display: "inline-flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}
+                    >
+                      {row.ungelesen > 99 ? "99+" : row.ungelesen}
+                    </span>
+                  ) : null}
                 </div>
               </button>
             );
@@ -242,6 +269,8 @@ export default function PortalChatSuite({
         flexDirection: "column",
         minHeight: 0,
         minWidth: 0,
+        height: isMobile ? undefined : "100%",
+        overflow: "hidden",
         background: "var(--bg)",
       }}
     >
@@ -270,7 +299,11 @@ export default function PortalChatSuite({
           showToast={showToast}
           embedded
           fillHeight
-          onSent={laden}
+          onRead={onInboxChange}
+          onSent={() => {
+            laden();
+            onInboxChange?.();
+          }}
         />
       ) : (
         <div
@@ -306,6 +339,7 @@ export default function PortalChatSuite({
         display: "flex",
         flexDirection: "row",
         minHeight: 0,
+        height: "100%",
         overflow: "hidden",
         border: "1px solid var(--border)",
         borderRadius: 12,

@@ -841,6 +841,17 @@ export const sendPortalAntwort = (name, betreff, text) =>
 
 export const getPortalChatInbox = () => apiFetch("/portal/mandant/chat/inbox");
 
+export const getPortalChatUnread = () => apiFetch("/portal/mandant/chat/unread-summary");
+
+export const markPortalChatRead = (name) =>
+  apiFetch(`/portal/mandant/${encodeURIComponent(name)}/chat/read`, { method: "POST" });
+
+export const uploadPortalDokumentAnfrage = (name, msgId, body) =>
+  apiFetch(
+    `/portal/mandant/${encodeURIComponent(name)}/chat/dokument-anfrage/${encodeURIComponent(msgId)}/hochladen`,
+    { method: "POST", body: JSON.stringify(body) }
+  );
+
 export const getPortalChat = (name, seit = null) =>
   apiFetch(
     `/portal/mandant/${encodeURIComponent(name)}/chat${seit ? `?seit=${encodeURIComponent(seit)}` : ""}`

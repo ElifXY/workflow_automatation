@@ -77,12 +77,15 @@ const ChatBubble = ({ msg, mandantName, showToast, onRefresh }) => {
       </div>
     );
   } else if (msg.typ === "dokument_anfrage") {
+    const offen = meta.dokument_erledigt_am || refs.upload_id
+      ? false
+      : meta.dokument_offen !== false;
     body = (
       <div>
         <div style={{ fontWeight: 600, marginBottom: 4 }}>📄 Dokument anfordern</div>
         <div>{meta.dokument_name || refs.dokument_name || msg.text}</div>
-        <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 4 }}>
-          {meta.dokument_offen === false ? "✓ eingereicht" : "ausstehend"}
+        <div style={{ fontSize: 11, color: offen ? "var(--text3)" : "var(--green)", marginTop: 4 }}>
+          {offen ? "Wartet auf Upload vom Mandanten" : "✓ eingereicht"}
         </div>
       </div>
     );
@@ -128,25 +131,27 @@ const ChatBubble = ({ msg, mandantName, showToast, onRefresh }) => {
         }}
       >
         {body}
-        {(msg.typ === "text" || !msg.typ) && !meta.geloescht && msg.id && isKanzlei ? (
-          <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
-            <button
-              type="button"
-              style={{ fontSize: 10, padding: "3px 8px", borderRadius: 6, border: "1px solid var(--border)", background: "transparent", cursor: "pointer", color: "var(--text2)" }}
-              onClick={async () => {
-                const neu = window.prompt("Nachricht bearbeiten:", msg.text || "");
-                if (neu === null) return;
-                const t = neu.trim();
-                if (!t) { showToast?.("Text leer", "error"); return; }
-                try {
-                  await patchPortalChat(mandantName, msg.id, t);
-                  showToast?.("Bearbeitet", "success");
-                  onRefresh?.();
-                } catch (e) { showToast?.(e.message, "error"); }
-              }}
-            >
-              Bearbeiten
-            </button>
+        {isKanzlei && !meta.geloescht && msg.id ? (
+          <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+            {(msg.typ === "text" || !msg.typ || msg.typ === "upload") ? (
+              <button
+                type="button"
+                style={{ fontSize: 10, padding: "3px 8px", borderRadius: 6, border: "1px solid var(--border)", background: "transparent", cursor: "pointer", color: "var(--text2)" }}
+                onClick={async () => {
+                  const neu = window.prompt("Nachricht bearbeiten:", msg.text || "");
+                  if (neu === null) return;
+                  const t = neu.trim();
+                  if (!t) { showToast?.("Text leer", "error"); return; }
+                  try {
+                    await patchPortalChat(mandantName, msg.id, t);
+                    showToast?.("Bearbeitet", "success");
+                    onRefresh?.();
+                  } catch (e) { showToast?.(e.message, "error"); }
+                }}
+              >
+                Bearbeiten
+              </button>
+            ) : null}
             <button
               type="button"
               style={{ fontSize: 10, padding: "3px 8px", borderRadius: 6, border: "1px solid var(--border)", background: "transparent", cursor: "pointer", color: "var(--red)" }}
@@ -165,6 +170,16 @@ const ChatBubble = ({ msg, mandantName, showToast, onRefresh }) => {
         ) : null}
         <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 6 }}>
           {isKanzlei ? "Kanzlei" : "Mandant"} · {fmtZeit(msg.zeit)}
+          {isMandant && meta.gelesen_von_kanzlei_am ? (
+            <span style={{ marginLeft: 6, color: "var(--green)" }}>
+              · Gelesen {fmtZeit(meta.gelesen_von_kanzlei_am)}
+            </span>
+          ) : null}
+          {isKanzlei && meta.gelesen_von_mandant_am ? (
+            <span style={{ marginLeft: 6, color: "var(--green)" }}>
+              · Gelesen {fmtZeit(meta.gelesen_von_mandant_am)}
+            </span>
+          ) : null}
         </div>
       </div>
     </div>
@@ -177,6 +192,7 @@ export default function PortalChat({
   embedded = false,
   fillHeight = false,
   onSent,
+  onRead,
 }) {
   const [msgs, setMsgs] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -208,8 +224,9 @@ export default function PortalChat({
       setMsgs([]);
     } finally {
       setLoading(false);
+      onRead?.();
     }
-  }, [mandantName, showToast]);
+  }, [mandantName, showToast, onRead]);
 
   useEffect(() => {
     laden();
@@ -397,7 +414,7 @@ export default function PortalChat({
         boxSizing: "border-box",
       }}
     >
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, flexShrink: 0 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, flexShrink: 0, flex: "0 0 auto" }}>
         <div style={{ fontFamily: "'DM Serif Display', serif", fontSize: embedded ? 20 : 17 }}>
           {embedded ? mandantName : `Portal-Chat — ${mandantName}`}
         </div>
@@ -440,6 +457,7 @@ export default function PortalChat({
         <div ref={endRef} />
       </div>
 
+      <div style={{ flexShrink: 0 }}>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
         {[
           ["text", "Nachricht"],
@@ -588,6 +606,7 @@ export default function PortalChat({
           </button>
         </div>
       )}
+      </div>
     </div>
   );
 }

@@ -8130,6 +8130,16 @@ class PortalChatDokument(BaseModel):
     portal_sichtbar: bool = Field(default=True, description="Im Mandantenportal sichtbar")
 
 
+@app.get("/portal/mandant/chat/unread-summary", tags=["Portal-Chat"],
+         summary="Ungelesene Chat-Nachrichten (Kanzlei, alle Mandanten)")
+def portal_mandant_chat_unread(_user: dict = Depends(get_current_user)):
+    from modules import portal_chat as pc
+
+    store = get_ds(_user)
+    summary = pc.total_unread_kanzlei(store)
+    return ok_compat(summary)
+
+
 @app.get("/portal/mandant/chat/inbox", tags=["Portal-Chat"],
          summary="Alle Mandanten-Chats (Übersicht, WhatsApp-Liste)")
 def portal_mandant_chat_inbox(_user: dict = Depends(get_current_user)):
@@ -8138,7 +8148,30 @@ def portal_mandant_chat_inbox(_user: dict = Depends(get_current_user)):
     store = get_ds(_user)
     namen = sorted((store.hole_mandanten() or {}).keys())
     inbox = pc.list_inbox(store, namen)
-    return ok_compat({"inbox": inbox, "anzahl": len(inbox)})
+    summary = pc.total_unread_kanzlei(store)
+    return ok_compat({
+        "inbox": inbox,
+        "anzahl": len(inbox),
+        "ungelesen_gesamt": summary.get("total", 0),
+    })
+
+
+@app.post("/portal/mandant/{name}/chat/read", tags=["Portal-Chat"],
+          summary="Chat mit Mandant als gelesen markieren (Kanzlei)")
+def portal_mandant_chat_read(
+    name: str,
+    _user: dict = Depends(get_current_user),
+):
+    from modules import portal_chat as pc
+
+    store = get_ds(_user)
+    get_mandant_or_404(name, store)
+    n = pc.mark_chat_gelesen(store, name, "kanzlei")
+    return ok_compat({
+        "status": "ok",
+        "markiert": n,
+        "ungelesen": pc.zaehle_ungelesen(store, name, "kanzlei"),
+    })
 
 
 @app.get("/portal/mandant/{name}/chat", tags=["Portal-Chat"],
@@ -8153,8 +8186,15 @@ def portal_mandant_chat(
 
     store = get_ds(_user)
     get_mandant_or_404(name, store)
+    pc.mark_chat_gelesen(store, name, "kanzlei")
     nachrichten = pc.list_chat(store, name, limit=limit, seit_id=seit)
-    return ok_compat({"mandant": name, "nachrichten": nachrichten, "anzahl": len(nachrichten)})
+    ungelesen = pc.zaehle_ungelesen(store, name, "kanzlei")
+    return ok_compat({
+        "mandant": name,
+        "nachrichten": nachrichten,
+        "anzahl": len(nachrichten),
+        "ungelesen": ungelesen,
+    })
 
 
 @app.post("/portal/mandant/{name}/chat", tags=["Portal-Chat"],
@@ -8314,6 +8354,34 @@ class PortalChatUpload(BaseModel):
         default=True,
         description="Im Mandantenportal für den Mandanten sichtbar",
     )
+
+
+@app.post("/portal/mandant/{name}/chat/dokument-anfrage/{msg_id}/hochladen", tags=["Portal-Chat"],
+          summary="Angefordertes Dokument im Chat hochladen (Kanzlei-Test)")
+def portal_mandant_chat_dok_upload(
+    name: str,
+    msg_id: str,
+    data: PortalChatUpload,
+    _user: dict = Depends(get_current_user),
+):
+    from portal_api import DokumentUpload, _verarbeite_upload
+
+    store = get_ds(_user)
+    get_mandant_or_404(name, store)
+    result = _verarbeite_upload(
+        name,
+        DokumentUpload(
+            dateiname=data.dateiname.strip(),
+            dateityp=data.dateityp or "application/octet-stream",
+            inhalt_b64=data.inhalt_b64,
+            beschreibung=data.beschreibung or "",
+            kategorie=data.kategorie or "Sonstiges",
+        ),
+        upload_von="kanzlei",
+        portal_sichtbar=bool(data.portal_sichtbar),
+        chat_msg_id=msg_id,
+    )
+    return ok_compat(result)
 
 
 @app.post("/portal/mandant/{name}/chat/upload", tags=["Portal-Chat"],

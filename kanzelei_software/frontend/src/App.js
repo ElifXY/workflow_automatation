@@ -26,6 +26,7 @@ import {
   extrahiereAufgabenArray,
   extrahiereHeuteEintraege,
   istAufgabeErledigt,
+  getPortalChatUnread,
 } from "./api";
 
 import Analytics         from "./pages/Analytics";
@@ -409,6 +410,7 @@ const Sidebar = ({
   onDesktopCollapse,
   chatMandant,
   onChatMandantChange,
+  portalUnreadTotal = 0,
 }) => {
   const kritisch = kpis.filter(k => k.status === "KRITISCH").length;
   const wichtig  = kpis.filter(k => k.status === "WICHTIG").length;
@@ -420,7 +422,7 @@ const Sidebar = ({
   const navItems = [
     { id:"dashboard",    label:"Dashboard",        icon:"⬛" },
     { id:"mandanten",    label:"Mandanten",        icon:"◉",  badge:kpis.length },
-    { id:"portalchat",   label:"Mandanten-Portal", icon:"💬" },
+    { id:"portalchat",   label:"Mandanten-Portal", icon:"💬", badge: portalUnreadTotal > 0 ? portalUnreadTotal : null },
     { id:"aufgaben",     label:"Aufgaben",          icon:"▦",  badge:kritisch||null },
     { id:"ki",           label:"KI-Assistent",     icon:"✦" },
     { id:"profit",       label:"Profit Monitor",   icon:"📈" },
@@ -2282,6 +2284,7 @@ function AppInner() {
   const [toasts,       setToasts]       = useState([]);
   const [readiness,    setReadiness]    = useState(null);
   const [billingUsage, setBillingUsage] = useState(null);
+  const [portalUnreadTotal, setPortalUnreadTotal] = useState(0);
 
   useEffect(() => {
     const tab = location.state?.tab;
@@ -2298,6 +2301,27 @@ function AppInner() {
       setSidebarWidth((w) => clamp(Math.max(w, 260), sidebarMinWidth, sidebarMaxWidth));
     }
   }, [activeTab, isMobile, sidebarMinWidth, sidebarMaxWidth]);
+
+  const refreshPortalUnread = useCallback(async () => {
+    try {
+      const d = await getPortalChatUnread();
+      const raw = d?.data ?? d;
+      const n = Number(raw?.total ?? raw?.ungelesen_gesamt ?? 0);
+      setPortalUnreadTotal(Number.isFinite(n) && n > 0 ? n : 0);
+    } catch {
+      /* Badge optional — kein Blocker */
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshPortalUnread();
+    const t = setInterval(refreshPortalUnread, 30000);
+    return () => clearInterval(t);
+  }, [refreshPortalUnread]);
+
+  useEffect(() => {
+    if (activeTab === "portalchat") refreshPortalUnread();
+  }, [activeTab, refreshPortalUnread]);
 
   const refreshRef    = useRef(null);
   const typingRef     = useRef(false);   // true während User tippt → kein Reload
@@ -2537,6 +2561,7 @@ function AppInner() {
             display: "flex",
             flexDirection: "column",
             minHeight: 0,
+            height: "100%",
             overflow: "hidden",
             padding: isMobile ? "8px 8px 0" : "12px 16px 0",
           }}>
@@ -2545,6 +2570,7 @@ function AppInner() {
               onSelectMandant={setChatMandantPersist}
               showToast={toast}
               isMobile={isMobile}
+              onInboxChange={refreshPortalUnread}
             />
           </div>
         );
@@ -2615,7 +2641,18 @@ function AppInner() {
         return null;
       case "belege":     return <BelegScanner />;
       case "rechnungen": return <Rechnungen />;
-      case "ki":         return <KIAssistent />;
+      case "ki":
+        return (
+          <div style={{
+            flex: 1,
+            display: "flex",
+            flexDirection: "column",
+            minHeight: 0,
+            overflow: "hidden",
+          }}>
+            <KIAssistent />
+          </div>
+        );
       case "analytics":  return <Analytics />;
       case "settings":   return <Settings />;
 
@@ -2642,7 +2679,8 @@ function AppInner() {
   };
 
   return (
-    <div style={{ display:"flex", minHeight:"100dvh", flexDirection: isMobile ? "column" : "row",
+    <div style={{ display:"flex", height:"100dvh", minHeight:"100dvh", maxHeight:"100dvh",
+                  overflow:"hidden", flexDirection: isMobile ? "column" : "row",
                   maxWidth:"100%", minWidth:0 }}>
       {(isMobile || sidebarVisible) ? (
         <Sidebar
@@ -2663,11 +2701,13 @@ function AppInner() {
           onCloseMobile={() => setMobileNavOpen(false)}
           onOpenMobile={() => setMobileNavOpen(true)}
           onDesktopCollapse={!isMobile ? () => setSidebarVisible(false) : undefined}
+          portalUnreadTotal={portalUnreadTotal}
         />
       ) : null}
       <main style={{
         flex:1, display:"flex", flexDirection:"column",
-        background:"var(--bg)", minWidth:0,
+        background:"var(--bg)", minWidth:0, minHeight:0,
+        overflow: "hidden",
         width: isMobile ? "100%" : undefined,
         paddingBottom: isMobile ? "max(12px, env(safe-area-inset-bottom))" : undefined,
       }}>
