@@ -2269,6 +2269,17 @@ function AppInner() {
       else localStorage.removeItem("kanzlei_chat_mandant");
     } catch {}
   }, []);
+  const [kpis,         setKpis]         = useState([]);
+  const [heute,        setHeute]        = useState([]);
+  const [empfehlungen, setEmpfehlungen] = useState([]);
+  const [loading,      setLoading]      = useState(true);
+  const [formLoading,  setFormLoading]  = useState(false);
+  const [isFormDirty,  setIsFormDirty]  = useState(false);
+  const [selectedName, setSelectedName] = useState(null);
+  const [emailModal,   setEmailModal]   = useState(null);
+  const [toasts,       setToasts]       = useState([]);
+  const [readiness,    setReadiness]    = useState(null);
+  const [billingUsage, setBillingUsage] = useState(null);
 
   useEffect(() => {
     const tab = location.state?.tab;
@@ -2292,17 +2303,6 @@ function AppInner() {
       setSidebarWidth((w) => clamp(Math.max(w, 260), sidebarMinWidth, sidebarMaxWidth));
     }
   }, [activeTab, isMobile, sidebarMinWidth, sidebarMaxWidth]);
-  const [kpis,         setKpis]         = useState([]);
-  const [heute,        setHeute]        = useState([]);
-  const [empfehlungen, setEmpfehlungen] = useState([]);
-  const [loading,      setLoading]      = useState(true);
-  const [formLoading,  setFormLoading]  = useState(false);
-  const [isFormDirty,  setIsFormDirty]  = useState(false);
-  const [selectedName, setSelectedName] = useState(null);
-  const [emailModal,   setEmailModal]   = useState(null);
-  const [toasts,       setToasts]       = useState([]);
-  const [readiness,    setReadiness]    = useState(null);
-  const [billingUsage, setBillingUsage] = useState(null);
 
   const refreshRef    = useRef(null);
   const typingRef     = useRef(false);   // true während User tippt → kein Reload
