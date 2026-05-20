@@ -837,6 +837,7 @@ def init_db():
     """)
     _ensure_sqlite_column(conn, "aufgaben", "frist_uhrzeit", "TEXT DEFAULT ''")
     _ensure_sqlite_column(conn, "aufgaben", "erledigt_am", "TEXT")
+    _ensure_sqlite_column(conn, "aufgaben", "portal_sichtbar", "INTEGER DEFAULT 1")
     conn.commit()
     log.info(f"DB initialisiert: {DB_PFAD}")
 
@@ -2105,11 +2106,13 @@ class DatenSpeicher(DatenSpeicher):
     def aufgabe_speichern(self, aufgabe_id: str, daten: Dict) -> bool:
         try:
             with db_transaction(self.kanzlei_id) as conn:
+                ps = daten.get("portal_sichtbar")
+                portal_sichtbar = 1 if ps is not False and ps != 0 else 0
                 conn.execute("""
                     INSERT INTO aufgaben
                         (id, kanzlei_id, mandant, beschreibung, frist, frist_uhrzeit, prioritaet,
-                         kategorie, erledigt, erledigt_am, zugewiesen_an, notiz, quelle)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         kategorie, erledigt, erledigt_am, zugewiesen_an, notiz, quelle, portal_sichtbar)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         mandant       = excluded.mandant,
                         beschreibung  = excluded.beschreibung,
@@ -2120,7 +2123,8 @@ class DatenSpeicher(DatenSpeicher):
                         erledigt      = excluded.erledigt,
                         erledigt_am   = excluded.erledigt_am,
                         zugewiesen_an = excluded.zugewiesen_an,
-                        notiz         = excluded.notiz
+                        notiz         = excluded.notiz,
+                        portal_sichtbar = excluded.portal_sichtbar
                 """, (
                     aufgabe_id,
                     self.kanzlei_id,
@@ -2135,6 +2139,7 @@ class DatenSpeicher(DatenSpeicher):
                     daten.get("zugewiesen_an", ""),
                     daten.get("notiz", ""),
                     daten.get("quelle", "manuell"),
+                    portal_sichtbar,
                 ))
             return True
         except Exception as e:

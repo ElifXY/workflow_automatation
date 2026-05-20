@@ -1249,6 +1249,7 @@ function AufgabenSeite({ kpis, heute, onRefresh, isMobile = false }) {
   const [frist,          setFrist]          = useState("");
   const [fristUhrzeit,   setFristUhrzeit]   = useState("");
   const [prioritaet,     setPrio]           = useState("normal");
+  const [portalSichtbar, setPortalSichtbar] = useState(true);
   const [adding,         setAdding]         = useState(false);
   const [fehler,         setFehler]         = useState("");
   const [success,        setSuccess]        = useState("");
@@ -1331,6 +1332,7 @@ function AufgabenSeite({ kpis, heute, onRefresh, isMobile = false }) {
         frist,
         frist_uhrzeit: fristUhrzeit || null,
         prioritaet,
+        portal_sichtbar: portalSichtbar,
       });
       const newId = created?.id ?? created?.data?.id;
       const optimisticRow = newId
@@ -1612,6 +1614,21 @@ function AufgabenSeite({ kpis, heute, onRefresh, isMobile = false }) {
             </button>
           ))}
         </div>
+
+        <label style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 16, cursor: "pointer", fontSize: 13, color: "var(--text2)" }}>
+          <input
+            type="checkbox"
+            checked={portalSichtbar}
+            onChange={(e) => setPortalSichtbar(e.target.checked)}
+            style={{ marginTop: 3 }}
+          />
+          <span>
+            <strong style={{ color: "var(--text)" }}>Im Mandantenportal sichtbar</strong>
+            <span style={{ display: "block", fontSize: 12, color: "var(--text3)", marginTop: 2 }}>
+              Erscheint unter Übersicht → Aufgaben im Portal des Mandanten (nicht nur im Chat).
+            </span>
+          </span>
+        </label>
 
         <Btn onClick={hinzufuegen} loading={adding} variant="primary" size="lg">
           Aufgabe speichern

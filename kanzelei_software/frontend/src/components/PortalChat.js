@@ -6,6 +6,8 @@ import {
   sendPortalChatDokument,
   sendPortalChatUnterschrift,
   sendPortalChatUpload,
+  patchPortalChat,
+  deletePortalChat,
 } from "../api";
 
 const fileToBase64 = (file) =>
@@ -33,7 +35,7 @@ const fmtZeit = (iso) => {
   }
 };
 
-const ChatBubble = ({ msg }) => {
+const ChatBubble = ({ msg, mandantName, showToast, onRefresh }) => {
   const sender = msg.sender || "system";
   const isKanzlei = sender === "kanzlei";
   const isMandant = sender === "mandant";
@@ -86,8 +88,22 @@ const ChatBubble = ({ msg }) => {
     );
   } else if (msg.typ === "upload") {
     body = <div>📎 {meta.dateiname || msg.text}</div>;
+  } else if (msg.typ === "aufgabe_status") {
+    body = (
+      <div style={{ fontSize: 12, color: meta.aufgabe_erledigt ? "var(--green)" : "var(--text2)" }}>
+        {msg.text}
+      </div>
+    );
   } else {
-    body = <div style={{ whiteSpace: "pre-wrap" }}>{msg.text}</div>;
+    const bearbeitet = meta.bearbeitet_am ? (
+      <span style={{ fontSize: 10, color: "var(--text3)" }}> (bearbeitet)</span>
+    ) : null;
+    body = (
+      <div style={{ whiteSpace: "pre-wrap" }}>
+        {msg.text}
+        {bearbeitet}
+      </div>
+    );
   }
 
   if (sender === "system") {
@@ -112,6 +128,41 @@ const ChatBubble = ({ msg }) => {
         }}
       >
         {body}
+        {(msg.typ === "text" || !msg.typ) && !meta.geloescht && msg.id && isKanzlei ? (
+          <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+            <button
+              type="button"
+              style={{ fontSize: 10, padding: "3px 8px", borderRadius: 6, border: "1px solid var(--border)", background: "transparent", cursor: "pointer", color: "var(--text2)" }}
+              onClick={async () => {
+                const neu = window.prompt("Nachricht bearbeiten:", msg.text || "");
+                if (neu === null) return;
+                const t = neu.trim();
+                if (!t) { showToast?.("Text leer", "error"); return; }
+                try {
+                  await patchPortalChat(mandantName, msg.id, t);
+                  showToast?.("Bearbeitet", "success");
+                  onRefresh?.();
+                } catch (e) { showToast?.(e.message, "error"); }
+              }}
+            >
+              Bearbeiten
+            </button>
+            <button
+              type="button"
+              style={{ fontSize: 10, padding: "3px 8px", borderRadius: 6, border: "1px solid var(--border)", background: "transparent", cursor: "pointer", color: "var(--red)" }}
+              onClick={async () => {
+                if (!window.confirm("Nachricht löschen?")) return;
+                try {
+                  await deletePortalChat(mandantName, msg.id);
+                  showToast?.("Gelöscht", "success");
+                  onRefresh?.();
+                } catch (e) { showToast?.(e.message, "error"); }
+              }}
+            >
+              Löschen
+            </button>
+          </div>
+        ) : null}
         <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 6 }}>
           {isKanzlei ? "Kanzlei" : "Mandant"} · {fmtZeit(msg.zeit)}
         </div>
@@ -119,33 +170,6 @@ const ChatBubble = ({ msg }) => {
     </div>
   );
 };
-function PortalSichtbarCheckbox({ checked, onChange, hint }) {
-  return (
-    <label
-      style={{
-        display: "flex",
-        alignItems: "flex-start",
-        gap: 8,
-        fontSize: 12,
-        color: "var(--text2)",
-        marginBottom: 10,
-        cursor: "pointer",
-        lineHeight: 1.45,
-      }}
-    >
-      <input
-        type="checkbox"
-        checked={checked}
-        onChange={(e) => onChange(e.target.checked)}
-        style={{ marginTop: 2, flexShrink: 0 }}
-      />
-      <span>
-        <strong style={{ color: "var(--text)" }}>Im Mandantenportal sichtbar</strong>
-        {hint ? <span style={{ display: "block", color: "var(--text3)", fontWeight: 400 }}>{hint}</span> : null}
-      </span>
-    </label>
-  );
-}
 
 export default function PortalChat({
   mandantName,
@@ -166,7 +190,6 @@ export default function PortalChat({
   const [uploadFile, setUploadFile] = useState(null);
   const [uploadKategorie, setUploadKategorie] = useState("Sonstiges");
   const [uploadBeschreibung, setUploadBeschreibung] = useState("");
-  const [portalSichtbar, setPortalSichtbar] = useState(true);
   const endRef = useRef(null);
 
   const laden = useCallback(async () => {
@@ -190,7 +213,7 @@ export default function PortalChat({
 
   useEffect(() => {
     laden();
-    const t = setInterval(laden, 45000);
+    const t = setInterval(laden, 20000);
     return () => clearInterval(t);
   }, [laden]);
 
@@ -226,9 +249,9 @@ export default function PortalChat({
         frist: aufgabeForm.frist,
         hinweis: aufgabeForm.hinweis.trim(),
         prioritaet: "normal",
-        portal_sichtbar: portalSichtbar,
+        portal_sichtbar: true,
       });
-      showToast?.("Aufgabe im Chat erstellt", "success");
+      showToast?.("Aufgabe im Chat erstellt — sichtbar im Mandantenportal", "success");
       setMode(null);
       setAufgabeForm({ beschreibung: "", frist: "", hinweis: "" });
       await laden();
@@ -251,7 +274,7 @@ export default function PortalChat({
         dokument_name: dokForm.name.trim(),
         beschreibung: dokForm.beschreibung.trim(),
         frist: dokForm.frist || null,
-        portal_sichtbar: portalSichtbar,
+        portal_sichtbar: true,
       });
       showToast?.("Dokument angefordert", "success");
       setMode(null);
@@ -279,7 +302,7 @@ export default function PortalChat({
         dateityp: uploadFile.type || "application/octet-stream",
         kategorie: uploadKategorie.trim() || "Sonstiges",
         beschreibung: uploadBeschreibung.trim(),
-        portal_sichtbar: portalSichtbar,
+        portal_sichtbar: true,
       });
       showToast?.("Dokument im Portal bereitgestellt", "success");
       setMode(null);
@@ -309,7 +332,7 @@ export default function PortalChat({
         betreff: sigBetreff.trim() || "Bitte unterzeichnen",
         hinweis: "",
         gueltig_tage: 30,
-        portal_sichtbar: portalSichtbar,
+        portal_sichtbar: true,
       });
       showToast?.("Unterschrift im Chat angefordert", "success");
       setMode(null);
@@ -404,7 +427,15 @@ export default function PortalChat({
             Noch kein Verlauf — erste Nachricht senden.
           </div>
         ) : (
-          msgs.map((m) => <ChatBubble key={m.id} msg={m} />)
+          msgs.map((m) => (
+            <ChatBubble
+              key={m.id}
+              msg={m}
+              mandantName={mandantName}
+              showToast={showToast}
+              onRefresh={laden}
+            />
+          ))
         )}
         <div ref={endRef} />
       </div>
@@ -435,18 +466,6 @@ export default function PortalChat({
           </button>
         ))}
       </div>
-
-      {mode && mode !== "text" ? (
-        <PortalSichtbarCheckbox
-          checked={portalSichtbar}
-          onChange={setPortalSichtbar}
-          hint={
-            portalSichtbar
-              ? "Der Mandant sieht dies im Portal (Chat, Aufgaben, Uploads)."
-              : "Nur für Sie in der Suite — der Mandant sieht es nicht im Portal."
-          }
-        />
-      ) : null}
 
       {mode === "aufgabe" && (
         <div style={{ marginBottom: 10, padding: 10, border: "1px dashed var(--border)", borderRadius: 8 }}>

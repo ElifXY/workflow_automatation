@@ -89,7 +89,9 @@ def _record_portal_sichtbar(store, mandant: str, row: Dict[str, Any]) -> bool:
     if typ == "aufgabe" and refs.get("aufgabe_id"):
         alle = store.hole_fristen()
         a = alle.get(refs["aufgabe_id"]) if isinstance(alle, dict) else None
-        if a and a.get("mandant") == mandant and not a.get("portal_sichtbar"):
+        if a and a.get("mandant") == mandant and (
+            a.get("portal_sichtbar") is False or a.get("portal_sichtbar") == 0
+        ):
             return False
     return True
 
@@ -107,6 +109,7 @@ def list_chat(
         store.portal_liste("chat", mandant=mandant),
         key=lambda x: x.get("zeit") or x.get("erstellt_am") or "",
     )
+    rows = [r for r in rows if not (r.get("meta") or {}).get("geloescht")]
     if nur_mandanten_portal:
         rows = [r for r in rows if _record_portal_sichtbar(store, mandant, r)]
     if seit_id:
@@ -155,6 +158,50 @@ def get_chat_message(store, mandant: str, msg_id: str) -> Optional[Dict[str, Any
     if not row or row.get("mandant") != mandant:
         return None
     return _enrich_message(store, mandant, dict(row))
+
+
+def bearbeite_nachricht(
+    store,
+    mandant: str,
+    msg_id: str,
+    text: str,
+    editor: str,
+) -> Dict[str, Any]:
+    """Textnachricht bearbeiten (nur eigener Sender)."""
+    row = store.portal_holen("chat", msg_id)
+    if not row or row.get("mandant") != mandant:
+        raise ValueError("Nachricht nicht gefunden")
+    if row.get("meta", {}).get("geloescht"):
+        raise ValueError("Nachricht wurde gelöscht")
+    if row.get("sender") != editor:
+        raise ValueError("Nur eigene Nachrichten bearbeiten")
+    if (row.get("typ") or "text") != "text":
+        raise ValueError("Nur Textnachrichten bearbeitbar")
+    row = dict(row)
+    row["text"] = (text or "").strip()
+    meta = dict(row.get("meta") or {})
+    meta["bearbeitet_am"] = _now()
+    meta["bearbeitet_von"] = editor
+    row["meta"] = meta
+    if not store.portal_speichern("chat", msg_id, mandant, row):
+        raise RuntimeError("Bearbeitung konnte nicht gespeichert werden")
+    return _enrich_message(store, mandant, row)
+
+
+def loesche_nachricht(store, mandant: str, msg_id: str, editor: str) -> bool:
+    row = store.portal_holen("chat", msg_id)
+    if not row or row.get("mandant") != mandant:
+        raise ValueError("Nachricht nicht gefunden")
+    if row.get("sender") != editor:
+        raise ValueError("Nur eigene Nachrichten löschen")
+    row = dict(row)
+    meta = dict(row.get("meta") or {})
+    meta["geloescht"] = True
+    meta["geloescht_am"] = _now()
+    meta["geloescht_von"] = editor
+    row["meta"] = meta
+    row["text"] = "(Nachricht gelöscht)"
+    return store.portal_speichern("chat", msg_id, mandant, row)
 
 
 def update_chat_meta(store, mandant: str, msg_id: str, meta_patch: Dict[str, Any]) -> bool:
@@ -223,6 +270,11 @@ def _enrich_message(store, mandant: str, row: Dict[str, Any]) -> Dict[str, Any]:
         fehlend = list(m.get("fehlende_dokumente_liste") or [])
         doc = refs.get("dokument_name") or meta.get("dokument_name")
         meta["dokument_offen"] = bool(doc and any(doc.lower() in d.lower() or d.lower() in doc.lower() for d in fehlend))
+
+    if meta.get("geloescht"):
+        row["text"] = "(Nachricht gelöscht)"
+    elif meta.get("bearbeitet_am"):
+        row["text"] = (row.get("text") or "").strip()
 
     row["refs"] = refs
     row["meta"] = meta

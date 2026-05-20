@@ -876,6 +876,17 @@ export const sendPortalChatUpload = (name, body) =>
     body: JSON.stringify(body),
   });
 
+export const patchPortalChat = (name, msgId, text) =>
+  apiFetch(`/portal/mandant/${encodeURIComponent(name)}/chat/${encodeURIComponent(msgId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ text }),
+  });
+
+export const deletePortalChat = (name, msgId) =>
+  apiFetch(`/portal/mandant/${encodeURIComponent(name)}/chat/${encodeURIComponent(msgId)}`, {
+    method: "DELETE",
+  });
+
 // ═══════════════════════════════════════════════════════════════
 // PROAKTIVER BOT
 // ═══════════════════════════════════════════════════════════════

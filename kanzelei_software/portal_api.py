@@ -284,7 +284,7 @@ def meine_aufgaben(mandant: str = Depends(hole_mandant)):
     jetzt = datetime.now()
     result = []
     for a in store.hole_aufgaben_fuer_mandant(mandant):
-        if not a.get("portal_sichtbar"):
+        if a.get("portal_sichtbar") is False or a.get("portal_sichtbar") == 0:
             continue
         erledigt = aufgabe_ist_erledigt(a)
         try:
@@ -317,7 +317,7 @@ def portal_aufgabe_erledigen(aufgabe_id: str, mandant: str = Depends(hole_mandan
     a = dict(alle[aufgabe_id])
     if a.get("mandant") != mandant:
         raise HTTPException(403, "Kein Zugriff")
-    if not a.get("portal_sichtbar"):
+    if a.get("portal_sichtbar") is False or a.get("portal_sichtbar") == 0:
         raise HTTPException(403, "Diese Aufgabe ist nicht im Portal sichtbar")
     war_erledigt = aufgabe_ist_erledigt(a)
     a["erledigt"] = 0 if war_erledigt else 1
@@ -754,8 +754,12 @@ def freigabe_anfragen(data: FreigabeAnfragen):
 @portal_router.get("/portal/freigaben", tags=["Freigaben"])
 def meine_freigaben(mandant: str = Depends(hole_mandant)):
     p = _portal()
-    freigaben = [f for f in p["portal"]["freigaben"].values()
-                 if f.get("mandant")==mandant and f.get("status")=="ausstehend"]
+    freigaben = [
+        f for f in p["portal"]["freigaben"].values()
+        if f.get("mandant") == mandant
+        and f.get("status") == "ausstehend"
+        and f.get("portal_sichtbar") is not False
+    ]
     # Dokument-Daten entfernen für Übersicht
     result = [{k:v for k,v in f.items() if k!="dokument_b64"} for f in freigaben]
     return {"freigaben":result,"anzahl":len(result)}
@@ -812,6 +816,34 @@ def portal_chat_senden(data: ChatTextBody, mandant: str = Depends(hole_mandant))
         store.mandant_speichern(mandant, m)
     store.log_eintrag(f"PORTAL_CHAT | {mandant} | mandant")
     return {"status": "gesendet", "nachricht": msg}
+
+
+class ChatBearbeitenBody(BaseModel):
+    text: str = Field(..., min_length=1, max_length=5000)
+
+
+@portal_router.patch("/portal/chat/{msg_id}", tags=["Portal-Chat"])
+def portal_chat_bearbeiten_mandant(
+    msg_id: str,
+    data: ChatBearbeitenBody,
+    mandant: str = Depends(hole_mandant),
+):
+    store = _store_for_mandant(mandant)
+    try:
+        msg = pc.bearbeite_nachricht(store, mandant, msg_id, data.text.strip(), "mandant")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"status": "bearbeitet", "nachricht": msg}
+
+
+@portal_router.delete("/portal/chat/{msg_id}", tags=["Portal-Chat"])
+def portal_chat_loeschen_mandant(msg_id: str, mandant: str = Depends(hole_mandant)):
+    store = _store_for_mandant(mandant)
+    try:
+        pc.loesche_nachricht(store, mandant, msg_id, "mandant")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"status": "geloescht"}
 
 
 # ============================================================

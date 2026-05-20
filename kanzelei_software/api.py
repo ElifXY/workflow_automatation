@@ -8173,6 +8173,47 @@ def portal_mandant_chat_senden(
     return ok_compat({"status": "gesendet", "nachricht": msg})
 
 
+class PortalChatBearbeiten(BaseModel):
+    text: str = Field(..., min_length=1, max_length=5000)
+
+
+@app.patch("/portal/mandant/{name}/chat/{msg_id}", tags=["Portal-Chat"],
+           summary="Eigene Textnachricht bearbeiten (Kanzlei)")
+def portal_mandant_chat_bearbeiten(
+    name: str,
+    msg_id: str,
+    data: PortalChatBearbeiten,
+    _user: dict = Depends(get_current_user),
+):
+    from modules import portal_chat as pc
+
+    store = get_ds(_user)
+    get_mandant_or_404(name, store)
+    try:
+        msg = pc.bearbeite_nachricht(store, name, msg_id, data.text.strip(), "kanzlei")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return ok_compat({"status": "bearbeitet", "nachricht": msg})
+
+
+@app.delete("/portal/mandant/{name}/chat/{msg_id}", tags=["Portal-Chat"],
+            summary="Eigene Nachricht löschen (Kanzlei)")
+def portal_mandant_chat_loeschen(
+    name: str,
+    msg_id: str,
+    _user: dict = Depends(get_current_user),
+):
+    from modules import portal_chat as pc
+
+    store = get_ds(_user)
+    get_mandant_or_404(name, store)
+    try:
+        pc.loesche_nachricht(store, name, msg_id, "kanzlei")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return ok_compat({"status": "geloescht"})
+
+
 @app.post("/portal/mandant/{name}/chat/aufgabe", tags=["Portal-Chat"],
           summary="Aufgabe im Chat an Mandant zuweisen (abhackbar)")
 def portal_mandant_chat_aufgabe(

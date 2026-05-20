@@ -1,7 +1,8 @@
 // ============================================================
-// PORTAL-CHAT
+// PORTAL-CHAT (Mandantenportal)
 // ============================================================
 let _chatPoll = null;
+let _chatPendingFile = null;
 
 function formatChatZeit(iso) {
   if (!iso) return "";
@@ -17,6 +18,26 @@ function formatChatZeit(iso) {
   }
 }
 
+function chatAktualisiereVorschau() {
+  const box = document.getElementById("chat-file-preview");
+  if (!box) return;
+  if (!_chatPendingFile) {
+    box.style.display = "none";
+    box.innerHTML = "";
+    return;
+  }
+  box.style.display = "block";
+  box.innerHTML = `<span style="font-size:13px">📎 <strong>${esc(_chatPendingFile.name)}</strong></span>
+    <button type="button" class="btn btn-ghost btn-sm" style="margin-left:8px" onclick="chatDateiAbbrechen()">Entfernen</button>`;
+}
+
+function chatDateiAbbrechen() {
+  _chatPendingFile = null;
+  const inp = document.getElementById("chat-file");
+  if (inp) inp.value = "";
+  chatAktualisiereVorschau();
+}
+
 function renderChatNachricht(n) {
   const sender = n.sender || "system";
   const side =
@@ -28,7 +49,10 @@ function renderChatNachricht(n) {
   const zeit = formatChatZeit(n.zeit || n.timestamp);
   const meta = n.meta || {};
   const refs = n.refs || {};
-  let inner = `<div>${esc(n.text || "")}</div>`;
+  const bearbeitet = meta.bearbeitet_am
+    ? ` <span style="color:var(--text3);font-size:10px">(bearbeitet)</span>`
+    : "";
+  let inner = `<div>${esc(n.text || "")}${bearbeitet}</div>`;
 
   if (n.typ === "aufgabe") {
     const erledigt = !!meta.aufgabe_erledigt;
@@ -78,13 +102,26 @@ function renderChatNachricht(n) {
   } else if (n.typ === "unterschrift_status" || n.typ === "aufgabe_status") {
     inner = `<div style="font-size:13px">${esc(n.text || "")}</div>`;
   } else {
-    inner = `<div>${esc(n.text || "")}</div>`;
+    inner = `<div>${esc(n.text || "")}${bearbeitet}</div>`;
+  }
+
+  let actions = "";
+  if (
+    side === "mandant" &&
+    (n.typ === "text" || !n.typ) &&
+    !meta.geloescht &&
+    n.id
+  ) {
+    actions = `<div style="margin-top:6px;display:flex;gap:6px">
+      <button type="button" class="btn btn-ghost btn-sm" onclick="chatBearbeiten('${n.id}')">Bearbeiten</button>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="chatLoeschen('${n.id}')">Löschen</button>
+    </div>`;
   }
 
   if (side === "system") {
     return `<div class="chat-bubble system">${inner}<div class="chat-meta">${zeit}</div></div>`;
   }
-  return `<div class="chat-bubble ${side}">${inner}<div class="chat-meta">${
+  return `<div class="chat-bubble ${side}">${inner}${actions}<div class="chat-meta">${
     sender === "kanzlei" ? "Kanzlei" : "Sie"
   } · ${zeit}</div></div>`;
 }
@@ -112,13 +149,38 @@ async function ladeChat() {
 async function chatSenden() {
   const ta = document.getElementById("chat-text");
   const text = (ta?.value || "").trim();
+  if (_chatPendingFile) {
+    try {
+      const b64 = await fileToB64(_chatPendingFile);
+      await api("/portal/dokumente/hochladen", {
+        method: "POST",
+        body: JSON.stringify({
+          dateiname: _chatPendingFile.name,
+          dateityp: _chatPendingFile.type || "application/octet-stream",
+          inhalt_b64: b64,
+          beschreibung: text || "Im Chat hochgeladen",
+        }),
+      });
+      _chatPendingFile = null;
+      chatAktualisiereVorschau();
+      if (text) {
+        await api("/portal/chat", { method: "POST", body: JSON.stringify({ text }) });
+      }
+      if (ta) ta.value = "";
+      await ladeChat();
+      toast("Gesendet", "success");
+    } catch (e) {
+      toast(e.message, "error");
+    }
+    return;
+  }
   if (!text) {
-    toast("Bitte Text eingeben", "error");
+    toast("Bitte Text eingeben oder Datei anhängen", "error");
     return;
   }
   try {
     await api("/portal/chat", { method: "POST", body: JSON.stringify({ text }) });
-    ta.value = "";
+    if (ta) ta.value = "";
     await ladeChat();
   } catch (e) {
     toast(e.message, "error");
@@ -129,23 +191,42 @@ function chatDateiWaehlen() {
   document.getElementById("chat-file")?.click();
 }
 
-async function chatDateiSenden(ev) {
+function chatDateiSenden(ev) {
   const file = ev.target.files?.[0];
   if (!file) return;
+  _chatPendingFile = file;
+  ev.target.value = "";
+  chatAktualisiereVorschau();
+  document.getElementById("chat-text")?.focus();
+  toast("Datei angehängt — Text ergänzen und auf Senden klicken", "success");
+}
+
+async function chatBearbeiten(msgId) {
+  const neu = window.prompt("Nachricht bearbeiten:");
+  if (neu === null) return;
+  const text = neu.trim();
+  if (!text) {
+    toast("Text darf nicht leer sein", "error");
+    return;
+  }
   try {
-    const b64 = await fileToB64(file);
-    await api("/portal/dokumente/hochladen", {
-      method: "POST",
-      body: JSON.stringify({
-        dateiname: file.name,
-        dateityp: file.type || "application/octet-stream",
-        inhalt_b64: b64,
-        beschreibung: "Im Chat hochgeladen",
-      }),
+    await api(`/portal/chat/${msgId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ text }),
     });
-    ev.target.value = "";
     await ladeChat();
-    toast("Datei gesendet", "success");
+    toast("Nachricht bearbeitet", "success");
+  } catch (e) {
+    toast(e.message, "error");
+  }
+}
+
+async function chatLoeschen(msgId) {
+  if (!window.confirm("Nachricht wirklich löschen?")) return;
+  try {
+    await api(`/portal/chat/${msgId}`, { method: "DELETE" });
+    await ladeChat();
+    toast("Nachricht gelöscht", "success");
   } catch (e) {
     toast(e.message, "error");
   }
@@ -155,6 +236,7 @@ async function chatAufgabeToggle(aid) {
   try {
     await api(`/portal/aufgaben/${aid}/erledigen`, { method: "POST" });
     await ladeChat();
+    if (typeof ladeUebersicht === "function") await ladeUebersicht();
     toast("Aufgabe aktualisiert", "success");
   } catch (e) {
     toast(e.message, "error");
@@ -165,5 +247,5 @@ function startChatPoll() {
   if (_chatPoll) clearInterval(_chatPoll);
   _chatPoll = setInterval(() => {
     if (document.getElementById("tab-chat")?.classList.contains("active")) ladeChat();
-  }, 45000);
+  }, 20000);
 }

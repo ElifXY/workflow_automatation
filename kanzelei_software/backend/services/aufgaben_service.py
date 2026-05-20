@@ -64,7 +64,7 @@ class AufgabenService:
 
     def create(self, name: str, data, *, portal_sichtbar: bool = False) -> Dict[str, Any]:
         aufgabe_id = str(uuid.uuid4())
-        portal_flag = portal_sichtbar or bool(getattr(data, "portal_sichtbar", False))
+        portal_flag = bool(portal_sichtbar) or bool(getattr(data, "portal_sichtbar", False))
         aufgabe = {
             "id": aufgabe_id,
             "mandant": name,
@@ -128,6 +128,28 @@ class AufgabenService:
                 detail="Aufgabe konnte nicht gespeichert werden",
             )
         self.store.log_eintrag(f"AUFGABE_TOGGLE | {a.get('mandant')} | {aufgabe_id} | erledigt={a['erledigt']}")
+        if a.get("portal_sichtbar") is not False and a.get("portal_sichtbar") != 0:
+            try:
+                from modules import portal_chat as pc
+
+                mandant_name = a.get("mandant", "")
+                pc.chat_aufgabe_erledigt(
+                    self.store,
+                    mandant_name,
+                    aufgabe_id,
+                    a.get("beschreibung", ""),
+                    bool(a["erledigt"]),
+                )
+                for row in self.store.portal_liste("chat", mandant=mandant_name):
+                    if row.get("typ") == "aufgabe" and (row.get("refs") or {}).get("aufgabe_id") == aufgabe_id:
+                        pc.update_chat_meta(
+                            self.store,
+                            mandant_name,
+                            row["id"],
+                            {"aufgabe_erledigt": bool(a["erledigt"])},
+                        )
+            except Exception:
+                pass
         return {"status": "ok", "erledigt": a["erledigt"]}
 
     def update(self, aufgabe_id: str, data) -> Dict[str, Any]:

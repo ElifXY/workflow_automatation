@@ -128,6 +128,20 @@ def _migriere_aus_json():
     log("  JSON-Migration deaktiviert (SQL-only Architektur aktiv)")
 
 
+def migriere_aufgaben_portal_sichtbar():
+    """Bestehende Aufgaben: im Portal sichtbar, wenn Spalte neu."""
+    conn = sqlite3.connect(DB_PFAD)
+    try:
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(aufgaben)").fetchall()]
+        if "portal_sichtbar" in cols:
+            conn.execute(
+                "UPDATE aufgaben SET portal_sichtbar = 1 WHERE portal_sichtbar IS NULL"
+            )
+            conn.commit()
+    finally:
+        conn.close()
+
+
 def migriere_aufgaben():
     """Aufgaben ohne kanzlei_id fixen."""
     conn = sqlite3.connect(DB_PFAD)
@@ -146,7 +160,7 @@ def migriere_aufgaben():
 
 def stelle_sicher_admin_existiert():
     """Stellt sicher dass mindestens ein Admin-Benutzer existiert."""
-    from core.auth import hat_irgendein_benutzer, setup_erstbenutzer
+    from backend.auth import hat_irgendein_benutzer, setup_erstbenutzer
     if not hat_irgendein_benutzer():
         setup_erstbenutzer("admin", "Admin2024!", "default")
         log("✓ Admin-Benutzer angelegt (admin / Admin2024!)")
