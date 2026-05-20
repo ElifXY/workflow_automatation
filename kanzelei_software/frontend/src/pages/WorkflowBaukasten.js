@@ -18,7 +18,11 @@ const api  = async (url, opts={}) => {
     ...(opts.headers||{}),
   }});
   const d = await r.json().catch(()=>({}));
-  if(!r.ok) throw new Error(d.detail||d.error||d.message||`${r.status}`);
+  if(!r.ok) {
+    const err = d.detail ?? d.error ?? d.message;
+    const msg = typeof err === "string" ? err : Array.isArray(err) ? err.map((x)=>x.msg||x).join(", ") : `${r.status}`;
+    throw new Error(msg || `${r.status}`);
+  }
   return d;
 };
 
@@ -350,7 +354,9 @@ const BotTab = () => {
       const n = d?.neue_fragen ?? d?.data?.neue_fragen ?? 0;
       showToast(`✓ Bot-Analyse fertig: ${n} neue Frage(n)`);
       laden();
-    } catch(e){showToast(e.message);}
+    } catch(e){
+      showToast(e.message || "Bot-Analyse fehlgeschlagen");
+    }
     finally{setRunning(false);}
   };
 

@@ -8490,7 +8490,8 @@ def bot_analyse(_user: dict = Depends(get_current_user)):
         })
     except Exception as e:
         log.error(f"Bot-Analyse Fehler: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        msg = str(e).strip() or "Bot-Analyse fehlgeschlagen"
+        raise HTTPException(status_code=500, detail=msg)
 
 @app.get("/bot/statistiken", tags=["Bot"], summary="Bot-Statistiken (gesparte Telefonate)")
 def bot_statistiken(_user: dict = Depends(get_current_user)):

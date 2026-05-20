@@ -2063,6 +2063,15 @@ class DatenSpeicher(DatenSpeicher):
 
     def hole_fristen(self) -> Dict[str, Dict]:
         """Alle Aufgaben dieser Kanzlei als Dict {id: daten}."""
+        if _pg_mandanten_mode():
+            conn = _pg_conn()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM aufgaben WHERE kanzlei_id = %s ORDER BY frist",
+                    (self.kanzlei_id,),
+                )
+                rows = cur.fetchall()
+            return {r["id"]: _pg_normalize_row_dict(dict(r)) for r in rows}
         rows = self._conn().execute(
             "SELECT * FROM aufgaben WHERE kanzlei_id = ? ORDER BY frist",
             (self.kanzlei_id,)
