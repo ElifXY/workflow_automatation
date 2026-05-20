@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Body, Depends, Query, status
+from fastapi import APIRouter, Body, Depends, Query, status
 
 from backend.deps import get_current_user
 
@@ -89,12 +89,9 @@ def bot_fragen_mandant(
 
 
 @router.post("/bot/analyse", summary="Automatische Bot-Analyse aller Mandanten starten")
-def bot_analyse(
-    background_tasks: BackgroundTasks,
-    _user: dict = Depends(get_current_user),
-):
+def bot_analyse(_user: dict = Depends(get_current_user)):
     root = _root()
-    return root.bot_analyse(background_tasks, _user)
+    return root.bot_analyse(_user)
 
 
 @router.get("/bot/statistiken", summary="Bot-Statistiken (gesparte Telefonate)")
