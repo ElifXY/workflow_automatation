@@ -339,8 +339,15 @@ const BotTab = () => {
       const [s,f] = await Promise.allSettled([
         api("/bot/statistiken"), api("/bot/fragen?status=offen"),
       ]);
-      if(s.status==="fulfilled") setStats(s.value);
-      if(f.status==="fulfilled") setFragen(f.value?.fragen||[]);
+      if(s.status==="fulfilled") {
+        const raw = s.value;
+        const st = raw?.fragen_gesamt !== undefined ? raw : (raw?.data || raw);
+        if(st?.fragen_gesamt !== undefined) setStats(st);
+      }
+      if(f.status==="fulfilled") {
+        const raw = f.value;
+        setFragen(raw?.fragen || raw?.data?.fragen || []);
+      }
     } catch(e){console.error(e);}
     finally{setLoading(false);}
   },[]);
@@ -352,7 +359,16 @@ const BotTab = () => {
     try {
       const d = await api("/bot/analyse",{method:"POST"});
       const n = d?.neue_fragen ?? d?.data?.neue_fragen ?? 0;
-      showToast(`✓ Bot-Analyse fertig: ${n} neue Frage(n)`);
+      const pruefung = d?.pruefung ?? d?.data?.pruefung ?? [];
+      const wuerde = (pruefung || []).filter((p) =>
+        p.umsatz_anomalie || p.beleg_fehlend || p.kontakt_erinnerung || p.fahrtenbuch || p.frist_erinnerung
+      ).length;
+      const msg = n > 0
+        ? `✓ Bot-Analyse fertig: ${n} neue Frage(n)`
+        : wuerde > 0
+          ? `Analyse OK — ${wuerde} Mandant(en) erfüllen Regeln, aber es gibt schon offene Fragen gleichen Typs`
+          : `Analyse OK — keine Regel ausgelöst (fehlende Belege ≥2, ≥14 Tage ohne Antwort, überfällige Aufgaben, …)`;
+      showToast(msg);
       laden();
     } catch(e){
       showToast(e.message || "Bot-Analyse fehlgeschlagen");

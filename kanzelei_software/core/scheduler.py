@@ -98,7 +98,7 @@ def run_bot_analyse():
     try:
         from core.proaktiver_bot import ProaktiverBot
         bot    = ProaktiverBot(ds)
-        fragen = bot.analysiere_alle_mandanten()
+        fragen, _pruefung = bot.analysiere_alle_mandanten()
         log.info(f"Bot-Analyse: {len(fragen)} neue Fragen erstellt")
         _heute_gelaufen.add(jid)
         ds.log_eintrag(f"SCHEDULER_BOT | {len(fragen)} neue Fragen")

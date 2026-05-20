@@ -294,6 +294,26 @@ def _pg_ts_to_naive_datetime(val: Any) -> Optional[datetime]:
     return t
 
 
+def _as_str_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(x).strip() for x in value if str(x).strip()]
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return []
+        if s.startswith("["):
+            try:
+                parsed = json.loads(s)
+                if isinstance(parsed, list):
+                    return [str(x).strip() for x in parsed if str(x).strip()]
+            except json.JSONDecodeError:
+                pass
+        return [s]
+    return []
+
+
 def _fehlende_dokumente_pg(kanzlei_id: str, mandant: str) -> List[str]:
     """Offene Dokumente aus PostgreSQL, falls Tabelle `dokumente` existiert; sonst []."""
     global _pg_dokumente_table_known
@@ -319,6 +339,20 @@ def _fehlende_dokumente_pg(kanzlei_id: str, mandant: str) -> List[str]:
             (kanzlei_id, mandant),
         )
         return [r["name"] for r in cur.fetchall()]
+
+
+def _merge_fehlende_dokumente(db_docs: List[str], stored_docs: List[str]) -> List[str]:
+    """DB-Dokumente + in Einstellungen gemerkte Anforderungen (überlebt PG-Mandanten-Spalten)."""
+    seen: set = set()
+    out: List[str] = []
+    for doc in list(db_docs or []) + list(stored_docs or []):
+        key = str(doc).strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
 
 _COMPAT_SECTION_DEFAULTS: Dict[str, Any] = {
     "belege": {},
@@ -872,6 +906,46 @@ class DatenSpeicher:
     # MANDANTEN
     # ══════════════════════════════════════════════════════════
 
+    def _mandant_fehlende_docs_key(self, name: str) -> str:
+        return f"compat::mandant_fehlende_docs::{name}"
+
+    def mandant_fehlende_docs_holen(self, name: str) -> List[str]:
+        return _as_str_list(self.setting_holen(self._mandant_fehlende_docs_key(name), []))
+
+    def mandant_fehlende_docs_setzen(self, name: str, docs: List[str]) -> bool:
+        return self.setting_setzen(self._mandant_fehlende_docs_key(name), _as_str_list(docs))
+
+    def _mandant_extra_key(self, name: str) -> str:
+        return f"compat::mandant_extra::{name}"
+
+    def mandant_extra_holen(self, name: str) -> Dict[str, Any]:
+        raw = self.setting_holen(self._mandant_extra_key(name), {})
+        return dict(raw) if isinstance(raw, dict) else {}
+
+    def mandant_extra_setzen(self, name: str, extra: Dict[str, Any]) -> bool:
+        return self.setting_setzen(self._mandant_extra_key(name), extra if isinstance(extra, dict) else {})
+
+    def _mandant_record_anreichern(self, m: Dict[str, Any]) -> Dict[str, Any]:
+        """Fehlende Dokumente + Zusatzfelder (z. B. letzter_monatsumsatz) für Bot/KI."""
+        name = m.get("name") or ""
+        if not name:
+            return m
+        db_docs = m.get("fehlende_dokumente_liste")
+        if db_docs is None:
+            if _pg_mandanten_mode():
+                db_docs = _fehlende_dokumente_pg(self.kanzlei_id, name)
+            else:
+                db_docs = self._fehlende_dokumente(name)
+        m["fehlende_dokumente_liste"] = _merge_fehlende_dokumente(
+            _as_str_list(db_docs),
+            self.mandant_fehlende_docs_holen(name),
+        )
+        extra = self.mandant_extra_holen(name)
+        for k, v in extra.items():
+            if k not in m or m.get(k) in (None, "", 0, 0.0):
+                m[k] = v
+        return m
+
     def hole_mandanten(self) -> Dict[str, Dict]:
         """Nur Mandanten DIESER Kanzlei."""
         if _pg_mandanten_mode():
@@ -886,7 +960,7 @@ class DatenSpeicher:
             for r in rows:
                 m = _pg_normalize_row_dict(dict(r))
                 m["fehlende_dokumente_liste"] = _fehlende_dokumente_pg(self.kanzlei_id, m["name"])
-                result[m["name"]] = m
+                result[m["name"]] = self._mandant_record_anreichern(m)
             return result
         rows = self._conn().execute(
             "SELECT * FROM mandanten WHERE kanzlei_id = ? AND aktiv = 1 ORDER BY name",
@@ -896,7 +970,7 @@ class DatenSpeicher:
         for r in rows:
             m = dict(r)
             m["fehlende_dokumente_liste"] = self._fehlende_dokumente(m["name"])
-            result[m["name"]] = m
+            result[m["name"]] = self._mandant_record_anreichern(m)
         return result
 
 
@@ -1909,7 +1983,7 @@ class DatenSpeicher(DatenSpeicher):
                 return None
             m = _pg_normalize_row_dict(dict(row))
             m["fehlende_dokumente_liste"] = _fehlende_dokumente_pg(self.kanzlei_id, name)
-            return m
+            return self._mandant_record_anreichern(m)
         row = self._conn().execute(
             "SELECT * FROM mandanten WHERE kanzlei_id = ? AND name = ? AND aktiv = 1",
             (self.kanzlei_id, name)
@@ -1918,7 +1992,7 @@ class DatenSpeicher(DatenSpeicher):
             return None
         m = dict(row)
         m["fehlende_dokumente_liste"] = self._fehlende_dokumente(name)
-        return m
+        return self._mandant_record_anreichern(m)
 
     def mandant_existiert(self, name: str) -> bool:
         if _pg_mandanten_mode():
@@ -1975,6 +2049,7 @@ class DatenSpeicher(DatenSpeicher):
                         ),
                     )
                 conn.commit()
+                self._mandant_meta_nach_speichern(name, daten)
                 return True
             except Exception as e:
                 log.error(f"mandant_speichern({name}) [pg]: {e}")
@@ -2014,10 +2089,23 @@ class DatenSpeicher(DatenSpeicher):
                     daten.get("letzte_antwort"),
                     daten.get("letzte_email"),
                 ))
+            self._mandant_meta_nach_speichern(name, daten)
             return True
         except Exception as e:
             log.error(f"mandant_speichern({name}): {e}")
             return False
+
+    def _mandant_meta_nach_speichern(self, name: str, daten: Dict) -> None:
+        """Fehlende Dokumente / Bot-Zusatzfelder in Einstellungen (PG hat keine JSON-Spalte)."""
+        if "fehlende_dokumente_liste" in daten:
+            self.mandant_fehlende_docs_setzen(name, _as_str_list(daten.get("fehlende_dokumente_liste")))
+        extra = self.mandant_extra_holen(name)
+        changed = False
+        if "letzter_monatsumsatz" in daten and daten.get("letzter_monatsumsatz") is not None:
+            extra["letzter_monatsumsatz"] = daten.get("letzter_monatsumsatz")
+            changed = True
+        if changed:
+            self.mandant_extra_setzen(name, extra)
 
     def mandant_loeschen(self, name: str) -> bool:
         if _pg_mandanten_mode():
@@ -2571,20 +2659,25 @@ class DatenSpeicher(DatenSpeicher):
         return ok
 
     def bot_fragen_liste(self) -> Dict[str, Dict[str, Any]]:
+        compat = self._section_holen("bot_fragen", {})
+        if not isinstance(compat, dict):
+            compat = {}
         if self._use_domain_tables_v2():
-            rows = self._conn().execute(
-                "SELECT id, data_json FROM bot_questions_v2 WHERE kanzlei_id = ?",
-                (self.kanzlei_id,),
-            ).fetchall()
-            result: Dict[str, Dict[str, Any]] = {}
-            for r in rows:
-                try:
-                    result[r["id"]] = json.loads(r["data_json"])
-                except Exception:
-                    continue
-            if result:
-                return result
-        return self._section_holen("bot_fragen", {})
+            try:
+                rows = self._conn().execute(
+                    "SELECT id, data_json FROM bot_questions_v2 WHERE kanzlei_id = ?",
+                    (self.kanzlei_id,),
+                ).fetchall()
+                merged = dict(compat)
+                for r in rows:
+                    try:
+                        merged[r["id"]] = json.loads(r["data_json"])
+                    except Exception:
+                        continue
+                return merged
+            except Exception as e:
+                log.warning("bot_fragen_liste(v2): %s — Fallback compat", e)
+        return compat
 
     def bot_frage_holen(self, frage_id: str) -> Optional[Dict[str, Any]]:
         return self.bot_fragen_liste().get(frage_id)
@@ -2617,8 +2710,7 @@ class DatenSpeicher(DatenSpeicher):
                         json.dumps(frage, ensure_ascii=False),
                     ))
             except Exception as e:
-                log.error(f"bot_frage_speichern(v2): {e}")
-                return False
+                log.warning(f"bot_frage_speichern(v2): {e}")
         return ok
 
     def bot_fragen_setzen(self, fragen: Dict[str, Dict[str, Any]]) -> bool:
@@ -2912,7 +3004,7 @@ class DatenSpeicher(DatenSpeicher):
                     return 999
                 return max(0, (datetime.now() - letzte).days)
             except Exception:
-                return 0
+                return 999
         row = self._conn().execute(
             "SELECT letzte_antwort FROM mandanten WHERE kanzlei_id = ? AND name = ?",
             (self.kanzlei_id, mandant)
@@ -2920,10 +3012,12 @@ class DatenSpeicher(DatenSpeicher):
         if not row or not row["letzte_antwort"]:
             return 999
         try:
-            letzte = datetime.fromisoformat(row["letzte_antwort"])
+            letzte = datetime.fromisoformat(str(row["letzte_antwort"]).replace("Z", "+00:00"))
+            if letzte.tzinfo is not None:
+                letzte = letzte.replace(tzinfo=None)
             return max(0, (datetime.now() - letzte).days)
         except Exception:
-            return 0
+            return 999
 
     def hole_statistiken(self) -> Dict:
         conn = self._conn()

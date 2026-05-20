@@ -7,11 +7,17 @@ import uuid
 import json
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 
 from core.aufgabe_erledigt import aufgabe_ist_erledigt
 
 log = logging.getLogger("kanzlei_bot")
+
+# Schwellen (Analyse-Regeln)
+MIN_FEHLENDE_BELEGE = 2
+MIN_TAGE_OHNE_ANTWORT = 14
+MIN_UEBERFAELLIGE_FRISTEN = 1
+UMSATZ_ANOMALIE_FAKTOR = 0.6
 
 FRAGE_TYPEN = {
     "buchung_bestaetigung":   {"icon": "💳", "prioritaet": "hoch"},
@@ -23,18 +29,28 @@ FRAGE_TYPEN = {
     "konto_ungewoehnlich":    {"icon": "🏦", "prioritaet": "hoch"},
     "personal_aenderung":     {"icon": "👤", "prioritaet": "mittel"},
     "frist_erinnerung":       {"icon": "⏰", "prioritaet": "kritisch"},
+    "kontakt_erinnerung":     {"icon": "📬", "prioritaet": "mittel"},
     "investition_geplant":    {"icon": "📈", "prioritaet": "niedrig"},
     "sonstiges":              {"icon": "❓", "prioritaet": "niedrig"},
 }
 
 
-def _safe_float(value: Any, default: float = 0.0) -> float:
+def _safe_float(value: Any, default: Optional[float] = 0.0) -> float:
     if value is None:
-        return default
+        return default if default is not None else 0.0
     try:
         return float(value)
     except (TypeError, ValueError):
-        return default
+        return default if default is not None else 0.0
+
+
+def _optional_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
@@ -71,9 +87,19 @@ def _parse_iso_dt(value: Any) -> Optional[datetime]:
         return None
     try:
         s = str(value).strip().replace("Z", "+00:00")
-        return datetime.fromisoformat(s)
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is not None:
+            dt = dt.replace(tzinfo=None)
+        return dt
     except (TypeError, ValueError):
         return None
+
+
+def _fehlende_docs_aus_mandant(m: Dict) -> List[str]:
+    docs = _as_str_list(m.get("fehlende_dokumente_liste"))
+    if not docs:
+        docs = _as_str_list(m.get("fehlende_dokumente"))
+    return docs
 
 
 class ProaktiverBot:
@@ -218,7 +244,64 @@ class ProaktiverBot:
             fragen = [f for f in fragen if f.get("status") == status_filter]
         return sorted(fragen, key=lambda x: x.get("erstellt_am") or "", reverse=True)
 
-    def analysiere_alle_mandanten(self) -> List[Dict]:
+    def _tage_ohne_antwort(self, name: str) -> int:
+        try:
+            return _safe_int(self.ds.berechne_tage_ohne_antwort(name), 999)
+        except Exception as e:
+            log.warning("tage_ohne_antwort für %s: %s", name, e)
+            return 999
+
+    def _diagnose_mandant(
+        self, name: str, m: Dict, alle_aufgaben: Dict, bestehende: set
+    ) -> Dict[str, Any]:
+        """Welche Regeln würden greifen (ohne zu speichern)?"""
+        umsatz = _safe_float(m.get("umsatz"), 0.0)
+        monats_raw = _optional_float(m.get("letzter_monatsumsatz"))
+        fehlende_docs = _fehlende_docs_aus_mandant(m)
+        tage = self._tage_ohne_antwort(name)
+        heute = datetime.now().strftime("%Y-%m-%d")
+        ueberfaellige = [
+            a for a in alle_aufgaben.values()
+            if isinstance(a, dict)
+            and a.get("mandant") == name
+            and not aufgabe_ist_erledigt(a)
+            and str(a.get("frist") or "9999") < heute
+        ]
+        kfz = any(
+            isinstance(a, dict)
+            and a.get("mandant") == name
+            and not aufgabe_ist_erledigt(a)
+            and any(
+                w in str(a.get("beschreibung", "")).lower()
+                for w in ("fahrt", "kfz", "auto", "benzin", "kraftstoff")
+            )
+            for a in alle_aufgaben.values()
+        )
+        erwarteter_monat = umsatz / 12.0 if umsatz > 0 else 0.0
+        umsatz_ok = (
+            monats_raw is not None
+            and monats_raw > 0
+            and erwarteter_monat > 0
+            and monats_raw < erwarteter_monat * UMSATZ_ANOMALIE_FAKTOR
+        )
+        return {
+            "mandant": name,
+            "umsatz_anomalie": umsatz_ok and "umsatz_anomalie" not in bestehende,
+            "beleg_fehlend": len(fehlende_docs) >= MIN_FEHLENDE_BELEGE and "beleg_fehlend" not in bestehende,
+            "kontakt_erinnerung": tage >= MIN_TAGE_OHNE_ANTWORT and "kontakt_erinnerung" not in bestehende,
+            "fahrtenbuch": kfz and "fahrtenbuch" not in bestehende,
+            "frist_erinnerung": len(ueberfaellige) >= MIN_UEBERFAELLIGE_FRISTEN and "frist_erinnerung" not in bestehende,
+            "fehlende_docs_anzahl": len(fehlende_docs),
+            "tage_ohne_antwort": tage,
+            "ueberfaellige_aufgaben": len(ueberfaellige),
+            "offene_frage_typen": sorted(bestehende),
+        }
+
+    def analysiere_alle_mandanten(self) -> Tuple[List[Dict], List[Dict]]:
+        """
+        Returns:
+            (neue_fragen, pruefung_pro_mandant)
+        """
         mandanten = self.ds.hole_mandanten() or {}
         if not isinstance(mandanten, dict):
             mandanten = {}
@@ -231,45 +314,56 @@ class ProaktiverBot:
             aufgaben = {}
 
         neue_fragen: List[Dict] = []
+        pruefung: List[Dict] = []
         for name, m in mandanten.items():
             if not name or not isinstance(m, dict):
                 continue
+            bestehende = {f.get("typ") for f in self.fragen_fuer_mandant(name, nur_offen=True)}
+            diag = self._diagnose_mandant(name, m, aufgaben, bestehende)
             try:
-                fragen = self._analysiere_mandant(name, m, aufgaben)
+                fragen = self._analysiere_mandant(name, m, aufgaben, bestehende)
                 neue_fragen.extend(fragen)
+                diag["neu_angelegt"] = [f.get("typ") for f in fragen]
             except Exception as e:
                 log.warning("Bot-Analyse Fehler für %s: %s", name, e, exc_info=True)
+                diag["fehler"] = str(e)
+                diag["neu_angelegt"] = []
+            pruefung.append(diag)
 
         log.info(
             "Bot-Analyse: %s neue Fragen für %s Mandanten",
             len(neue_fragen),
             len(mandanten),
         )
-        return neue_fragen
+        return neue_fragen, pruefung
 
     def _analysiere_mandant(
-        self, name: str, m: Dict, alle_aufgaben: Dict
+        self,
+        name: str,
+        m: Dict,
+        alle_aufgaben: Dict,
+        bestehende: Optional[set] = None,
     ) -> List[Dict]:
         neue_fragen: List[Dict] = []
-        bestehende = {f.get("typ") for f in self.fragen_fuer_mandant(name, nur_offen=True)}
-        jetzt = datetime.now()
-        heute = jetzt.strftime("%Y-%m-%d")
+        if bestehende is None:
+            bestehende = {f.get("typ") for f in self.fragen_fuer_mandant(name, nur_offen=True)}
+        heute = datetime.now().strftime("%Y-%m-%d")
 
         umsatz = _safe_float(m.get("umsatz"), 0.0)
-        if umsatz > 0:
-            letzter_monatsumsatz = _safe_float(m.get("letzter_monatsumsatz"), umsatz / 12.0)
+        monats_raw = _optional_float(m.get("letzter_monatsumsatz"))
+        if umsatz > 0 and monats_raw is not None:
             erwarteter_monat = umsatz / 12.0
-
             if (
-                letzter_monatsumsatz > 0
-                and letzter_monatsumsatz < erwarteter_monat * 0.6
+                monats_raw > 0
+                and erwarteter_monat > 0
+                and monats_raw < erwarteter_monat * UMSATZ_ANOMALIE_FAKTOR
                 and "umsatz_anomalie" not in bestehende
             ):
-                differenz = round(erwarteter_monat - letzter_monatsumsatz, 2)
+                differenz = round(erwarteter_monat - monats_raw, 2)
                 f = self.frage_stellen(
                     mandant=name,
                     frage_text=(
-                        f"Ihre Einnahmen waren diesen Monat €{letzter_monatsumsatz:,.2f} — "
+                        f"Ihre Einnahmen waren diesen Monat €{monats_raw:,.2f} — "
                         f"das ist €{differenz:,.2f} weniger als erwartet. "
                         f"Gibt es einen besonderen Grund dafür?"
                     ),
@@ -286,8 +380,8 @@ class ProaktiverBot:
                 )
                 neue_fragen.append(f)
 
-        fehlende_docs = _as_str_list(m.get("fehlende_dokumente_liste"))
-        if len(fehlende_docs) >= 3 and "beleg_fehlend" not in bestehende:
+        fehlende_docs = _fehlende_docs_aus_mandant(m)
+        if len(fehlende_docs) >= MIN_FEHLENDE_BELEGE and "beleg_fehlend" not in bestehende:
             docs_str = ", ".join(fehlende_docs[:3])
             f = self.frage_stellen(
                 mandant=name,
@@ -308,20 +402,15 @@ class ProaktiverBot:
             )
             neue_fragen.append(f)
 
-        try:
-            tage_ohne_antwort = _safe_int(self.ds.berechne_tage_ohne_antwort(name), 0)
-        except Exception as e:
-            log.warning("tage_ohne_antwort für %s: %s", name, e)
-            tage_ohne_antwort = 0
-
-        if tage_ohne_antwort >= 14 and "sonstiges" not in bestehende:
+        tage_ohne_antwort = self._tage_ohne_antwort(name)
+        if tage_ohne_antwort >= MIN_TAGE_OHNE_ANTWORT and "kontakt_erinnerung" not in bestehende:
             f = self.frage_stellen(
                 mandant=name,
                 frage_text=(
                     f"Wir haben seit {tage_ohne_antwort} Tagen nichts von Ihnen gehört. "
                     f"Läuft bei Ihnen alles gut?"
                 ),
-                frage_typ="sonstiges",
+                frage_typ="kontakt_erinnerung",
                 antwort_optionen=[
                     "Ja, alles in Ordnung",
                     "Ich wollte mich melden — bitte kurz anrufen",
@@ -365,12 +454,12 @@ class ProaktiverBot:
             and not aufgabe_ist_erledigt(a)
             and str(a.get("frist") or "9999") < heute
         ]
-        if len(ueberfaellige) >= 2 and "frist_erinnerung" not in bestehende:
+        if len(ueberfaellige) >= MIN_UEBERFAELLIGE_FRISTEN and "frist_erinnerung" not in bestehende:
             erste = ueberfaellige[0].get("beschreibung", "") or "Aufgabe"
             f = self.frage_stellen(
                 mandant=name,
                 frage_text=(
-                    f"Sie haben {len(ueberfaellige)} überfällige Aufgaben in unserer Kanzlei. "
+                    f"Sie haben {len(ueberfaellige)} überfällige Aufgabe(n) in unserer Kanzlei. "
                     f"Die dringendste: '{erste}'. Wie möchten Sie vorgehen?"
                 ),
                 frage_typ="frist_erinnerung",

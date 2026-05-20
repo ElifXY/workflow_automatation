@@ -198,7 +198,7 @@ class OnboardingService:
         try:
             from core.proaktiver_bot import ProaktiverBot
             bot    = ProaktiverBot(self.ds)
-            fragen = bot.analysiere_alle_mandanten()
+            fragen, _pruefung = bot.analysiere_alle_mandanten()
             schritte.append(f"✓ Bot-Analyse: {len(fragen)} proaktive Fragen erstellt")
         except Exception as e:
             fehler.append(f"Bot: {e}")

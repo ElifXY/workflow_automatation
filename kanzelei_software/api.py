@@ -8010,7 +8010,7 @@ def portal_mandant_status(name: str, _user: dict = Depends(get_current_user)):
     get_mandant_or_404(name, store)
     uploads = [u for u in store.portal_liste("upload") if u.get("mandant") == name]
     signs = [u for u in store.portal_liste("unterschrift") if u.get("mandant") == name]
-    bot_fragen = _kv_get(store, "__bot_fragen_v1", {})
+    bot_fragen = store.bot_fragen_liste()
     if not isinstance(bot_fragen, dict):
         bot_fragen = {}
     fragen = [f for f in bot_fragen.values() if f.get("mandant") == name]
@@ -8480,12 +8480,13 @@ def bot_analyse(_user: dict = Depends(get_current_user)):
     store = get_ds(_user)
     try:
         bot = _get_bot(store)
-        fragen = bot.analysiere_alle_mandanten()
+        fragen, pruefung = bot.analysiere_alle_mandanten()
         log.info(f"Bot-Analyse: {len(fragen)} neue Fragen")
         return ok_compat({
             "status":       "fertig",
             "neue_fragen":  len(fragen),
             "fragen":       fragen[:50],
+            "pruefung":     pruefung,
             "timestamp":    datetime.now().isoformat(),
         })
     except Exception as e:
@@ -9296,7 +9297,7 @@ async def websocket_live(ws: WebSocket, token: Optional[str] = Query(None)):
                     zeiterfassung = {"laufend": {}}
                 laufend = list((zeiterfassung.get("laufend") or {}).keys())
 
-                bot_fragen = _kv_get(store, "__bot_fragen_v1", {})
+                bot_fragen = store.bot_fragen_liste()
                 if not isinstance(bot_fragen, dict):
                     bot_fragen = {}
                 bot_offen = sum(1 for f in bot_fragen.values() if f.get("status") == "offen")
