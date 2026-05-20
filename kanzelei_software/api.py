@@ -8547,6 +8547,23 @@ class LohnMitarbeiterCreate(BaseModel):
     iban:          str   = ""
     eintritt:      Optional[str] = None
     mandanten:     Optional[List[str]] = None
+    sozialversicherung: bool = True
+
+
+class LohnMitarbeiterUpdate(BaseModel):
+    mandant:       Optional[str] = None
+    name:          Optional[str] = None
+    brutto_monat:  Optional[float] = None
+    steuer_klasse: Optional[int] = None
+    urlaubstage:   Optional[int] = None
+    wochenstunden: Optional[float] = None
+    steuer_id:     Optional[str] = None
+    sv_nr:         Optional[str] = None
+    iban:          Optional[str] = None
+    eintritt:      Optional[str] = None
+    mandanten:     Optional[List[str]] = None
+    sozialversicherung: Optional[bool] = None
+    aktiv:         Optional[bool] = None
 
 class ZeitdatenImport(BaseModel):
     arbeitstage:    int   = 21
@@ -8573,6 +8590,33 @@ def lohn_mitarbeiter_neu(data: LohnMitarbeiterCreate, _user: dict = Depends(get_
 def lohn_mitarbeiter_liste(mandant: Optional[str] = Query(None),
     _user: dict = Depends(get_current_user)):
     return {"mitarbeiter": _get_lohn(get_ds(_user)).mitarbeiter_liste(mandant)}
+
+
+@app.get("/lohn/mitarbeiter/{ma_id}", tags=["Lohn"], summary="Mitarbeiter-Details")
+def lohn_mitarbeiter_detail(ma_id: str, _user: dict = Depends(get_current_user)):
+    try:
+        return _get_lohn(get_ds(_user)).mitarbeiter_holen(ma_id)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.patch("/lohn/mitarbeiter/{ma_id}", tags=["Lohn"], summary="Mitarbeiter bearbeiten")
+def lohn_mitarbeiter_update(
+    ma_id: str,
+    data: LohnMitarbeiterUpdate,
+    _user: dict = Depends(get_current_user),
+):
+    store = get_ds(_user)
+    patch = data.dict(exclude_unset=True)
+    if patch.get("mandant"):
+        get_mandant_or_404(patch["mandant"], store)
+    if patch.get("mandanten"):
+        for m in patch["mandanten"]:
+            get_mandant_or_404(m, store)
+    try:
+        return _get_lohn(store).mitarbeiter_aktualisieren(ma_id, **patch)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 @app.post("/lohn/zeitdaten/{ma_id}/{monat}", tags=["Lohn"],
           summary="Zeitdaten importieren (Krankheit, Urlaub, Überstunden)")

@@ -1030,6 +1030,12 @@ export const regelnVerfuegbar    = () => apiFetch("/regeln/verfuegbare-trigger")
 export const lohnMitarbeiterNeu  = (data) =>
   apiFetch("/lohn/mitarbeiter", { method: "POST", body: JSON.stringify(data) });
 
+export const lohnMitarbeiterUpdate = (maId, data) =>
+  apiFetch(`/lohn/mitarbeiter/${encodeURIComponent(maId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+
 export const lohnMitarbeiter     = (mandant = null) =>
   apiFetch(`/lohn/mitarbeiter${mandant ? `?mandant=${encodeURIComponent(mandant)}` : ""}`);
 

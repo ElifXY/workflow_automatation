@@ -451,14 +451,28 @@ const BotTab = () => {
 // TAB: LOHNABRECHNUNG
 // ══════════════════════════════════════════════════════════
 
+const leerMaForm = () => ({
+  mandant: "",
+  mandanten_zusatz: [],
+  name: "",
+  brutto_monat: 0,
+  steuer_klasse: 1,
+  wochenstunden: 40,
+  urlaubstage: 20,
+  steuer_id: "",
+  sv_nr: "",
+  iban: "",
+  sozialversicherung: true,
+});
+
 const LohnTab = () => {
   const [mitarbeiter, setMitarbeiter] = useState([]);
   const [abrechnungen,setAbrechnungen]= useState([]);
   const [mandanten,   setMandanten]   = useState([]);
   const [toast,       setToast]       = useState(null);
-  const [showNeu,     setShowNeu]     = useState(false);
-  const [form,        setForm]        = useState({mandant:"",mandanten_zusatz:[],name:"",brutto_monat:0,
-                                                    steuer_klasse:1,wochenstunden:40});
+  const [showForm,    setShowForm]    = useState(false);
+  const [editId,      setEditId]      = useState(null);
+  const [form,        setForm]        = useState(leerMaForm);
   const [filterMandant, setFilterMandant] = useState("");
   const [monat,       setMonat]       = useState(new Date().toISOString().slice(0,7));
 
@@ -486,31 +500,84 @@ const LohnTab = () => {
 
   useEffect(()=>{laden();},[laden]);
 
-  const neuerMitarbeiter = async () => {
+  const formPayload = () => {
+    const mandantenListe = [
+      form.mandant.trim(),
+      ...(form.mandanten_zusatz || []).filter((m) => m && m !== form.mandant),
+    ];
+    return {
+      mandant: form.mandant.trim(),
+      mandanten: mandantenListe,
+      name: form.name.trim(),
+      brutto_monat: form.brutto_monat,
+      steuer_klasse: form.steuer_klasse,
+      wochenstunden: form.wochenstunden,
+      urlaubstage: form.urlaubstage,
+      steuer_id: form.steuer_id?.trim() || "",
+      sv_nr: form.sv_nr?.trim() || "",
+      iban: form.iban?.trim() || "",
+      sozialversicherung: !!form.sozialversicherung,
+    };
+  };
+
+  const oeffneNeu = () => {
+    setEditId(null);
+    setForm(leerMaForm());
+    setShowForm(true);
+  };
+
+  const oeffneBearbeiten = (ma) => {
+    const liste = (ma.mandanten && ma.mandanten.length) ? ma.mandanten : [ma.mandant];
+    const haupt = ma.mandant || liste[0] || "";
+    setEditId(ma.id);
+    setForm({
+      mandant: haupt,
+      mandanten_zusatz: liste.filter((m) => m !== haupt),
+      name: ma.name || "",
+      brutto_monat: ma.brutto_monat ?? 0,
+      steuer_klasse: ma.steuer_klasse ?? 1,
+      wochenstunden: ma.wochenstunden ?? 40,
+      urlaubstage: ma.urlaubstage ?? 20,
+      steuer_id: ma.steuer_id || "",
+      sv_nr: ma.sv_nr || "",
+      iban: ma.iban || "",
+      sozialversicherung: ma.sozialversicherung !== false,
+    });
+    setShowForm(true);
+  };
+
+  const schliesseForm = () => {
+    setShowForm(false);
+    setEditId(null);
+    setForm(leerMaForm());
+  };
+
+  const speichereMitarbeiter = async () => {
     if (!form.mandant?.trim()) {
       showToast("Bitte Haupt-Mandant wählen");
       return;
     }
+    if (!form.name?.trim()) {
+      showToast("Bitte Namen eingeben");
+      return;
+    }
     try {
-      const mandanten = [
-        form.mandant.trim(),
-        ...(form.mandanten_zusatz || []).filter((m) => m && m !== form.mandant),
-      ];
-      await api("/lohn/mitarbeiter", {
-        method: "POST",
-        body: JSON.stringify({
-          mandant: form.mandant.trim(),
-          mandanten,
-          name: form.name,
-          brutto_monat: form.brutto_monat,
-          steuer_klasse: form.steuer_klasse,
-          wochenstunden: form.wochenstunden,
-        }),
-      });
-      showToast("✓ Mitarbeiter angelegt");
-      setShowNeu(false);
+      const body = formPayload();
+      if (editId) {
+        await api(`/lohn/mitarbeiter/${encodeURIComponent(editId)}`, {
+          method: "PATCH",
+          body: JSON.stringify(body),
+        });
+        showToast("✓ Mitarbeiter gespeichert");
+      } else {
+        await api("/lohn/mitarbeiter", { method: "POST", body: JSON.stringify(body) });
+        showToast("✓ Mitarbeiter angelegt");
+      }
+      schliesseForm();
       laden();
-    } catch(e){showToast(e.message);}
+    } catch (e) {
+      showToast(e.message);
+    }
   };
 
   const abrechnen = async (maId) => {
@@ -579,17 +646,18 @@ const LohnTab = () => {
           <input type="month" value={monat} onChange={e=>setMonat(e.target.value)}
             style={{...inp(),width:"auto"}}/>
         </div>
-        <Btn onClick={()=>setShowNeu(!showNeu)} variant="primary" size="sm">
-          + Mitarbeiter anlegen
+        <Btn onClick={showForm ? schliesseForm : oeffneNeu} variant="primary" size="sm">
+          {showForm ? "Abbrechen" : "+ Mitarbeiter anlegen"}
         </Btn>
       </div>
 
-      {/* Neuer Mitarbeiter Form */}
-      {showNeu && (
+      {showForm && (
         <div style={{background:"var(--bg2)",border:`1px solid var(--border2)`,
           borderRadius:14,padding:20,marginBottom:20}}>
           <div style={{fontFamily:"'DM Serif Display',serif",fontSize:17,
-            color:"var(--accent)",marginBottom:14}}>Neuer Mitarbeiter</div>
+            color:"var(--accent)",marginBottom:14}}>
+            {editId ? "Mitarbeiter bearbeiten" : "Neuer Mitarbeiter"}
+          </div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:12}}>
             <div style={{gridColumn:"1 / -1"}}>
               <div style={{fontSize:11,color:"var(--text3)",marginBottom:4}}>Haupt-Mandant (Lohnbuchhaltung) *</div>
@@ -645,10 +713,38 @@ const LohnTab = () => {
                 onChange={v=>setForm(f=>({...f,wochenstunden:v}))}
                 style={inp()}/>
             </div>
+            <div>
+              <div style={{fontSize:11,color:"var(--text3)",marginBottom:4}}>Urlaubstage/Jahr</div>
+              <input type="number" min={0} max={40} value={form.urlaubstage}
+                onChange={e=>setForm(f=>({...f,urlaubstage:parseInt(e.target.value,10)||0}))}
+                style={inp()}/>
+            </div>
+            <div>
+              <div style={{fontSize:11,color:"var(--text3)",marginBottom:4}}>Steuer-ID</div>
+              <input value={form.steuer_id} onChange={e=>setForm(f=>({...f,steuer_id:e.target.value}))}
+                placeholder="optional" style={inp()}/>
+            </div>
+            <div>
+              <div style={{fontSize:11,color:"var(--text3)",marginBottom:4}}>SV-Nr.</div>
+              <input value={form.sv_nr} onChange={e=>setForm(f=>({...f,sv_nr:e.target.value}))}
+                placeholder="optional" style={inp()}/>
+            </div>
+            <div>
+              <div style={{fontSize:11,color:"var(--text3)",marginBottom:4}}>IBAN</div>
+              <input value={form.iban} onChange={e=>setForm(f=>({...f,iban:e.target.value}))}
+                placeholder="optional" style={inp()}/>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:8,paddingTop:22}}>
+              <input type="checkbox" id="ma-sv" checked={form.sozialversicherung}
+                onChange={e=>setForm(f=>({...f,sozialversicherung:e.target.checked}))}/>
+              <label htmlFor="ma-sv" style={{fontSize:12,color:"var(--text2)"}}>Sozialversicherung</label>
+            </div>
           </div>
           <div style={{display:"flex",gap:8}}>
-            <Btn onClick={neuerMitarbeiter} variant="primary" size="sm">Speichern</Btn>
-            <Btn onClick={()=>setShowNeu(false)} variant="ghost" size="sm">Abbrechen</Btn>
+            <Btn onClick={speichereMitarbeiter} variant="primary" size="sm">
+              {editId ? "Änderungen speichern" : "Speichern"}
+            </Btn>
+            <Btn onClick={schliesseForm} variant="ghost" size="sm">Abbrechen</Btn>
           </div>
         </div>
       )}
@@ -696,7 +792,10 @@ const LohnTab = () => {
                       </div>
                     )}
                   </div>
-                  <div style={{display:"flex",gap:6,flexShrink:0}}>
+                  <div style={{display:"flex",gap:6,flexShrink:0,flexWrap:"wrap",justifyContent:"flex-end"}}>
+                    <Btn size="xs" variant="ghost" onClick={()=>oeffneBearbeiten(ma)}>
+                      Bearbeiten
+                    </Btn>
                     {!ab ? (
                       <Btn size="xs" variant="primary" onClick={()=>abrechnen(ma.id)}>
                         Abrechnen

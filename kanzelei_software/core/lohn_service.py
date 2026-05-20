@@ -123,6 +123,83 @@ class LohnService:
             liste = [ma["mandant"]]
         return mandant in liste
 
+    def mitarbeiter_holen(self, ma_id: str) -> Dict:
+        data = self._lohn_daten()
+        ma = data["lohnabrechnung"]["mitarbeiter"].get(ma_id)
+        if not ma:
+            raise ValueError(f"Mitarbeiter {ma_id} nicht gefunden")
+        return dict(ma)
+
+    def mitarbeiter_aktualisieren(
+        self,
+        ma_id: str,
+        *,
+        mandant: Optional[str] = None,
+        mandanten: Optional[List[str]] = None,
+        name: Optional[str] = None,
+        brutto_monat: Optional[float] = None,
+        steuer_klasse: Optional[int] = None,
+        sozialversicherung: Optional[bool] = None,
+        urlaubstage: Optional[int] = None,
+        wochenstunden: Optional[float] = None,
+        steuer_id: Optional[str] = None,
+        sv_nr: Optional[str] = None,
+        iban: Optional[str] = None,
+        eintritt: Optional[str] = None,
+        aktiv: Optional[bool] = None,
+    ) -> Dict:
+        """Bestehenden Mitarbeiter bearbeiten."""
+        data = self._lohn_daten()
+        ma = data["lohnabrechnung"]["mitarbeiter"].get(ma_id)
+        if not ma:
+            raise ValueError(f"Mitarbeiter {ma_id} nicht gefunden")
+        ma = dict(ma)
+
+        if mandant is not None or mandanten is not None:
+            basis = (mandant or ma.get("mandant") or "").strip()
+            mandanten_liste = self._mandanten_liste(basis, mandanten)
+            if not mandanten_liste:
+                raise ValueError("Mindestens ein Mandant erforderlich")
+            ma["mandant"] = mandanten_liste[0]
+            ma["mandanten"] = mandanten_liste
+
+        if name is not None:
+            n = (name or "").strip()
+            if not n:
+                raise ValueError("Name erforderlich")
+            ma["name"] = n
+        if brutto_monat is not None:
+            if float(brutto_monat) < 0:
+                raise ValueError("Bruttogehalt ungültig")
+            ma["brutto_monat"] = float(brutto_monat)
+        if steuer_klasse is not None:
+            sk = int(steuer_klasse)
+            if sk not in LOHNSTEUER_KLASSEN:
+                raise ValueError("Steuerklasse muss 1–6 sein")
+            ma["steuer_klasse"] = sk
+        if sozialversicherung is not None:
+            ma["sozialversicherung"] = bool(sozialversicherung)
+        if urlaubstage is not None:
+            ma["urlaubstage"] = int(urlaubstage)
+        if wochenstunden is not None:
+            ma["wochenstunden"] = float(wochenstunden)
+        if steuer_id is not None:
+            ma["steuer_id"] = steuer_id.strip()
+        if sv_nr is not None:
+            ma["sv_nr"] = sv_nr.strip()
+        if iban is not None:
+            ma["iban"] = iban.strip()
+        if eintritt is not None:
+            ma["eintritt"] = eintritt
+        if aktiv is not None:
+            ma["aktiv"] = bool(aktiv)
+
+        ma["geaendert_am"] = datetime.now().isoformat()
+        data["lohnabrechnung"]["mitarbeiter"][ma_id] = ma
+        self.ds.lohnabrechnung_speichern(data["lohnabrechnung"])
+        self.ds.log_eintrag(f"LOHN_MITARBEITER_UPDATE | {ma.get('mandant')} | {ma.get('name')}")
+        return ma
+
     def mitarbeiter_liste(self, mandant: str = None) -> List[Dict]:
         data = self._lohn_daten()
         ma   = [m for m in data["lohnabrechnung"]["mitarbeiter"].values() if m.get("aktiv", True)]
