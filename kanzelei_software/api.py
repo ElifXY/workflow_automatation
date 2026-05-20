@@ -8618,6 +8618,19 @@ def lohn_mitarbeiter_update(
     except ValueError as e:
         raise HTTPException(400, str(e))
 
+
+@app.delete("/lohn/mitarbeiter/{ma_id}", tags=["Lohn"], summary="Mitarbeiter löschen (deaktivieren)")
+def lohn_mitarbeiter_loeschen(
+    ma_id: str,
+    endgueltig: bool = Query(False, description="Statt Deaktivierung komplett aus Daten entfernen"),
+    _user: dict = Depends(get_current_user),
+):
+    try:
+        _get_lohn(get_ds(_user)).mitarbeiter_loeschen(ma_id, endgueltig=endgueltig)
+        return ok_compat({"status": "geloescht", "endgueltig": endgueltig})
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
 @app.post("/lohn/zeitdaten/{ma_id}/{monat}", tags=["Lohn"],
           summary="Zeitdaten importieren (Krankheit, Urlaub, Überstunden)")
 def lohn_zeitdaten(ma_id: str, monat: str, data: ZeitdatenImport,

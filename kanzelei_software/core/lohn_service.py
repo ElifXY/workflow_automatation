@@ -200,6 +200,28 @@ class LohnService:
         self.ds.log_eintrag(f"LOHN_MITARBEITER_UPDATE | {ma.get('mandant')} | {ma.get('name')}")
         return ma
 
+    def mitarbeiter_loeschen(self, ma_id: str, *, endgueltig: bool = False) -> bool:
+        """Mitarbeiter deaktivieren (Standard) oder endgültig entfernen."""
+        data = self._lohn_daten()
+        ma = data["lohnabrechnung"]["mitarbeiter"].get(ma_id)
+        if not ma:
+            raise ValueError(f"Mitarbeiter {ma_id} nicht gefunden")
+        name = ma.get("name", ma_id)
+        mandant = ma.get("mandant", "")
+        if endgueltig:
+            del data["lohnabrechnung"]["mitarbeiter"][ma_id]
+            for key in list(data["lohnabrechnung"].get("zeitdaten", {}).keys()):
+                if key.startswith(f"{ma_id}_"):
+                    del data["lohnabrechnung"]["zeitdaten"][key]
+        else:
+            ma = dict(ma)
+            ma["aktiv"] = False
+            ma["geaendert_am"] = datetime.now().isoformat()
+            data["lohnabrechnung"]["mitarbeiter"][ma_id] = ma
+        self.ds.lohnabrechnung_speichern(data["lohnabrechnung"])
+        self.ds.log_eintrag(f"LOHN_MITARBEITER_DELETE | {mandant} | {name} | endgueltig={endgueltig}")
+        return True
+
     def mitarbeiter_liste(self, mandant: str = None) -> List[Dict]:
         data = self._lohn_daten()
         ma   = [m for m in data["lohnabrechnung"]["mitarbeiter"].values() if m.get("aktiv", True)]

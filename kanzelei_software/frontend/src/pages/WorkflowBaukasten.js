@@ -552,6 +552,18 @@ const LohnTab = () => {
     setForm(leerMaForm());
   };
 
+  const loescheMitarbeiter = async (ma) => {
+    if (!window.confirm(`Mitarbeiter „${ma.name}“ wirklich löschen?`)) return;
+    try {
+      await api(`/lohn/mitarbeiter/${encodeURIComponent(ma.id)}`, { method: "DELETE" });
+      showToast("✓ Mitarbeiter gelöscht");
+      if (editId === ma.id) schliesseForm();
+      laden();
+    } catch (e) {
+      showToast(e.message);
+    }
+  };
+
   const speichereMitarbeiter = async () => {
     if (!form.mandant?.trim()) {
       showToast("Bitte Haupt-Mandant wählen");

@@ -1036,6 +1036,12 @@ export const lohnMitarbeiterUpdate = (maId, data) =>
     body: JSON.stringify(data),
   });
 
+export const lohnMitarbeiterLoeschen = (maId, endgueltig = false) =>
+  apiFetch(
+    `/lohn/mitarbeiter/${encodeURIComponent(maId)}${endgueltig ? "?endgueltig=true" : ""}`,
+    { method: "DELETE" }
+  );
+
 export const lohnMitarbeiter     = (mandant = null) =>
   apiFetch(`/lohn/mitarbeiter${mandant ? `?mandant=${encodeURIComponent(mandant)}` : ""}`);
 
