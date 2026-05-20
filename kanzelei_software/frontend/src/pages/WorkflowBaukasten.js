@@ -18,7 +18,7 @@ const api  = async (url, opts={}) => {
     ...(opts.headers||{}),
   }});
   const d = await r.json().catch(()=>({}));
-  if(!r.ok) throw new Error(d.detail||`${r.status}`);
+  if(!r.ok) throw new Error(d.detail||d.error||d.message||`${r.status}`);
   return d;
 };
 
@@ -553,14 +553,18 @@ const LohnTab = () => {
   };
 
   const loescheMitarbeiter = async (ma) => {
-    if (!window.confirm(`Mitarbeiter „${ma.name}“ wirklich löschen?`)) return;
+    if (!ma?.id) {
+      showToast("Mitarbeiter-ID fehlt");
+      return;
+    }
+    if (!window.confirm(`Mitarbeiter „${ma.name || ma.id}“ wirklich löschen?`)) return;
     try {
-      await api(`/lohn/mitarbeiter/${encodeURIComponent(ma.id)}`, { method: "DELETE" });
-      showToast("✓ Mitarbeiter gelöscht");
+      const d = await api(`/lohn/mitarbeiter/${encodeURIComponent(ma.id)}`, { method: "DELETE" });
+      showToast(d?.status === "geloescht" ? "✓ Mitarbeiter gelöscht" : "✓ Entfernt");
       if (editId === ma.id) schliesseForm();
       laden();
     } catch (e) {
-      showToast(e.message);
+      showToast(e.message || "Löschen fehlgeschlagen");
     }
   };
 
@@ -752,11 +756,23 @@ const LohnTab = () => {
               <label htmlFor="ma-sv" style={{fontSize:12,color:"var(--text2)"}}>Sozialversicherung</label>
             </div>
           </div>
-          <div style={{display:"flex",gap:8}}>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
             <Btn onClick={speichereMitarbeiter} variant="primary" size="sm">
               {editId ? "Änderungen speichern" : "Speichern"}
             </Btn>
             <Btn onClick={schliesseForm} variant="ghost" size="sm">Abbrechen</Btn>
+            {editId ? (
+              <Btn
+                size="sm"
+                variant="danger"
+                onClick={() => {
+                  const ma = mitarbeiter.find((m) => m.id === editId);
+                  if (ma) loescheMitarbeiter(ma);
+                }}
+              >
+                🗑 Mitarbeiter löschen
+              </Btn>
+            ) : null}
           </div>
         </div>
       )}
@@ -788,25 +804,33 @@ const LohnTab = () => {
                 <div key={ma.id} style={{
                   background:"var(--bg2)",border:`1px solid var(--border)`,
                   borderRadius:12,padding:"12px 16px",
-                  display:"flex",alignItems:"center",gap:14,
+                  display:"flex",flexDirection:"column",gap:10,
                   animation:`fadeUp 0.3s ease ${i*30}ms both`,
                 }}>
-                  <div style={{fontSize:24}}>👤</div>
-                  <div style={{flex:1}}>
-                    <div style={{fontWeight:600,color:"var(--text)"}}>{ma.name}</div>
-                    <div style={{fontSize:12,color:"var(--text3)"}}>
-                      {(ma.mandanten&&ma.mandanten.length>1)?ma.mandanten.join(" · "):ma.mandant}
-                      {" "}· €{ma.brutto_monat.toLocaleString("de-DE")}/Monat brutto · Kl. {ma.steuer_klasse}
-                    </div>
-                    {ab && (
-                      <div style={{fontSize:12,color:"var(--green)",marginTop:2}}>
-                        ✓ {monat}: Netto €{ab.netto.toLocaleString("de-DE")}
+                  <div style={{display:"flex",alignItems:"flex-start",gap:12,minWidth:0}}>
+                    <div style={{fontSize:24,flexShrink:0}}>👤</div>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontWeight:600,color:"var(--text)"}}>{ma.name}</div>
+                      <div style={{fontSize:12,color:"var(--text3)",lineHeight:1.45}}>
+                        {(ma.mandanten&&ma.mandanten.length>1)?ma.mandanten.join(" · "):ma.mandant}
+                        {" "}· €{ma.brutto_monat.toLocaleString("de-DE")}/Monat brutto · Kl. {ma.steuer_klasse}
                       </div>
-                    )}
+                      {ab && (
+                        <div style={{fontSize:12,color:"var(--green)",marginTop:2}}>
+                          ✓ {monat}: Netto €{ab.netto.toLocaleString("de-DE")}
+                        </div>
+                      )}
+                    </div>
                   </div>
-                  <div style={{display:"flex",gap:6,flexShrink:0,flexWrap:"wrap",justifyContent:"flex-end"}}>
+                  <div style={{
+                    display:"flex",gap:6,flexWrap:"wrap",
+                    paddingTop:8,borderTop:"1px solid var(--border)",
+                  }}>
                     <Btn size="xs" variant="ghost" onClick={()=>oeffneBearbeiten(ma)}>
-                      Bearbeiten
+                      ✏ Bearbeiten
+                    </Btn>
+                    <Btn size="xs" variant="danger" onClick={()=>loescheMitarbeiter(ma)}>
+                      🗑 Löschen
                     </Btn>
                     {!ab ? (
                       <Btn size="xs" variant="primary" onClick={()=>abrechnen(ma.id)}>
