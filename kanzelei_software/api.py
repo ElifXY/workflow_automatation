@@ -8039,6 +8039,10 @@ class PortalUnterschriftAnfrage(BaseModel):
     betreff: str = Field(default="Bitte unterzeichnen", max_length=200)
     hinweis: str = Field(default="", max_length=2000)
     gueltig_tage: int = Field(default=30, ge=1, le=365)
+    portal_sichtbar: bool = Field(
+        default=True,
+        description="False = nur Kanzlei-Suite, nicht im Mandantenportal",
+    )
 
 
 class PortalAntwortBody(BaseModel):
@@ -8079,6 +8083,7 @@ def portal_mandant_unterschrift_anfragen(
         data.betreff,
         data.hinweis,
         data.gueltig_tage,
+        portal_sichtbar=bool(data.portal_sichtbar),
     )
     return ok_compat(result)
 
@@ -8115,12 +8120,25 @@ class PortalChatAufgabe(BaseModel):
     frist: str = Field(..., example="2026-06-30")
     hinweis: str = Field(default="", max_length=2000)
     prioritaet: Optional[str] = "normal"
+    portal_sichtbar: bool = Field(default=True, description="Im Mandantenportal sichtbar")
 
 
 class PortalChatDokument(BaseModel):
     dokument_name: str = Field(..., min_length=2, max_length=200)
     beschreibung: str = Field(default="", max_length=2000)
     frist: Optional[str] = None
+    portal_sichtbar: bool = Field(default=True, description="Im Mandantenportal sichtbar")
+
+
+@app.get("/portal/mandant/chat/inbox", tags=["Portal-Chat"],
+         summary="Alle Mandanten-Chats (Übersicht, WhatsApp-Liste)")
+def portal_mandant_chat_inbox(_user: dict = Depends(get_current_user)):
+    from modules import portal_chat as pc
+
+    store = get_ds(_user)
+    namen = sorted((store.hole_mandanten() or {}).keys())
+    inbox = pc.list_inbox(store, namen)
+    return ok_compat({"inbox": inbox, "anzahl": len(inbox)})
 
 
 @app.get("/portal/mandant/{name}/chat", tags=["Portal-Chat"],
@@ -8167,19 +8185,26 @@ def portal_mandant_chat_aufgabe(
     store = get_ds(_user)
     get_mandant_or_404(name, store)
     svc = AufgabenService(store)
+    sichtbar = bool(data.portal_sichtbar)
     created = svc.create(
         name,
         AufgabeCreate(
             beschreibung=data.beschreibung,
             frist=data.frist,
             prioritaet=data.prioritaet,
-            portal_sichtbar=True,
+            portal_sichtbar=sichtbar,
         ),
-        portal_sichtbar=True,
+        portal_sichtbar=sichtbar,
     )
     aid = created.get("id")
     msg = pc.chat_aufgabe(
-        store, name, aid, data.beschreibung, data.frist, hinweis=data.hinweis.strip()
+        store,
+        name,
+        aid,
+        data.beschreibung,
+        data.frist,
+        hinweis=data.hinweis.strip(),
+        portal_sichtbar=sichtbar,
     )
     return ok_compat({"status": "erstellt", "aufgabe_id": aid, "nachricht": msg})
 
@@ -8201,7 +8226,12 @@ def portal_mandant_chat_dokument(
         m["fehlende_dokumente_liste"] = fehlende
         store.mandant_speichern(name, m)
     msg = pc.chat_dokument_anfrage(
-        store, name, data.dokument_name, data.beschreibung, data.frist or ""
+        store,
+        name,
+        data.dokument_name,
+        data.beschreibung,
+        data.frist or "",
+        portal_sichtbar=bool(data.portal_sichtbar),
     )
     store.log_eintrag(f"PORTAL_CHAT_DOK | {name} | {data.dokument_name}")
     return ok_compat({"status": "angefordert", "nachricht": msg})
@@ -8228,6 +8258,7 @@ def portal_mandant_chat_unterschrift(
         data.betreff,
         data.hinweis,
         data.gueltig_tage,
+        portal_sichtbar=bool(data.portal_sichtbar),
     )
     return ok_compat(result)
 
@@ -8238,6 +8269,10 @@ class PortalChatUpload(BaseModel):
     dateityp: str = Field(default="application/pdf")
     beschreibung: str = Field(default="", max_length=2000)
     kategorie: str = Field(default="Sonstiges", max_length=80)
+    portal_sichtbar: bool = Field(
+        default=True,
+        description="Im Mandantenportal für den Mandanten sichtbar",
+    )
 
 
 @app.post("/portal/mandant/{name}/chat/upload", tags=["Portal-Chat"],
@@ -8261,8 +8296,11 @@ def portal_mandant_chat_upload(
             kategorie=data.kategorie or "Sonstiges",
         ),
         upload_von="kanzlei",
+        portal_sichtbar=bool(data.portal_sichtbar),
     )
-    store.log_eintrag(f"PORTAL_CHAT_UPLOAD_KANZLEI | {name} | {data.dateiname[:80]}")
+    store.log_eintrag(
+        f"PORTAL_CHAT_UPLOAD_KANZLEI | {name} | {data.dateiname[:80]} | sichtbar={data.portal_sichtbar}"
+    )
     return ok_compat(result)
 
 

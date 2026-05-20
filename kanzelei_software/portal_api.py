@@ -352,7 +352,13 @@ def fehlende_dokumente(mandant: str = Depends(hole_mandant)):
 # DOKUMENT-UPLOAD
 # ============================================================
 
-def _verarbeite_upload(mandant: str, data: DokumentUpload, *, upload_von: str = "mandant") -> Dict:
+def _verarbeite_upload(
+    mandant: str,
+    data: DokumentUpload,
+    *,
+    upload_von: str = "mandant",
+    portal_sichtbar: bool = True,
+) -> Dict:
     store = _store_for_mandant(mandant)
     max_mb = int(setting_holen("portal_upload_max_mb") or UPLOAD_MAX_MB or 20)
     if bool(setting_holen("portal_projektnummer_pflicht")) and not str(data.projektnummer or "").strip():
@@ -388,6 +394,7 @@ def _verarbeite_upload(mandant: str, data: DokumentUpload, *, upload_von: str = 
         "beschreibung": data.beschreibung or "",
         "hochgeladen_am": datetime.now().isoformat(),
         "status": "hochgeladen",
+        "portal_sichtbar": bool(portal_sichtbar) if upload_von == "kanzlei" else True,
     }
     if not store.portal_speichern("upload", uid, mandant, upload_rec):
         raise HTTPException(500, "Upload konnte nicht gespeichert werden")
@@ -414,8 +421,15 @@ def _verarbeite_upload(mandant: str, data: DokumentUpload, *, upload_von: str = 
     })
     store.log_eintrag(f"PORTAL_UPLOAD | {mandant} | {data.dateiname} | {len(inhalt)} bytes | von={upload_von}")
     try:
+        sichtbar = upload_rec.get("portal_sichtbar", True)
         pc.chat_upload(
-            store, mandant, uid, data.dateiname, round(len(inhalt) / 1024, 1), sender=upload_von
+            store,
+            mandant,
+            uid,
+            data.dateiname,
+            round(len(inhalt) / 1024, 1),
+            sender=upload_von,
+            portal_sichtbar=sichtbar,
         )
         if gefunden:
             for row in store.portal_liste("chat", mandant=mandant):
@@ -450,7 +464,10 @@ def bulk_upload(data: MultiUpload, mandant: str = Depends(hole_mandant)):
 def meine_uploads(mandant: str = Depends(hole_mandant)):
     store = _store_for_mandant(mandant)
     uploads = sorted(
-        store.portal_liste("upload", mandant=mandant),
+        [
+            u for u in store.portal_liste("upload", mandant=mandant)
+            if u.get("portal_sichtbar") is not False
+        ],
         key=lambda x: x.get("hochgeladen_am", ""),
         reverse=True,
     )
@@ -470,6 +487,8 @@ def erstelle_unterschrift_anfrage(
     betreff: str = "Bitte unterzeichnen",
     hinweis: str = "",
     gueltig_tage: int = 30,
+    *,
+    portal_sichtbar: bool = True,
 ) -> Dict:
     """Kanzlei fordert Unterschrift beim Mandanten an (JWT oder Legacy Admin-Key-Route)."""
     if not bool(setting_holen("portal_unterschrift_aktiv")):
@@ -496,6 +515,7 @@ def erstelle_unterschrift_anfrage(
         "unterschrift_b64": None,
         "unterschrieben_am": None,
         "unterzeichner_info": None,
+        "portal_sichtbar": bool(portal_sichtbar),
     }
     if not store.portal_speichern("unterschrift", uid, mandant, payload):
         raise HTTPException(500, "Unterschrift konnte nicht angelegt werden")
@@ -507,7 +527,9 @@ def erstelle_unterschrift_anfrage(
     })
     store.log_eintrag(f"UNTERSCHRIFT_ANFRAGE | {mandant} | {dokumentname} | ID:{uid[:8]}")
     try:
-        pc.chat_unterschrift_anfrage(store, mandant, uid, dokumentname, betreff, hinweis)
+        pc.chat_unterschrift_anfrage(
+            store, mandant, uid, dokumentname, betreff, hinweis, portal_sichtbar=portal_sichtbar
+        )
     except Exception as e:
         log.warning("chat_unterschrift_anfrage: %s", e)
     return {
@@ -547,7 +569,10 @@ def offene_unterschriften(mandant: str = Depends(hole_mandant)):
     jetzt = datetime.now()
     offene = []
     for uid, u in p["portal"]["unterschriften"].items():
-        if u.get("mandant") != mandant: continue
+        if u.get("mandant") != mandant:
+            continue
+        if u.get("portal_sichtbar") is False:
+            continue
         try:
             if jetzt > datetime.fromisoformat(u["gueltig_bis"]) and u["status"] == "ausstehend":
                 u["status"] = "abgelaufen"
@@ -764,7 +789,7 @@ def portal_chat_verlauf(
     seit: Optional[str] = Query(None, description="Nachrichten nach dieser Chat-ID"),
 ):
     store = _store_for_mandant(mandant)
-    nachrichten = pc.list_chat(store, mandant, limit=limit, seit_id=seit)
+    nachrichten = pc.list_chat(store, mandant, limit=limit, seit_id=seit, nur_mandanten_portal=True)
     return {"nachrichten": nachrichten, "anzahl": len(nachrichten)}
 
 

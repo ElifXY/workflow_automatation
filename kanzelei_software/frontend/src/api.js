@@ -839,6 +839,8 @@ export const sendPortalAntwort = (name, betreff, text) =>
     body: JSON.stringify({ betreff, text }),
   });
 
+export const getPortalChatInbox = () => apiFetch("/portal/mandant/chat/inbox");
+
 export const getPortalChat = (name, seit = null) =>
   apiFetch(
     `/portal/mandant/${encodeURIComponent(name)}/chat${seit ? `?seit=${encodeURIComponent(seit)}` : ""}`

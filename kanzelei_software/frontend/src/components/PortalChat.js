@@ -119,7 +119,41 @@ const ChatBubble = ({ msg }) => {
     </div>
   );
 };
-export default function PortalChat({ mandantName, showToast, embedded = false, fillHeight = false }) {
+function PortalSichtbarCheckbox({ checked, onChange, hint }) {
+  return (
+    <label
+      style={{
+        display: "flex",
+        alignItems: "flex-start",
+        gap: 8,
+        fontSize: 12,
+        color: "var(--text2)",
+        marginBottom: 10,
+        cursor: "pointer",
+        lineHeight: 1.45,
+      }}
+    >
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        style={{ marginTop: 2, flexShrink: 0 }}
+      />
+      <span>
+        <strong style={{ color: "var(--text)" }}>Im Mandantenportal sichtbar</strong>
+        {hint ? <span style={{ display: "block", color: "var(--text3)", fontWeight: 400 }}>{hint}</span> : null}
+      </span>
+    </label>
+  );
+}
+
+export default function PortalChat({
+  mandantName,
+  showToast,
+  embedded = false,
+  fillHeight = false,
+  onSent,
+}) {
   const [msgs, setMsgs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [text, setText] = useState("");
@@ -132,6 +166,7 @@ export default function PortalChat({ mandantName, showToast, embedded = false, f
   const [uploadFile, setUploadFile] = useState(null);
   const [uploadKategorie, setUploadKategorie] = useState("Sonstiges");
   const [uploadBeschreibung, setUploadBeschreibung] = useState("");
+  const [portalSichtbar, setPortalSichtbar] = useState(true);
   const endRef = useRef(null);
 
   const laden = useCallback(async () => {
@@ -171,6 +206,7 @@ export default function PortalChat({ mandantName, showToast, embedded = false, f
       await sendPortalChat(mandantName, t);
       setText("");
       await laden();
+      onSent?.();
     } catch (e) {
       showToast?.(e.message, "error");
     } finally {
@@ -190,11 +226,13 @@ export default function PortalChat({ mandantName, showToast, embedded = false, f
         frist: aufgabeForm.frist,
         hinweis: aufgabeForm.hinweis.trim(),
         prioritaet: "normal",
+        portal_sichtbar: portalSichtbar,
       });
       showToast?.("Aufgabe im Chat erstellt", "success");
       setMode(null);
       setAufgabeForm({ beschreibung: "", frist: "", hinweis: "" });
       await laden();
+      onSent?.();
     } catch (e) {
       showToast?.(e.message, "error");
     } finally {
@@ -213,11 +251,13 @@ export default function PortalChat({ mandantName, showToast, embedded = false, f
         dokument_name: dokForm.name.trim(),
         beschreibung: dokForm.beschreibung.trim(),
         frist: dokForm.frist || null,
+        portal_sichtbar: portalSichtbar,
       });
       showToast?.("Dokument angefordert", "success");
       setMode(null);
       setDokForm({ name: "", beschreibung: "", frist: "" });
       await laden();
+      onSent?.();
     } catch (e) {
       showToast?.(e.message, "error");
     } finally {
@@ -239,12 +279,14 @@ export default function PortalChat({ mandantName, showToast, embedded = false, f
         dateityp: uploadFile.type || "application/octet-stream",
         kategorie: uploadKategorie.trim() || "Sonstiges",
         beschreibung: uploadBeschreibung.trim(),
+        portal_sichtbar: portalSichtbar,
       });
       showToast?.("Dokument im Portal bereitgestellt", "success");
       setMode(null);
       setUploadFile(null);
       setUploadBeschreibung("");
       await laden();
+      onSent?.();
     } catch (e) {
       showToast?.(e.message, "error");
     } finally {
@@ -267,11 +309,13 @@ export default function PortalChat({ mandantName, showToast, embedded = false, f
         betreff: sigBetreff.trim() || "Bitte unterzeichnen",
         hinweis: "",
         gueltig_tage: 30,
+        portal_sichtbar: portalSichtbar,
       });
       showToast?.("Unterschrift im Chat angefordert", "success");
       setMode(null);
       setSigFile(null);
       await laden();
+      onSent?.();
     } catch (e) {
       showToast?.(e.message, "error");
     } finally {
@@ -391,6 +435,18 @@ export default function PortalChat({ mandantName, showToast, embedded = false, f
           </button>
         ))}
       </div>
+
+      {mode && mode !== "text" ? (
+        <PortalSichtbarCheckbox
+          checked={portalSichtbar}
+          onChange={setPortalSichtbar}
+          hint={
+            portalSichtbar
+              ? "Der Mandant sieht dies im Portal (Chat, Aufgaben, Uploads)."
+              : "Nur für Sie in der Suite — der Mandant sieht es nicht im Portal."
+          }
+        />
+      ) : null}
 
       {mode === "aufgabe" && (
         <div style={{ marginBottom: 10, padding: 10, border: "1px dashed var(--border)", borderRadius: 8 }}>

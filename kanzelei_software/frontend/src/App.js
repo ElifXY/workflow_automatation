@@ -48,8 +48,7 @@ import ResetPassword     from "./pages/ResetPassword";
 import VerifyEmail       from "./pages/VerifyEmail";
 import MandantDetail     from "./pages/MandantDetail";
 import KiEmailComposer   from "./components/KiEmailComposer";
-import PortalChat          from "./components/PortalChat";
-import PortalChatMandantList from "./components/PortalChatMandantList";
+import PortalChatSuite from "./components/PortalChatSuite";
 import { hasRoleReal, getEffectiveRole } from "./components/PermissionGate";
 import { hasNavTab } from "./navAccess";
 import { useContentLayoutWidth, readContentLayoutWidth } from "./useContentLayoutWidth";
@@ -620,20 +619,6 @@ const Sidebar = ({
           );
         })}
         </div>
-        {activeTab === "portalchat" ? (
-          <>
-            <Divider />
-            <div style={{ flex: 1, minHeight: 120, display: "flex", flexDirection: "column", paddingTop: 4 }}>
-              <PortalChatMandantList
-                mandanten={kpis}
-                selected={chatMandant}
-                onSelect={onChatMandantChange}
-                isCompact={isCompact}
-                isMobile={isMobile}
-              />
-            </div>
-          </>
-        ) : null}
       </div>
 
       <Divider />
@@ -2292,13 +2277,6 @@ function AppInner() {
   }, [location.state?.tab, location.state?.chatMandant, appRole, navSettings, setChatMandantPersist]);
 
   useEffect(() => {
-    if (!kpis.length) return;
-    const names = kpis.map((k) => k.mandant).filter(Boolean);
-    if (chatMandant && names.includes(chatMandant)) return;
-    if (names.length) setChatMandantPersist(names[0]);
-  }, [kpis, chatMandant, setChatMandantPersist]);
-
-  useEffect(() => {
     if (activeTab === "portalchat" && !isMobile) {
       setSidebarWidth((w) => clamp(Math.max(w, 260), sidebarMinWidth, sidebarMaxWidth));
     }
@@ -2543,36 +2521,13 @@ function AppInner() {
             flexDirection: "column",
             minHeight: 0,
             overflow: "hidden",
-            padding: isMobile ? "12px 12px 0" : "16px 20px 0",
+            padding: isMobile ? "8px 8px 0" : "12px 16px 0",
           }}>
-            {isMobile ? (
-              <div style={{ marginBottom: 10, flexShrink: 0 }}>
-                <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 4 }}>Mandant</div>
-                <select
-                  value={chatMandant || ""}
-                  onChange={(e) => setChatMandantPersist(e.target.value)}
-                  style={{
-                    width: "100%",
-                    padding: "10px 12px",
-                    borderRadius: 8,
-                    border: "1px solid var(--border)",
-                    background: "var(--bg2)",
-                    color: "var(--text)",
-                    fontSize: 14,
-                  }}
-                >
-                  <option value="">— Mandant wählen —</option>
-                  {kpis.map((k) => k.mandant).filter(Boolean).map((n) => (
-                    <option key={n} value={n}>{n}</option>
-                  ))}
-                </select>
-              </div>
-            ) : null}
-            <PortalChat
-              mandantName={chatMandant}
+            <PortalChatSuite
+              selectedMandant={chatMandant}
+              onSelectMandant={setChatMandantPersist}
               showToast={toast}
-              embedded
-              fillHeight
+              isMobile={isMobile}
             />
           </div>
         );

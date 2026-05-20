@@ -71,24 +71,83 @@ def append_chat(
     return payload
 
 
+def _record_portal_sichtbar(store, mandant: str, row: Dict[str, Any]) -> bool:
+    """False = Mandant sieht diese Chat-Zeile nicht im Portal."""
+    meta = row.get("meta") or {}
+    if meta.get("portal_sichtbar") is False:
+        return False
+    typ = row.get("typ") or ""
+    refs = row.get("refs") or {}
+    if typ == "upload" and refs.get("upload_id"):
+        u = store.portal_holen("upload", refs["upload_id"]) or {}
+        if u.get("mandant") == mandant and u.get("portal_sichtbar") is False:
+            return False
+    if typ == "unterschrift_anfrage" and refs.get("unterschrift_id"):
+        u = store.portal_holen("unterschrift", refs["unterschrift_id"]) or {}
+        if u.get("mandant") == mandant and u.get("portal_sichtbar") is False:
+            return False
+    if typ == "aufgabe" and refs.get("aufgabe_id"):
+        alle = store.hole_fristen()
+        a = alle.get(refs["aufgabe_id"]) if isinstance(alle, dict) else None
+        if a and a.get("mandant") == mandant and not a.get("portal_sichtbar"):
+            return False
+    return True
+
+
 def list_chat(
     store,
     mandant: str,
     *,
     limit: int = 200,
     seit_id: Optional[str] = None,
+    nur_mandanten_portal: bool = False,
 ) -> List[Dict[str, Any]]:
     ensure_chat_migrated(store, mandant)
     rows = sorted(
         store.portal_liste("chat", mandant=mandant),
         key=lambda x: x.get("zeit") or x.get("erstellt_am") or "",
     )
+    if nur_mandanten_portal:
+        rows = [r for r in rows if _record_portal_sichtbar(store, mandant, r)]
     if seit_id:
         ids = [r.get("id") for r in rows]
         if seit_id in ids:
             rows = rows[ids.index(seit_id) + 1 :]
     enriched = [_enrich_message(store, mandant, dict(r)) for r in rows[-limit:]]
     return enriched
+
+
+def list_inbox(store, mandanten_namen: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """Übersicht aller Mandanten-Chats für die Kanzlei-Suite (WhatsApp-Liste)."""
+    alle = store.hole_mandanten() or {}
+    names = mandanten_namen if mandanten_namen is not None else sorted(alle.keys())
+    inbox: List[Dict[str, Any]] = []
+    for name in names:
+        if not name or name not in alle:
+            continue
+        ensure_chat_migrated(store, name)
+        rows = sorted(
+            store.portal_liste("chat", mandant=name),
+            key=lambda x: x.get("zeit") or "",
+        )
+        last = rows[-1] if rows else None
+        preview = ""
+        sender = ""
+        zeit = ""
+        if last:
+            preview = (last.get("text") or "")[:120]
+            sender = last.get("sender") or ""
+            zeit = last.get("zeit") or ""
+        inbox.append({
+            "mandant": name,
+            "letzte_nachricht": preview,
+            "letzte_zeit": zeit,
+            "letzter_sender": sender,
+            "anzahl": len(rows),
+            "hat_chat": bool(rows),
+        })
+    inbox.sort(key=lambda x: x.get("letzte_zeit") or "", reverse=True)
+    return inbox
 
 
 def get_chat_message(store, mandant: str, msg_id: str) -> Optional[Dict[str, Any]]:
@@ -182,6 +241,7 @@ def chat_aufgabe(
     frist: str,
     *,
     hinweis: str = "",
+    portal_sichtbar: bool = True,
 ) -> Dict[str, Any]:
     return append_chat(
         store,
@@ -194,6 +254,7 @@ def chat_aufgabe(
             "aufgabe_beschreibung": beschreibung,
             "aufgabe_frist": frist,
             "aufgabe_erledigt": False,
+            "portal_sichtbar": portal_sichtbar,
         },
     )
 
@@ -204,6 +265,8 @@ def chat_dokument_anfrage(
     dokument_name: str,
     beschreibung: str = "",
     frist: str = "",
+    *,
+    portal_sichtbar: bool = True,
 ) -> Dict[str, Any]:
     return append_chat(
         store,
@@ -212,7 +275,12 @@ def chat_dokument_anfrage(
         beschreibung or f"Bitte reichen Sie ein: {dokument_name}",
         "kanzlei",
         refs={"dokument_name": dokument_name},
-        meta={"dokument_name": dokument_name, "frist": frist, "dokument_offen": True},
+        meta={
+            "dokument_name": dokument_name,
+            "frist": frist,
+            "dokument_offen": True,
+            "portal_sichtbar": portal_sichtbar,
+        },
     )
 
 
@@ -223,6 +291,8 @@ def chat_unterschrift_anfrage(
     dokumentname: str,
     betreff: str,
     hinweis: str = "",
+    *,
+    portal_sichtbar: bool = True,
 ) -> Dict[str, Any]:
     return append_chat(
         store,
@@ -231,7 +301,11 @@ def chat_unterschrift_anfrage(
         hinweis or betreff or f"Unterschrift: {dokumentname}",
         "kanzlei",
         refs={"unterschrift_id": unterschrift_id},
-        meta={"dokumentname": dokumentname, "unterschrift_status": "ausstehend"},
+        meta={
+            "dokumentname": dokumentname,
+            "unterschrift_status": "ausstehend",
+            "portal_sichtbar": portal_sichtbar,
+        },
     )
 
 
@@ -242,6 +316,8 @@ def chat_upload(
     dateiname: str,
     groesse_kb: float,
     sender: str = "mandant",
+    *,
+    portal_sichtbar: bool = True,
 ) -> Dict[str, Any]:
     von = "kanzlei" if sender == "kanzlei" else "mandant"
     label = "Kanzlei hat Dokument bereitgestellt" if von == "kanzlei" else "Dokument hochgeladen"
@@ -252,7 +328,11 @@ def chat_upload(
         f"{label}: {dateiname}",
         von,
         refs={"upload_id": upload_id},
-        meta={"dateiname": dateiname, "groesse_kb": groesse_kb},
+        meta={
+            "dateiname": dateiname,
+            "groesse_kb": groesse_kb,
+            "portal_sichtbar": portal_sichtbar,
+        },
     )
 
 
