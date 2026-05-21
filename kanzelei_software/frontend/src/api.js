@@ -513,6 +513,19 @@ export const getHeute       = async () => {
   if (Array.isArray(r)) return r;
   return r?.eintraege || r?.data?.eintraege || [];
 };
+
+export const getHeuteOps = async () => {
+  const r = await apiFetch("/dashboard/heute-ops");
+  return r?.data ?? r;
+};
+
+export const getPilotScorecard = async () => {
+  const r = await apiFetch("/dashboard/pilot-scorecard");
+  return r?.data ?? r;
+};
+
+export const setPilotBaseline = () =>
+  apiFetch("/dashboard/pilot-baseline", { method: "POST" });
 // BUGFIX: Alter Endpoint war /kpi — neu: /kpis
 export const getKpis        = async () => {
   const r = await apiFetch("/kpis");

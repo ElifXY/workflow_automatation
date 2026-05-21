@@ -162,6 +162,12 @@ class ProaktiverBot:
 
         self._frage_persistieren(frage)
         self.ds.log_eintrag(f"BOT_FRAGE | {mandant} | {frage_typ} | {frage_text[:60]}")
+        try:
+            from core.bot_notifications import notify_mandant_new_bot_frage
+
+            notify_mandant_new_bot_frage(self.ds, mandant, frage)
+        except Exception as e:
+            log.warning("Bot-Mail an Mandant %s: %s", mandant, e)
         return frage
 
     def antwort_erfassen(

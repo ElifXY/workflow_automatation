@@ -49,6 +49,9 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "ki_email_generierung_aktiv":  True,
     "ki_bot_proaktiv_aktiv":       True,
     "ki_bot_analyse_uhrzeit":      "07:00", # Wann Bot-Analyse läuft (Cron)
+    "bot_email_mandant_aktiv":     True,    # E-Mail an Mandant bei neuer Bot-Frage
+    "bot_email_kanzlei_aktiv":     True,    # E-Mail an Kanzlei nach Bot-Analyse
+    "bot_analyse_benachrichtigung_email": "",  # leer = eskalation_stufe_1_empfaenger
 
     # ── 2. WORKFLOW-DESIGNER ──────────────────────────────────
     "frist_warnung_tage":          14,      # Vorwarnung vor Frist
@@ -120,13 +123,16 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "rollen_mandant_loeschen":     ["admin"],
     "rollen_export_datev":         ["admin", "steuerberater"],
     "rollen_einstellungen":        ["admin"],
-    # Produktfokus: Kern-Navigation (Portal, Bot, Aufgaben) — erweiterte Tabs in Einstellungen freischaltbar
-    "produkt_fokus_aktiv":         True,
+    # Produktfokus: optional schlanke Sidebar (Standard: volles Produkt sichtbar)
+    "produkt_fokus_aktiv":         False,
     "rollen_nav_steuerberater": [
-        "dashboard", "mandanten", "portalchat", "aufgaben", "automation", "ki", "neu", "settings",
+        "dashboard", "mandanten", "portalchat", "aufgaben", "ki", "profit", "steuerbot",
+        "dokumente", "belege", "rechnungen", "automation", "empfehlungen",
+        "analytics", "neu", "settings",
     ],
     "rollen_nav_mitarbeiter": [
-        "dashboard", "mandanten", "portalchat", "aufgaben", "ki", "settings",
+        "dashboard", "mandanten", "portalchat", "aufgaben", "ki", "dokumente", "belege",
+        "rechnungen", "empfehlungen", "settings",
     ],
     "rollen_nav_erweitert": [
         "profit", "steuerbot", "dokumente", "belege", "rechnungen", "empfehlungen", "analytics",

@@ -2942,6 +2942,42 @@ def get_heute(_user: dict = Depends(get_current_user)):
     return ok_compat({"eintraege": result[:15], "anzahl": len(result[:15])})
 
 
+@app.get("/dashboard/heute-ops", tags=["Dashboard"],
+          summary="Heute: Bot-Fragen, fehlende Belege, überfällige Aufgaben")
+def dashboard_heute_ops(_user: dict = Depends(get_current_user)):
+    from core.dashboard_ops import heute_operations
+
+    store = get_ds(_user)
+    return ok_compat(heute_operations(store))
+
+
+@app.get("/dashboard/pilot-scorecard", tags=["Dashboard"],
+          summary="Pilot-Scorecard (Woche, Vorher/Nachher)")
+def dashboard_pilot_scorecard(_user: dict = Depends(get_current_user)):
+    from core.dashboard_ops import pilot_scorecard
+
+    store = get_ds(_user)
+    return ok_compat(pilot_scorecard(store))
+
+
+@app.post("/dashboard/pilot-baseline", tags=["Dashboard"],
+          summary="Pilot-Baseline auf aktuellen Stand setzen")
+def dashboard_pilot_baseline_setzen(_user: dict = Depends(get_current_user)):
+    from core.proaktiver_bot import ProaktiverBot
+
+    store = get_ds(_user)
+    stats = ProaktiverBot(store).statistiken()
+    payload = {
+        "gestartet_am": datetime.now().isoformat(),
+        "fragen_gesamt": stats.get("fragen_gesamt", 0),
+        "fragen_beantwortet": stats.get("fragen_beantwortet", 0),
+        "gesparte_stunden": stats.get("gesparte_stunden", 0),
+        "notiz": "Manuell gesetzt",
+    }
+    store.setting_setzen("pilot_baseline", payload)
+    return ok_compat({"status": "ok", "baseline": payload})
+
+
 @app.get("/kpis", tags=["Dashboard"],
          summary="Alle Mandanten mit Risiko-Score, Umsatz-Score und KI-Empfehlung")
 def get_kpis(_user: dict = Depends(get_current_user)):
@@ -8493,6 +8529,13 @@ def bot_analyse(_user: dict = Depends(get_current_user)):
         bot = _get_bot(store)
         fragen, pruefung = bot.analysiere_alle_mandanten()
         log.info(f"Bot-Analyse: {len(fragen)} neue Fragen")
+        if fragen:
+            try:
+                from core.bot_notifications import notify_kanzlei_bot_analyse
+
+                notify_kanzlei_bot_analyse(store, fragen)
+            except Exception as mail_e:
+                log.warning("Bot-Analyse Kanzlei-Mail: %s", mail_e)
         return ok_compat({
             "status":       "fertig",
             "neue_fragen":  len(fragen),

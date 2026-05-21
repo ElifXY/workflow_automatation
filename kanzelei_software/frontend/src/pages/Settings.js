@@ -30,6 +30,7 @@ import {
   getStripePublicConfig,
   createStripeCheckoutSession,
   createStripePortalSession,
+  setPilotBaseline,
 } from "../api";
 import PermissionGate, { hasRoleReal } from "../components/PermissionGate";
 import { NAV_TAB_IDS, NAV_TAB_LABELS } from "../navAccess";
@@ -497,15 +498,61 @@ const PortalTab = ({s, save}) => {
       </div>
     </div>
 
-    <Row label="Produktfokus (empfohlen)"
-         description="Schlanke Sidebar: Dashboard, Mandanten, Portal, Aufgaben, Automation, KI">
-      <Toggle value={s.produkt_fokus_aktiv??true} onChange={v=>{
+    <Row label="Produktfokus (optional)"
+         description="Server-seitig schlanke Nav-Liste; Sidebar-Toggle „Erweiterte Module“ bleibt für Power-User">
+      <Toggle value={s.produkt_fokus_aktiv??false} onChange={v=>{
         save("produkt_fokus_aktiv", v);
         if(v){
           save("rollen_nav_steuerberater", ["dashboard","mandanten","portalchat","aufgaben","automation","ki","neu","settings"]);
           save("rollen_nav_mitarbeiter", ["dashboard","mandanten","portalchat","aufgaben","ki","settings"]);
+        } else {
+          save("rollen_nav_steuerberater", ["dashboard","mandanten","portalchat","aufgaben","ki","profit","steuerbot","dokumente","belege","rechnungen","automation","empfehlungen","analytics","neu","settings"]);
+          save("rollen_nav_mitarbeiter", ["dashboard","mandanten","portalchat","aufgaben","ki","dokumente","belege","rechnungen","empfehlungen","settings"]);
         }
       }}/>
+    </Row>
+
+    <SectionTitle>Bot-Benachrichtigungen</SectionTitle>
+    <Row label="E-Mail an Mandant bei neuer Bot-Frage"
+         description="Mandant wird zum Portal eingeladen — sonst bleibt die Antwortquote bei 0">
+      <Toggle value={s.bot_email_mandant_aktiv??true} onChange={v=>save("bot_email_mandant_aktiv",v)}/>
+    </Row>
+    <Row label="E-Mail an Kanzlei nach Bot-Analyse"
+         description="Zusammenfassung nach Scheduler oder manueller Analyse">
+      <Toggle value={s.bot_email_kanzlei_aktiv??true} onChange={v=>save("bot_email_kanzlei_aktiv",v)}/>
+    </Row>
+    <Row label="Empfänger Bot-Analyse"
+         description="Leer = Eskalations-E-Mail Stufe 1">
+      <input
+        type="email"
+        defaultValue={s.bot_analyse_benachrichtigung_email||""}
+        placeholder="kanzlei@beispiel.de"
+        onBlur={e=>save("bot_analyse_benachrichtigung_email", e.target.value.trim())}
+        style={{width:"100%",maxWidth:320,background:"var(--bg)",border:"1px solid var(--border2)",
+          borderRadius:8,color:"var(--text)",padding:"7px 11px",fontSize:13,outline:"none",
+          fontFamily:"'DM Sans',sans-serif"}}
+      />
+    </Row>
+
+    <SectionTitle>Pilot-Scorecard</SectionTitle>
+    <Row label="Baseline zurücksetzen"
+         description="Vorher/Nachher-Zähler im Dashboard ab jetzt neu">
+      <button
+        type="button"
+        onClick={async ()=>{
+          try {
+            await setPilotBaseline();
+            window.alert("Pilot-Baseline wurde gesetzt. Dashboard zeigt ab jetzt das Delta.");
+          } catch (e) {
+            window.alert(e?.message || "Baseline konnte nicht gesetzt werden.");
+          }
+        }}
+        style={{background:"var(--bg3)",border:"1px solid var(--border2)",borderRadius:8,
+          color:"var(--accent)",padding:"8px 14px",fontSize:13,fontWeight:600,cursor:"pointer",
+          fontFamily:"'DM Sans',sans-serif"}}
+      >
+        Baseline jetzt setzen
+      </button>
     </Row>
 
     <SectionTitle>Portal aktivieren</SectionTitle>

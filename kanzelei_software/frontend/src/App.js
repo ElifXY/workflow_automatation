@@ -27,6 +27,8 @@ import {
   extrahiereHeuteEintraege,
   istAufgabeErledigt,
   getPortalChatUnread,
+  getHeuteOps,
+  getPilotScorecard,
 } from "./api";
 
 import Analytics         from "./pages/Analytics";
@@ -51,7 +53,7 @@ import MandantDetail     from "./pages/MandantDetail";
 import KiEmailComposer   from "./components/KiEmailComposer";
 import PortalChatSuite from "./components/PortalChatSuite";
 import { hasRoleReal, getEffectiveRole } from "./components/PermissionGate";
-import { hasNavTab } from "./navAccess";
+import { hasNavTab, readNavExtended, writeNavExtended } from "./navAccess";
 import { useContentLayoutWidth, readContentLayoutWidth } from "./useContentLayoutWidth";
 import ViewAsControls from "./components/ViewAsControls";
 import { ThemeProvider, ThemeQuickSwitch } from "./theme";
@@ -411,6 +413,8 @@ const Sidebar = ({
   chatMandant,
   onChatMandantChange,
   portalUnreadTotal = 0,
+  navExtended = true,
+  onNavExtendedChange,
 }) => {
   const kritisch = kpis.filter(k => k.status === "KRITISCH").length;
   const wichtig  = kpis.filter(k => k.status === "WICHTIG").length;
@@ -435,7 +439,7 @@ const Sidebar = ({
     { id:"analytics",    label:"Analytics",        icon:"◎" },
     { id:"neu",          label:"Neu anlegen",      icon:"＋" },
     { id:"settings",     label:"Einstellungen",    icon:"🔧" },
-  ].filter((item) => hasNavTab(normalizedRole, item.id, navSettings));
+  ].filter((item) => hasNavTab(normalizedRole, item.id, navSettings, { extended: navExtended }));
 
   const onResizeStart = useCallback((event) => {
     if (isMobile) return;
@@ -624,6 +628,37 @@ const Sidebar = ({
       </div>
 
       <Divider />
+      <div style={{ padding: isMobile ? "0 10px 10px" : isCompact ? "0 8px 10px" : "0 16px 12px" }}>
+        <button
+          type="button"
+          onClick={() => {
+            const next = !navExtended;
+            writeNavExtended(next);
+            onNavExtendedChange?.(next);
+          }}
+          title={navExtended ? "Nur Kern-Module in der Sidebar" : "Alle Module anzeigen"}
+          style={{
+            width: "100%",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 8,
+            padding: isMobile ? "12px 12px" : "10px 12px",
+            minHeight: isMobile ? 44 : undefined,
+            borderRadius: "var(--radius)",
+            border: `1px solid ${navExtended ? "color-mix(in srgb, var(--accent) 35%, transparent)" : "var(--border2)"}`,
+            background: navExtended ? "color-mix(in srgb, var(--accent) 10%, var(--bg3))" : "var(--bg3)",
+            color: navExtended ? "var(--accent)" : "var(--text2)",
+            fontSize: 12,
+            fontWeight: 600,
+            cursor: "pointer",
+            fontFamily: "var(--font-body)",
+          }}
+        >
+          <span>{navExtended ? "◆ Alle Module" : "◇ Erweiterte Module"}</span>
+          <span style={{ fontSize: 10, color: "var(--text3)" }}>{navExtended ? "an" : "aus"}</span>
+        </button>
+      </div>
       {footerAdmin && (
         <div style={{ padding: isMobile ? "0 10px 10px" : isCompact ? "0 8px 10px" : "0 16px 16px" }}>
           <Link
@@ -1742,8 +1777,86 @@ function AufgabenSeite({ kpis, heute, onRefresh, isMobile = false }) {
 // Mandanten-Risiko- & Umsatz-AI auf einen Blick
 // ═══════════════════════════════════════════════════════════
 
+function DashboardHeuteOpsBar({ ops, onTab, compact }) {
+  if (!ops?.zeile) return null;
+  const bot = Number(ops.bot_fragen_offen || 0);
+  const docs = Number(ops.fehlende_belege || 0);
+  const ueber = Number(ops.aufgaben_ueberfaellig || 0);
+  const heuteF = Number(ops.aufgaben_heute || 0);
+  const chips = [
+    { n: bot, label: "Bot offen", tab: "automation" },
+    { n: docs, label: "Belege", tab: "mandanten" },
+    { n: ueber, label: "überfällig", tab: "aufgaben" },
+    { n: heuteF, label: "heute", tab: "aufgaben" },
+  ].filter((c) => c.n > 0);
+
+  return (
+    <Card style={{ padding: compact ? "12px 14px" : "14px 18px", marginBottom: 0 }}>
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10 }}>
+        <div style={{ fontSize: 11, color: "var(--text3)", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 600 }}>
+          Heute
+        </div>
+        <div style={{ flex: "1 1 200px", fontSize: 13, color: "var(--text)", fontWeight: 500, minWidth: 0 }}>
+          {ops.zeile}
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {chips.map((c) => (
+            <button
+              key={c.label}
+              type="button"
+              onClick={() => onTab?.(c.tab)}
+              style={{
+                border: "1px solid var(--border2)",
+                background: "var(--bg3)",
+                borderRadius: 8,
+                padding: "4px 10px",
+                fontSize: 12,
+                color: "var(--accent)",
+                cursor: "pointer",
+                fontFamily: "var(--font-body)",
+              }}
+            >
+              {c.n} {c.label}
+            </button>
+          ))}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function DashboardPilotScorecard({ card, onTab }) {
+  if (!card) return null;
+  const woche = card.pilot_woche || 1;
+  const delta = card.delta || {};
+  const akt = card.aktuell || {};
+
+  return (
+    <Card style={{ padding: "14px 18px", border: "1px solid color-mix(in srgb, var(--purple) 28%, transparent)" }}>
+      <div style={{ fontSize: 10, color: "var(--text3)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>
+        Pilot Woche {woche}
+      </div>
+      <div style={{ fontFamily: "var(--font-head)", fontSize: 22, color: "var(--purple)", marginBottom: 8 }}>
+        +{delta.fragen_beantwortet ?? 0} Antworten
+      </div>
+      <div style={{ fontSize: 12, color: "var(--text2)", lineHeight: 1.55, marginBottom: 10 }}>
+        {delta.fragen_gestellt ?? 0} Fragen gestellt · ca. {delta.gesparte_stunden ?? 0} h gespart
+        <br />
+        <span style={{ color: "var(--text3)" }}>
+          Gesamt: {akt.fragen_beantwortet ?? 0}/{akt.fragen_gesamt ?? 0} beantwortet
+        </span>
+      </div>
+      <Btn size="xs" variant="ghost" onClick={() => onTab?.("automation")}>
+        Bot & Statistik
+      </Btn>
+    </Card>
+  );
+}
+
 function RisikoDashboard({ kpis, heute, onEmail, onTab, onRefresh, isMobile = false }) {
   const VIP_THRESHOLD = 500000;
+  const [heuteOps, setHeuteOps] = useState(null);
+  const [pilotCard, setPilotCard] = useState(null);
   const [filter,   setFilter]   = useState("alle");    // alle | kritisch | vip
   const [sortBy,   setSortBy]   = useState("risiko");  // risiko | umsatz | name
   const [sending,  setSending]  = useState(null);
@@ -1780,6 +1893,25 @@ function RisikoDashboard({ kpis, heute, onEmail, onTab, onRefresh, isMobile = fa
   }, [kpis]);
 
   const showToast = (t) => { setToast(t); setTimeout(() => setToast(""), 3500); };
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [ops, pilot] = await Promise.all([
+          getHeuteOps().catch(() => null),
+          getPilotScorecard().catch(() => null),
+        ]);
+        if (!cancelled) {
+          setHeuteOps(ops);
+          setPilotCard(pilot);
+        }
+      } catch {
+        /* optional widgets */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [kpis?.length, heute?.length]);
 
   // Mandanten filtern + sortieren
   const liste = [...kpis]
@@ -1968,6 +2100,23 @@ function RisikoDashboard({ kpis, heute, onEmail, onTab, onRefresh, isMobile = fa
           </Card>
         ))}
       </div>
+
+      {(heuteOps || pilotCard) ? (
+        <div style={{
+          padding: `0 ${padR} 0 ${padX}`,
+          marginBottom: gapKpiToFilter,
+          display: "grid",
+          gridTemplateColumns: lw < 720 ? "minmax(0, 1fr)" : "1.4fr minmax(220px, 0.9fr)",
+          gap: lw < 520 ? 10 : 12,
+          boxSizing: "border-box",
+          width: "100%",
+          maxWidth: "100%",
+          minWidth: 0,
+        }}>
+          <DashboardHeuteOpsBar ops={heuteOps} onTab={onTab} compact={lw < 520} />
+          <DashboardPilotScorecard card={pilotCard} onTab={onTab} />
+        </div>
+      ) : null}
 
       {/* ── Filter + Sort (kompakt; Abstand zur Liste über marginTop der Liste) ── */}
       <div style={{
@@ -2285,16 +2434,17 @@ function AppInner() {
   const [readiness,    setReadiness]    = useState(null);
   const [billingUsage, setBillingUsage] = useState(null);
   const [portalUnreadTotal, setPortalUnreadTotal] = useState(0);
+  const [navExtended, setNavExtended] = useState(() => readNavExtended());
 
   useEffect(() => {
     const tab = location.state?.tab;
     const cm = location.state?.chatMandant;
     if (cm) setChatMandantPersist(cm);
-    if (tab && hasNavTab(appRole, tab, navSettings)) {
+    if (tab && hasNavTab(appRole, tab, navSettings, { extended: navExtended })) {
       setActiveTab(tab);
       window.history.replaceState({}, document.title);
     }
-  }, [location.state?.tab, location.state?.chatMandant, appRole, navSettings, setChatMandantPersist]);
+  }, [location.state?.tab, location.state?.chatMandant, appRole, navSettings, navExtended, setChatMandantPersist]);
 
   useEffect(() => {
     if (activeTab === "portalchat" && !isMobile) {
@@ -2406,10 +2556,10 @@ function AppInner() {
   }, []);
 
   useEffect(() => {
-    if (!hasNavTab(appRole, activeTab, navSettings)) {
+    if (!hasNavTab(appRole, activeTab, navSettings, { extended: navExtended })) {
       setActiveTab("dashboard");
     }
-  }, [activeTab, appRole, navSettings]);
+  }, [activeTab, appRole, navSettings, navExtended]);
 
   const toast = useCallback((text, type="success") => {
     const id = Date.now() + Math.random();
@@ -2702,6 +2852,8 @@ function AppInner() {
           onOpenMobile={() => setMobileNavOpen(true)}
           onDesktopCollapse={!isMobile ? () => setSidebarVisible(false) : undefined}
           portalUnreadTotal={portalUnreadTotal}
+          navExtended={navExtended}
+          onNavExtendedChange={setNavExtended}
         />
       ) : null}
       <main style={{

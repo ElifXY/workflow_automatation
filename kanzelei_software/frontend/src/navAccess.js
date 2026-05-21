@@ -4,6 +4,20 @@
  */
 import { canonicalRole } from "./components/PermissionGate";
 
+export const NAV_EXTENDED_STORAGE_KEY = "kanzlei_nav_extended";
+
+/** Kern-Tabs wenn „Erweiterte Module“ aus (Fokus ohne Server-Umstellung) */
+export const NAV_CORE_FOCUS_TABS = new Set([
+  "dashboard",
+  "mandanten",
+  "portalchat",
+  "aufgaben",
+  "automation",
+  "ki",
+  "neu",
+  "settings",
+]);
+
 export const NAV_TAB_IDS = [
   "dashboard",
   "mandanten",
@@ -27,8 +41,15 @@ const DEFAULT_STEUERBERATER = new Set([
   "mandanten",
   "portalchat",
   "aufgaben",
-  "automation",
   "ki",
+  "profit",
+  "steuerbot",
+  "dokumente",
+  "belege",
+  "rechnungen",
+  "automation",
+  "empfehlungen",
+  "analytics",
   "neu",
   "settings",
 ]);
@@ -42,8 +63,31 @@ const DEFAULT_MITARBEITER = new Set([
   "portalchat",
   "aufgaben",
   "ki",
+  "dokumente",
+  "belege",
+  "rechnungen",
+  "empfehlungen",
   "settings",
 ]);
+
+/** Standard: volles Produkt in der Sidebar (Power-User) */
+export function readNavExtended() {
+  try {
+    const v = localStorage.getItem(NAV_EXTENDED_STORAGE_KEY);
+    if (v === "0") return false;
+    return true;
+  } catch {
+    return true;
+  }
+}
+
+export function writeNavExtended(on) {
+  try {
+    localStorage.setItem(NAV_EXTENDED_STORAGE_KEY, on ? "1" : "0");
+  } catch {
+    /* ignore */
+  }
+}
 
 /**
  * @param {string} role Rohrolle (inkl. Alias assistent → mitarbeiter im Gate)
@@ -66,13 +110,22 @@ export function effectiveTabSet(role, settings) {
   return DEFAULT_MITARBEITER;
 }
 
-export function hasNavTab(role, tabId, settings) {
+/**
+ * @param {string} role
+ * @param {string} tabId
+ * @param {Record<string, unknown>|null|undefined} settings
+ * @param {{ extended?: boolean }} [opts]
+ */
+export function hasNavTab(role, tabId, settings, opts = {}) {
   const id = String(tabId || "").toLowerCase();
-  // Mandanten-Portal/Chat: immer sichtbar für Steuerberater-Suite (auch alte Tenant-Nav-Listen)
   if (id === "portalchat") return true;
+
+  const extended = opts.extended !== undefined ? opts.extended : readNavExtended();
   const set = effectiveTabSet(role, settings);
-  if (set == null) return true;
-  return set.has(id);
+  const allowed = set == null || set.has(id);
+  if (!allowed) return false;
+  if (extended) return true;
+  return NAV_CORE_FOCUS_TABS.has(id);
 }
 
 export const NAV_TAB_LABELS = {

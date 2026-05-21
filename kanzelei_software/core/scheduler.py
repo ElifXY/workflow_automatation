@@ -100,6 +100,13 @@ def run_bot_analyse():
         bot    = ProaktiverBot(ds)
         fragen, _pruefung = bot.analysiere_alle_mandanten()
         log.info(f"Bot-Analyse: {len(fragen)} neue Fragen erstellt")
+        if fragen:
+            try:
+                from core.bot_notifications import notify_kanzlei_bot_analyse
+
+                notify_kanzlei_bot_analyse(ds, fragen)
+            except Exception as mail_e:
+                log.warning("Bot-Analyse Kanzlei-Mail: %s", mail_e)
         _heute_gelaufen.add(jid)
         ds.log_eintrag(f"SCHEDULER_BOT | {len(fragen)} neue Fragen")
     except Exception as e:
