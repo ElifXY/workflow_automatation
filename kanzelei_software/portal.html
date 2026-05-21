@@ -224,6 +224,17 @@ input:focus,textarea:focus,select:focus{border-color:var(--accent)}
       </div>
 
       <!-- Benachrichtigungs-Banner -->
+      <div id="banner-bot-fragen" style="display:none" class="card"
+           style="background:rgba(200,169,110,.1);border-color:rgba(200,169,110,.3);margin-bottom:12px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <span style="font-size:24px">🤖</span>
+          <div style="flex:1">
+            <div style="font-weight:600;color:var(--accent)">Rückfrage der Kanzlei</div>
+            <div style="font-size:13px;color:var(--text2)" id="banner-bot-text"></div>
+          </div>
+        </div>
+      </div>
+
       <div id="banner-unterschriften" style="display:none" class="card"
            style="background:rgba(91,141,232,.08);border-color:rgba(91,141,232,.25)">
         <div style="display:flex;align-items:center;gap:10px">
@@ -246,6 +257,14 @@ input:focus,textarea:focus,select:focus{border-color:var(--accent)}
       <div class="card">
         <div class="card-title">Fehlende Dokumente</div>
         <div id="uebersicht-docs"><div class="loading-box"><div class="spinner"></div></div></div>
+      </div>
+
+      <div class="card" id="card-bot-fragen">
+        <div class="card-title">Fragen Ihrer Kanzlei</div>
+        <p style="color:var(--text2);font-size:13px;margin:0 0 12px;line-height:1.5">
+          Kurz antworten — oft reicht das statt eines Telefonats.
+        </p>
+        <div id="uebersicht-bot-fragen"><div class="loading-box"><div class="spinner"></div></div></div>
       </div>
     </div>
 
@@ -556,6 +575,14 @@ function zeigePortal(d){
     document.getElementById("badge-freigaben").style.display = "block";
     document.getElementById("badge-freigaben").textContent   = d.offene_freigaben;
   }
+  if((d.offene_bot_fragen||0)>0){
+    const bb = document.getElementById("banner-bot-fragen");
+    if(bb){
+      bb.style.display = "block";
+      document.getElementById("banner-bot-text").textContent =
+        `${d.offene_bot_fragen} Frage(n) warten auf Ihre Antwort`;
+    }
+  }
 
   ladeUebersicht();
   startChatPoll();
@@ -586,17 +613,21 @@ function wechsleTab(id){
 // ============================================================
 async function ladeUebersicht(){
   try{
-    const [aufgaben, docs] = await Promise.all([
-      api("/portal/aufgaben"), api("/portal/dokumente")
+    const [aufgaben, docs, bot] = await Promise.all([
+      api("/portal/aufgaben"), api("/portal/dokumente"), api("/portal/bot/fragen").catch(()=>({fragen:[],anzahl:0}))
     ]);
+    const botListe = bot.fragen||[];
+    const botAnz = bot.anzahl ?? botListe.length;
 
     // KPIs
     document.getElementById("uebersicht-kpis").innerHTML = `
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:14px">
         ${kpiCard("Aufgaben offen", aufgaben.offen,
           aufgaben.offen>0?"var(--orange)":"var(--green)")}
         ${kpiCard("Fehlende Docs", docs.anzahl,
           docs.anzahl>0?"var(--red)":"var(--green)")}
+        ${kpiCard("Kanzlei-Fragen", botAnz,
+          botAnz>0?"var(--accent)":"var(--green)")}
       </div>`;
 
     // Aufgaben
@@ -615,7 +646,41 @@ async function ladeUebersicht(){
             <div style="flex:1;font-size:13px;color:var(--orange)">${esc(d)}</div>
             <button class="btn btn-ghost btn-sm" onclick="wechsleTab('dokumente')">Hochladen</button>
           </div>`).join("");
+
+    const botEl = document.getElementById("uebersicht-bot-fragen");
+    if(!botListe.length){
+      botEl.innerHTML = '<div style="color:var(--green);padding:8px 0">✓ Keine offenen Fragen</div>';
+    } else {
+      botEl.innerHTML = botListe.map(f=>`
+        <div class="freigabe-card" style="margin-bottom:10px">
+          <div style="font-size:18px;margin-bottom:6px">${esc(f.icon||"🤖")}</div>
+          <div style="font-weight:600;color:var(--text);margin-bottom:8px;line-height:1.45">${esc(f.text||"")}</div>
+          ${f.kontext?`<div style="font-size:12px;color:var(--text3);margin-bottom:10px">${esc(f.kontext)}</div>`:""}
+          <div style="display:flex;flex-direction:column;gap:6px">
+            ${(f.antwort_optionen||["Ja","Nein","Ich melde mich"]).map(opt=>`
+              <button type="button" class="btn btn-ghost btn-sm bot-antwort-btn"
+                style="justify-content:flex-start;text-align:left"
+                data-frage-id="${esc(f.id)}" data-antwort="${esc(opt)}">${esc(opt)}</button>`).join("")}
+          </div>
+        </div>`).join("");
+      botEl.querySelectorAll(".bot-antwort-btn").forEach(btn=>{
+        btn.addEventListener("click", ()=>{
+          botAntwort(btn.getAttribute("data-frage-id"), btn.getAttribute("data-antwort"));
+        });
+      });
+    }
   }catch(e){ console.error(e); }
+}
+
+async function botAntwort(frageId, antwort){
+  try{
+    await api(`/portal/bot/frage/${encodeURIComponent(frageId)}/antwort`,{
+      method:"POST",
+      body: JSON.stringify({antwort, notiz:""})
+    });
+    toast("✓ Antwort gesendet — vielen Dank!","success");
+    await ladeUebersicht();
+  }catch(e){ toast(e.message||"Fehler","error"); }
 }
 
 const kpiCard = (label, val, color) => `

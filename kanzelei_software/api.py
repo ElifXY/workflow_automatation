@@ -1370,11 +1370,18 @@ def api_v1_endpoints_catalog(_user: dict = Depends(get_current_user)):
     })
 
 
+@app.get("/product/focus", tags=["System"], summary="Produktfokus & ehrliche Feature-Grenzen")
+def product_focus(_user: dict = Depends(get_current_user)):
+    from core.product_focus import product_summary
+    return ok(product_summary())
+
+
 @app.get("/api/v1/introduction", tags=["System"])
 def api_v1_introduction():
+    from core.product_focus import PRODUCT_TAGLINE
     return ok({
         "produkt": "Kanzlei AI",
-        "kurzbeschreibung": "Multi-Tenant Steuerkanzlei-SaaS mit Automatisierung, Decision Engine und Self-Service APIs.",
+        "kurzbeschreibung": PRODUCT_TAGLINE,
         "wie_es_funktioniert": [
             "1) Auth: Benutzer oder API-Key identifiziert eine Kanzlei (tenant).",
             "2) Datenebene: Jeder Request wird tenant-spezifisch über kanzlei_id isoliert.",
@@ -6146,7 +6153,7 @@ def export_datev(
     jahr:         int = Query(None),
     _user: dict = Depends(get_current_user),
 ):
-    """DATEV EXTF v700 Buchungsstapel — direkt in DATEV importierbar."""
+    """DATEV EXTF v700 Buchungsstapel — Übergabe an DATEV (Buchführung bleibt in DATEV)."""
     if not bool(global_setting_holen("datev_export_aktiv")):
         raise HTTPException(503, "DATEV Export ist deaktiviert")
     from fastapi.responses import StreamingResponse
@@ -6160,10 +6167,14 @@ def export_datev(
         datum     = datetime.now().strftime("%Y%m%d")
         filename  = f"EXTF_{datum}_{name.replace(' ', '_')}_Buchungsstapel.csv"
         store.log_eintrag(f"EXPORT_DATEV | {name}")
+        from core.product_focus import DATEV_EXPORT_HINWEIS
         return StreamingResponse(
             io.BytesIO(csv_bytes),
             media_type="text/csv; charset=windows-1252",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "X-DATEV-Hinweis": DATEV_EXPORT_HINWEIS[:200],
+            },
         )
     except Exception as e:
         raise HTTPException(500, f"DATEV Export Fehler: {e}")

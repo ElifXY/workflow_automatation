@@ -493,9 +493,20 @@ const PortalTab = ({s, save}) => {
       </div>
       <div style={{fontSize:13,color:"var(--text2)",lineHeight:1.6}}>
         Je mehr der Mandant selbst machen kann, desto mehr Zeit bleibt für wertschöpfende Beratung.
-        Sichtbarkeits-Level steuern Transparenz und Bindung.
+        Proaktive Bot-Fragen erscheinen in der Portal-Übersicht — Mandant antwortet per Klick.
       </div>
     </div>
+
+    <Row label="Produktfokus (empfohlen)"
+         description="Schlanke Sidebar: Dashboard, Mandanten, Portal, Aufgaben, Automation, KI">
+      <Toggle value={s.produkt_fokus_aktiv??true} onChange={v=>{
+        save("produkt_fokus_aktiv", v);
+        if(v){
+          save("rollen_nav_steuerberater", ["dashboard","mandanten","portalchat","aufgaben","automation","ki","neu","settings"]);
+          save("rollen_nav_mitarbeiter", ["dashboard","mandanten","portalchat","aufgaben","ki","settings"]);
+        }
+      }}/>
+    </Row>
 
     <SectionTitle>Portal aktivieren</SectionTitle>
     <Row label="Mandantenportal aktiv"
@@ -1179,58 +1190,33 @@ const ComplianceTab = ({s, save}) => {
 // ═══════════════════════════════════════════════════════════
 
 const SchnittstellenTab = ({s, save}) => {
-  const CONNECTOREN = [
-    {key:"datev",    label:"DATEV",     icon:"🏛", desc:"Export + bidirekt. Import (Premium)",   aktiv_key:"datev_export_aktiv"},
-    {key:"elster",   label:"ELSTER",    icon:"⚖",  desc:"Steuerformulare + XML-Versand",         aktiv_key:"elster_aktiv"},
-    {key:"shopify",  label:"Shopify",   icon:"🛍",  desc:"E-Commerce Umsätze automatisch buchen", aktiv_key:"shopify_aktiv"},
-    {key:"amazon",   label:"Amazon Seller",icon:"📦",desc:"Marketplace-Umsätze importieren",      aktiv_key:"amazon_seller_aktiv"},
-    {key:"personio", label:"Personio",  icon:"👥",  desc:"HR-Daten für Lohnabrechnung",           aktiv_key:"personio_aktiv"},
-    {key:"lexoffice",label:"LexOffice", icon:"📊",  desc:"Belegdaten synchronisieren",            aktiv_key:"lexoffice_aktiv"},
+  const ROADMAP = [
+    {icon:"🏛", label:"DATEV Live-Sync (Import)"},
+    {icon:"🏦", label:"FinTS / EBICS live"},
+    {icon:"⚖", label:"ELSTER Direktversand (ERiC)"},
+    {icon:"📊", label:"Lexoffice, Personio, Shopify"},
   ];
 
   return (
     <div>
-      <div style={{background:"linear-gradient(135deg, color-mix(in srgb, var(--purple) 8%, transparent), color-mix(in srgb, var(--blue) 4%, transparent))",
-        border:"1px solid color-mix(in srgb, var(--purple) 22%, transparent)",borderRadius:14,padding:"14px 18px",marginBottom:20}}>
-        <div style={{fontWeight:600,color:"var(--purple)",fontSize:14,marginBottom:4}}>
-          Schnittstellen & Anbindungen
+      <div style={{background:"linear-gradient(135deg, color-mix(in srgb, var(--accent) 10%, transparent), color-mix(in srgb, var(--blue) 5%, transparent))",
+        border:"1px solid color-mix(in srgb, var(--accent) 22%, transparent)",borderRadius:14,padding:"14px 18px",marginBottom:20}}>
+        <div style={{fontWeight:600,color:"var(--accent)",fontSize:14,marginBottom:4}}>
+          DATEV bleibt Ihre Buchhaltung
         </div>
-        <div style={{fontSize:13,color:"var(--text2)",lineHeight:1.6}}>
-          Verbinden Sie Banken, Shops und Buchhaltung — Daten fließen automatisch in Ihre Mandantenakte.
+        <div style={{fontSize:13,color:"var(--text2)",lineHeight:1.65}}>
+          Kanzlei AI steuert Mandanten, Portal und Nachfassen. Exporte gehen <strong>zu</strong> DATEV —
+          wir ersetzen keine Fibu. Nur aktivierte, produktive Schnittstellen sind schaltbar.
         </div>
       </div>
 
-      <SectionTitle>Bank-Schnittstellen</SectionTitle>
+      <SectionTitle>Produktiv verfügbar</SectionTitle>
 
-      {[
-        {key:"bank_fints_aktiv",   label:"FinTS (HBCI)",          desc:"Direktverbindung Deutsche Banken"},
-        {key:"bank_ebics_aktiv",   label:"EBICS",                  desc:"Electronic Banking Internet Communication Standard"},
-        {key:"bank_auto_import",   label:"Automatischer Import",   desc:"Kontoauszüge täglich automatisch laden"},
-      ].map(item=>(
-        <Row key={item.key} label={item.label} description={item.desc}>
-          <Toggle value={s[item.key]??false} onChange={v=>save(item.key,v)}/>
-        </Row>
-      ))}
-
-      {s.bank_auto_import&&(
-        <Row label="Import-Uhrzeit">
-          <input type="time" defaultValue={s.bank_import_uhrzeit||"08:00"}
-            onBlur={e=>save("bank_import_uhrzeit",e.target.value)}
-            style={{background:"var(--bg)",border:`1px solid var(--border2)`,borderRadius:8,
-              color:"var(--text)",padding:"7px 11px",fontSize:13,outline:"none",
-              fontFamily:"'DM Sans',sans-serif"}}/>
-        </Row>
-      )}
-
-      <Row label="DATEV-Export" description="Buchungsstapel + Stammdaten (EXTF v700)">
+      <Row label="DATEV-Export" description="Buchungsstapel + Stammdaten (EXTF v700) — in DATEV prüfen">
         <Toggle value={s.datev_export_aktiv??true}
           onChange={v=>save("datev_export_aktiv",v)}/>
       </Row>
-      <Row label="DATEV Bidirektional (Import)" description="Premium: Daten aus DATEV zurücklesen">
-        <Toggle value={s.datev_import_aktiv??false}
-          onChange={v=>save("datev_import_aktiv",v)}/>
-      </Row>
-      {(s.datev_export_aktiv||s.datev_import_aktiv)&&(
+      {s.datev_export_aktiv&&(
         <Row label="DATEV Beraternummer">
           <input type="text" defaultValue={s.datev_berater_nr||""}
             placeholder="123456"
@@ -1240,43 +1226,23 @@ const SchnittstellenTab = ({s, save}) => {
               outline:"none",fontFamily:"'DM Mono',monospace"}}/>
         </Row>
       )}
-      <Row label="ELSTER aktiv" description="Steuerformulare als XML erstellen">
+      <Row label="ELSTER XML" description="Steuer-XML erzeugen — Versand über Ihre ELSTER-Software">
         <Toggle value={s.elster_aktiv??true} onChange={v=>save("elster_aktiv",v)}/>
       </Row>
-      <Row label="ELSTER Direktversand"
-           description="ERiC SDK von Finanzverwaltung erforderlich — sonst XML-Export">
-        <Toggle value={s.elster_direktversand??false}
-          onChange={v=>save("elster_direktversand",v)}/>
+      <Row label="Kontoauszug-Import (CSV)"
+           description="Manueller Upload unter API /bank/import — kein Live-Banking">
+        <span style={{fontSize:12,color:"var(--green)"}}>✓ verfügbar</span>
       </Row>
 
-      <SectionTitle>Drittsystem-Connectoren</SectionTitle>
-
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-        {CONNECTOREN.map(c=>(
-          <div key={c.key} style={{
-            background:"var(--bg3)",border:`1px solid ${s[c.aktiv_key]?"color-mix(in srgb, var(--green) 30%, transparent)":"var(--border)"}`,
-            borderRadius:12,padding:"14px 16px",
-            transition:"all 0.2s",
-          }}>
-            <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
-              <div style={{display:"flex",gap:8,alignItems:"center"}}>
-                <span style={{fontSize:22}}>{c.icon}</span>
-                <div>
-                  <div style={{fontWeight:600,color:"var(--text)",fontSize:14}}>{c.label}</div>
-                  <div style={{fontSize:11,color:"var(--text3)"}}>{c.desc}</div>
-                </div>
-              </div>
-              <Toggle value={s[c.aktiv_key]??false}
-                onChange={v=>save(c.aktiv_key,v)}/>
-            </div>
-            {s[c.aktiv_key]&&s[`${c.key}_api_key`]!==undefined&&(
-              <input type="password" defaultValue={s[`${c.key}_api_key`]||""}
-                placeholder="API Key..."
-                onBlur={e=>save(`${c.key}_api_key`,e.target.value)}
-                style={{width:"100%",background:"var(--bg)",border:`1px solid var(--border2)`,
-                  borderRadius:8,color:"var(--text)",padding:"7px 10px",fontSize:13,
-                  outline:"none",fontFamily:"'DM Mono',monospace",marginTop:4}}/>
-            )}
+      <SectionTitle>In Entwicklung (nicht aktivierbar)</SectionTitle>
+      <div style={{fontSize:12,color:"var(--text3)",marginBottom:10,lineHeight:1.5}}>
+        Diese Schalter würden falsche Erwartungen wecken — sie sind bis zur Fertigstellung gesperrt.
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:20}}>
+        {ROADMAP.map((r,i)=>(
+          <div key={i} style={{background:"var(--bg3)",border:"1px solid var(--border)",borderRadius:10,
+            padding:"10px 12px",fontSize:12,color:"var(--text3)",opacity:0.85}}>
+            <span style={{marginRight:6}}>{r.icon}</span>{r.label}
           </div>
         ))}
       </div>
@@ -1295,7 +1261,7 @@ const SchnittstellenTab = ({s, save}) => {
 
       <Row label="API Rate Limit" description="Max. Anfragen pro Minute an Kanzlei AI API">
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
-          <input type="number" defaultValue={s.api_rate_limit_pro_minute||300} min={10} max={1000}
+          <input type="number" defaultValue={s.api_rate_limit_pro_minute||600} min={100} max={10000}
             onBlur={e=>save("api_rate_limit_pro_minute",parseInt(e.target.value))}
             style={{width:70,background:"var(--bg)",border:`1px solid var(--border2)`,borderRadius:8,
               color:"var(--text)",padding:"7px 10px",fontSize:14,textAlign:"center",

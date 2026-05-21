@@ -385,6 +385,14 @@ const BotTab = () => {
         fontSize:13,border:`1px solid ${"var(--green)"}44`,borderLeft:`3px solid ${"var(--green)"}`}}>
         {toast}</div>}
 
+      <div style={{background:"color-mix(in srgb, var(--accent) 8%, var(--bg2))",
+        border:"1px solid color-mix(in srgb, var(--accent) 25%, transparent)",
+        borderRadius:12,padding:"14px 18px",marginBottom:20,fontSize:13,color:"var(--text2)",lineHeight:1.65}}>
+        <strong style={{color:"var(--text)"}}>Kern-Workflow:</strong> Analyse starten → Fragen erscheinen im{" "}
+        <strong>Mandanten-Portal</strong> → Mandant antwortet → Kennzahlen „Beantwortet“ steigen.
+        DATEV bleibt für die Buchführung; hier sparen Sie Telefonate und Nachfassen.
+      </div>
+
       {/* Statistiken */}
       {stats && (
         <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:14,marginBottom:20}}>

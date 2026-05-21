@@ -27,15 +27,8 @@ const DEFAULT_STEUERBERATER = new Set([
   "mandanten",
   "portalchat",
   "aufgaben",
-  "ki",
-  "profit",
-  "steuerbot",
-  "dokumente",
-  "belege",
-  "rechnungen",
   "automation",
-  "empfehlungen",
-  "analytics",
+  "ki",
   "neu",
   "settings",
 ]);
@@ -49,10 +42,7 @@ const DEFAULT_MITARBEITER = new Set([
   "portalchat",
   "aufgaben",
   "ki",
-  "dokumente",
-  "belege",
-  "rechnungen",
-  "empfehlungen",
+  "settings",
 ]);
 
 /**

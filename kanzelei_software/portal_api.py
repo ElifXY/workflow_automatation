@@ -253,6 +253,12 @@ def portal_login(token: str = Query(...)):
         1 for f in p["portal"]["freigaben"].values()
         if f.get("mandant") == mandant and f.get("status") == "ausstehend"
     )
+    try:
+        from core.proaktiver_bot import ProaktiverBot
+
+        offene_bot_fragen = len(ProaktiverBot(store).fragen_fuer_mandant(mandant, nur_offen=True))
+    except Exception:
+        offene_bot_fragen = 0
 
     ds.log_eintrag(f"PORTAL_LOGIN | {mandant}")
     return {
@@ -262,6 +268,7 @@ def portal_login(token: str = Query(...)):
         "willkommen":            f"Willkommen, {mandant}!",
         "offene_unterschriften": offen_unterschriften,
         "offene_freigaben":      offen_freigaben,
+        "offene_bot_fragen":     offene_bot_fragen,
     }
 
 # POST /portal/admin/token/{mandant} — nur in api.py (JWT), nicht hier (vermeidet Admin-Key in der UI)
@@ -338,6 +345,52 @@ def portal_aufgabe_erledigen(aufgabe_id: str, mandant: str = Depends(hole_mandan
         log.warning("chat nach aufgabe: %s", e)
     store.log_eintrag(f"PORTAL_AUFGABE_TOGGLE | {mandant} | {aufgabe_id[:8]} | erledigt={a['erledigt']}")
     return {"status": "erledigt" if a["erledigt"] else "offen", "id": aufgabe_id}
+
+@portal_router.get("/portal/bot/fragen", tags=["Portal-Bot"])
+def portal_bot_fragen(mandant: str = Depends(hole_mandant)):
+    """Offene proaktive Fragen der Kanzlei — Mandant antwortet im Portal."""
+    from core.proaktiver_bot import ProaktiverBot
+
+    store = _store_for_mandant(mandant)
+    bot = ProaktiverBot(store)
+    fragen = bot.fragen_fuer_mandant(mandant, nur_offen=True)
+    return {"fragen": fragen, "anzahl": len(fragen)}
+
+
+class PortalBotAntwort(BaseModel):
+    antwort: str = Field(..., min_length=1, max_length=500)
+    notiz: str = Field(default="", max_length=1000)
+
+
+@portal_router.post("/portal/bot/frage/{frage_id}/antwort", tags=["Portal-Bot"])
+def portal_bot_antwort(
+    frage_id: str,
+    data: PortalBotAntwort,
+    mandant: str = Depends(hole_mandant),
+):
+    from core.proaktiver_bot import ProaktiverBot
+
+    store = _store_for_mandant(mandant)
+    bot = ProaktiverBot(store)
+    try:
+        result = bot.antwort_erfassen(
+            frage_id, data.antwort.strip(), data.notiz.strip(), mandant=mandant
+        )
+    except ValueError:
+        raise HTTPException(404, "Frage nicht gefunden")
+    except PermissionError:
+        raise HTTPException(403, "Kein Zugriff")
+
+    try:
+        m = store.hole_mandant(mandant) or {}
+        m["letzte_antwort"] = datetime.now().isoformat()
+        store.mandant_speichern(mandant, m)
+    except Exception as e:
+        log.warning("letzte_antwort nach Bot-Antwort: %s", e)
+
+    store.log_eintrag(f"PORTAL_BOT_ANTWORT | {mandant} | {frage_id[:8]}")
+    return {"status": "beantwortet", "frage": result}
+
 
 @portal_router.get("/portal/dokumente", tags=["Portal"])
 def fehlende_dokumente(mandant: str = Depends(hole_mandant)):

@@ -1161,13 +1161,14 @@ export default function MandantDetail() {
             {/* Export Section */}
             <Card>
               <SectionTitle>Export & DATEV</SectionTitle>
-              <div style={{ fontSize: 12, color: "var(--text3)", marginBottom: 12 }}>
-                Alle Formate direkt als Download
+              <div style={{ fontSize: 12, color: "var(--text2)", marginBottom: 12, lineHeight: 1.55 }}>
+                Übergabe an DATEV (EXTF v700). Buchführung und Prüfung bleiben in DATEV —
+                Export basiert auf Mandantendaten, keine vollständige Fibu-Ersetzung.
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {[
                   { label: "📊 Excel-Report",        fn: () => exportExcel(name),          desc: "Stammdaten, Aufgaben, Kommunikation" },
-                  { label: "🏛 DATEV Buchungsstapel", fn: () => exportDatev(name),          desc: "EXTF v700 — direkt importierbar" },
+                  { label: "🏛 DATEV Buchungsstapel", fn: () => exportDatev(name),          desc: "EXTF v700 — Import in DATEV, dann prüfen" },
                   { label: "⚖ ELSTER UStVA XML",     fn: () => exportElster(name, "UStVA"), desc: "ERiC Transfer-Format" },
                   { label: "📦 Komplett-Paket ZIP",   fn: () => exportKomplett(name),       desc: "DATEV + ELSTER + Excel + CSV" },
                 ].map((ex, i) => (

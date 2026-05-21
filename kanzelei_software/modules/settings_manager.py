@@ -120,15 +120,16 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "rollen_mandant_loeschen":     ["admin"],
     "rollen_export_datev":         ["admin", "steuerberater"],
     "rollen_einstellungen":        ["admin"],
-    # Sidebar: welche Hauptbereiche Steuerberater bzw. Mitarbeitende sehen (Owner/Admin konfigurierbar)
+    # Produktfokus: Kern-Navigation (Portal, Bot, Aufgaben) — erweiterte Tabs in Einstellungen freischaltbar
+    "produkt_fokus_aktiv":         True,
     "rollen_nav_steuerberater": [
-        "dashboard", "mandanten", "portalchat", "aufgaben", "ki", "profit", "steuerbot",
-        "dokumente", "belege", "rechnungen", "automation", "empfehlungen",
-        "analytics", "neu", "settings",
+        "dashboard", "mandanten", "portalchat", "aufgaben", "automation", "ki", "neu", "settings",
     ],
     "rollen_nav_mitarbeiter": [
-        "dashboard", "mandanten", "portalchat", "aufgaben", "ki", "dokumente", "belege",
-        "rechnungen", "empfehlungen",
+        "dashboard", "mandanten", "portalchat", "aufgaben", "ki", "settings",
+    ],
+    "rollen_nav_erweitert": [
+        "profit", "steuerbot", "dokumente", "belege", "rechnungen", "empfehlungen", "analytics",
     ],
     "backup_aktiv":                True,
     "backup_interval_stunden":     24,
@@ -225,10 +226,24 @@ ROLE_KEYS = {
 }
 ALLOWED_ROLES = {"owner", "admin", "steuerberater", "mitarbeiter", "assistent"}
 ALLOWED_NAV_TABS = {
-    "dashboard", "mandanten", "aufgaben", "ki", "profit", "steuerbot",
+    "dashboard", "mandanten", "portalchat", "aufgaben", "ki", "profit", "steuerbot",
     "dokumente", "belege", "rechnungen", "automation", "empfehlungen",
     "analytics", "neu", "settings",
 }
+
+# Noch nicht produktiv — aktivieren würde falsche Erwartungen wecken
+ROADMAP_SETTINGS_MUST_BE_FALSE = frozenset({
+    "datev_import_aktiv",
+    "bank_fints_aktiv",
+    "bank_ebics_aktiv",
+    "bank_scraping_aktiv",
+    "bank_auto_import",
+    "elster_direktversand",
+    "shopify_aktiv",
+    "amazon_seller_aktiv",
+    "personio_aktiv",
+    "lexoffice_aktiv",
+})
 TIME_PATTERN = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 EMAIL_KEYS = {
@@ -422,6 +437,9 @@ def _normalize_value(key: str, wert: Any, settings: Dict[str, Any]) -> tuple[boo
         if not uniq:
             return False, wert
         wert = uniq
+    if key in ROADMAP_SETTINGS_MUST_BE_FALSE and wert in (True, 1, "1", "true", "yes", "on"):
+        log.warning("Setting %s: Funktion noch nicht produktiv — bleibt deaktiviert", key)
+        return True, False
     return True, wert
 
 
