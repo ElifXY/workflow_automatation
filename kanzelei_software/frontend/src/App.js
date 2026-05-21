@@ -221,16 +221,22 @@ const FontLoader = () => (
     }
 
     html, body, #root {
+      height: 100%;
       min-height: 100dvh;
-      height: auto;
-      overflow-x: hidden;
-      overflow-y: auto;
+      overflow: hidden;
       background: var(--bg);
       color: var(--text);
       font-family: var(--font-body);
       font-size: 14px;
       line-height: 1.6;
       -webkit-font-smoothing: antialiased;
+    }
+
+    #kanzlei-main-scroll {
+      overflow-y: auto;
+      overflow-x: hidden;
+      -webkit-overflow-scrolling: touch;
+      overscroll-behavior-y: contain;
     }
 
     a { color: inherit; text-decoration: none; }
@@ -378,6 +384,27 @@ const ToastContainer = ({ toasts }) => (
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
 /** Kurze Titel für die mobile Kopfzeile (neben ☰) */
+/** Schmaler Streifen zwischen Sidebar und Inhalt — Resize ohne Scroll zu blockieren */
+const SidebarResizeGutter = ({ onPointerDown, onWheelScroll }) => (
+  <div
+    role="separator"
+    aria-orientation="vertical"
+    aria-label="Sidebar-Breite anpassen"
+    title="Sidebar-Breite ziehen · Trackpad scrollt den Inhalt rechts daneben"
+    onPointerDown={onPointerDown}
+    onWheel={onWheelScroll}
+    style={{
+      width: 8,
+      flexShrink: 0,
+      cursor: "col-resize",
+      alignSelf: "stretch",
+      touchAction: "none",
+      background: "linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent) 14%, transparent), transparent)",
+      zIndex: 4,
+    }}
+  />
+);
+
 const MOBILE_TAB_TITLE = {
   dashboard: "Dashboard",
   mandanten: "Mandanten",
@@ -423,8 +450,6 @@ const Sidebar = ({
   const normalizedRole = (role || "").toLowerCase();
   /** Auf dem Desktop: bei sehr schmaler Leiste Text kleiner statt komplett unsichtbar */
   const isCompact = !isMobile && width < 210;
-  const dragStateRef = useRef({ active:false, startX:0, startWidth:0 });
-
   const navItems = [
     { id:"dashboard",    label:"Dashboard",        icon:"⬛" },
     { id:"mandanten",    label:"Mandanten",        icon:"◉",  badge:kpis.length },
@@ -443,28 +468,6 @@ const Sidebar = ({
     { id:"settings",     label:"Einstellungen",    icon:"🔧" },
   ].filter((item) => hasNavTab(normalizedRole, item.id, navSettings, { extended: navExtended }));
 
-  const onResizeStart = useCallback((event) => {
-    if (isMobile) return;
-    event.preventDefault();
-    dragStateRef.current = { active:true, startX:event.clientX, startWidth:width };
-    document.body.style.userSelect = "none";
-
-    const onMove = (moveEvent) => {
-      if (!dragStateRef.current.active) return;
-      const deltaX = moveEvent.clientX - dragStateRef.current.startX;
-      setWidth(clamp(dragStateRef.current.startWidth + deltaX, minWidth, maxWidth));
-    };
-    const onUp = () => {
-      dragStateRef.current.active = false;
-      document.body.style.userSelect = "";
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-    };
-
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-  }, [isMobile, maxWidth, minWidth, setWidth, width]);
-
   const goTab = (id) => {
     setActiveTab(id);
     if (isMobile && onCloseMobile) onCloseMobile();
@@ -474,6 +477,7 @@ const Sidebar = ({
 
   const navShell = (
     <nav
+      data-app-sidebar="true"
       style={isMobile ? {
         width: drawerWidth,
         flexShrink: 0,
@@ -709,22 +713,6 @@ const Sidebar = ({
       <div style={{ padding: isMobile ? "0 10px 12px" : isCompact ? "0 10px 10px" : "0 16px 12px" }}>
         <ThemeQuickSwitch compact />
       </div>
-      {!isMobile ? (
-        <div
-          onPointerDown={onResizeStart}
-          title="Sidebar-Breite anpassen"
-          style={{
-            position:"absolute",
-            top:0,
-            right:0,
-            width:10,
-            height:"100%",
-            cursor:"col-resize",
-            background:"transparent",
-            touchAction: "none",
-          }}
-        />
-      ) : null}
     </nav>
   );
 
@@ -2381,6 +2369,8 @@ const TABS_OWN_SCROLL = new Set(["portalchat", "ki", "dokumente"]);
 
 function AppInner() {
   const location = useLocation();
+  const mainScrollRef = useRef(null);
+  const sidebarDragRef = useRef({ active: false, startX: 0, startWidth: 0 });
   const [accessRev, setAccessRev] = useState(0);
   const [navSettings, setNavSettings] = useState(null);
   // accessRev: erneutes Lesen von Vorschau-Rolle (localStorage) nach View-as-Wechsel
@@ -2532,12 +2522,66 @@ function AppInner() {
     return () => window.removeEventListener("keydown", onKey);
   }, [isMobile, mobileNavOpen]);
 
-  const showMainChrome = (showTechReadiness && readiness) || billingUsage?.plan;
-  const viewportPanelHeight = isMobile
-    ? "calc(100dvh - max(52px, env(safe-area-inset-top)) - env(safe-area-inset-bottom))"
-    : showMainChrome
-      ? "calc(100dvh - 96px)"
-      : "calc(100dvh - 16px)";
+  const onSidebarResizeStart = useCallback((event) => {
+    if (isMobile) return;
+    if (event.button !== 0) return;
+    event.preventDefault();
+    sidebarDragRef.current = { active: true, startX: event.clientX, startWidth: sidebarWidth };
+    document.body.style.userSelect = "none";
+    const onMove = (moveEvent) => {
+      if (!sidebarDragRef.current.active) return;
+      const deltaX = moveEvent.clientX - sidebarDragRef.current.startX;
+      setSidebarWidth(clamp(sidebarDragRef.current.startWidth + deltaX, sidebarMinWidth, sidebarMaxWidth));
+    };
+    const onUp = () => {
+      sidebarDragRef.current.active = false;
+      document.body.style.userSelect = "";
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }, [isMobile, sidebarMaxWidth, sidebarMinWidth, sidebarWidth]);
+
+  const scrollMainByWheel = useCallback((e) => {
+    if (TABS_OWN_SCROLL.has(activeTab)) return;
+    const el = mainScrollRef.current;
+    if (!el || el.scrollHeight <= el.clientHeight + 1) return;
+    el.scrollTop += e.deltaY;
+    e.preventDefault();
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (TABS_OWN_SCROLL.has(activeTab)) return undefined;
+    const onWheel = (e) => {
+      if (TABS_OWN_SCROLL.has(activeTab)) return;
+      if (e.target?.closest?.("[data-app-sidebar]")) return;
+      const tag = (e.target?.tagName || "").toUpperCase();
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (e.target?.isContentEditable) return;
+      let node = e.target;
+      while (node && node !== document.body) {
+        if (node instanceof HTMLElement && node !== mainScrollRef.current) {
+          const oy = getComputedStyle(node).overflowY;
+          if ((oy === "auto" || oy === "scroll") && node.scrollHeight > node.clientHeight + 2) {
+            const down = e.deltaY > 0;
+            const up = e.deltaY < 0;
+            const atTop = node.scrollTop <= 0;
+            const atBottom = node.scrollTop + node.clientHeight >= node.scrollHeight - 2;
+            if ((down && !atBottom) || (up && !atTop)) return;
+          }
+        }
+        node = node.parentElement;
+      }
+      const el = mainScrollRef.current;
+      if (!el || !el.contains(e.target)) return;
+      if (el.scrollHeight <= el.clientHeight + 1) return;
+      el.scrollTop += e.deltaY;
+      e.preventDefault();
+    };
+    window.addEventListener("wheel", onWheel, { passive: false });
+    return () => window.removeEventListener("wheel", onWheel);
+  }, [activeTab]);
 
   useEffect(() => {
     setSidebarWidth(prev => clamp(prev, sidebarMinWidth, sidebarMaxWidth));
@@ -2842,8 +2886,8 @@ function AppInner() {
   };
 
   return (
-    <div style={{ display:"flex", alignItems:"flex-start", minHeight:"100dvh",
-                  flexDirection: isMobile ? "column" : "row",
+    <div style={{ display:"flex", height:"100dvh", maxHeight:"100dvh", minHeight:"100dvh",
+                  overflow:"hidden", flexDirection: isMobile ? "column" : "row",
                   maxWidth:"100%", minWidth:0, width:"100%" }}>
       {(isMobile || sidebarVisible) ? (
         <Sidebar
@@ -2869,9 +2913,16 @@ function AppInner() {
           onNavExtendedChange={setNavExtended}
         />
       ) : null}
+      {!isMobile && sidebarVisible ? (
+        <SidebarResizeGutter
+          onPointerDown={onSidebarResizeStart}
+          onWheelScroll={scrollMainByWheel}
+        />
+      ) : null}
       <main style={{
         flex:1, display:"flex", flexDirection:"column",
-        background:"var(--bg)", minWidth:0,
+        background:"var(--bg)", minWidth:0, minHeight:0,
+        overflow: "hidden",
         width: isMobile ? "100%" : undefined,
         paddingBottom: isMobile ? "max(12px, env(safe-area-inset-bottom))" : undefined,
       }}>
@@ -2973,31 +3024,45 @@ function AppInner() {
             ) : null}
           </div>
         )}
-        {activeTab === "dokumente" ? (
-          <div style={{
-            height: viewportPanelHeight,
-            minHeight: 320,
-            display: "flex",
-            flexDirection: "column",
-            overflow: "hidden",
-            flexShrink: 0,
-          }}>
-            <DokumentScanner tabActive />
-          </div>
-        ) : TABS_OWN_SCROLL.has(activeTab) ? (
-          <div style={{
-            height: viewportPanelHeight,
-            minHeight: 320,
-            display: "flex",
-            flexDirection: "column",
-            overflow: "hidden",
-            flexShrink: 0,
-          }}>
-            {renderContent()}
-          </div>
-        ) : (
-          renderContent()
-        )}
+        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+          {activeTab === "dokumente" ? (
+            <div style={{
+              flex: 1,
+              minHeight: 0,
+              display: "flex",
+              flexDirection: "column",
+              overflow: "hidden",
+            }}>
+              <DokumentScanner tabActive />
+            </div>
+          ) : TABS_OWN_SCROLL.has(activeTab) ? (
+            <div style={{
+              flex: 1,
+              minHeight: 0,
+              display: "flex",
+              flexDirection: "column",
+              overflow: "hidden",
+            }}>
+              {renderContent()}
+            </div>
+          ) : (
+            <div
+              id="kanzlei-main-scroll"
+              ref={mainScrollRef}
+              data-app-main-scroll="true"
+              style={{
+                flex: 1,
+                minHeight: 0,
+                overflowY: "auto",
+                overflowX: "hidden",
+                WebkitOverflowScrolling: "touch",
+                outline: "none",
+              }}
+            >
+              {renderContent()}
+            </div>
+          )}
+        </div>
       </main>
       {emailModal && (
         <EmailModal
