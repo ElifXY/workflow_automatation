@@ -231,6 +231,20 @@ const FontLoader = () => (
       -webkit-font-smoothing: antialiased;
     }
 
+    /* Ein Scroll-Bereich — Tastatur (Pfeile, Bild ab/unten, Leertaste) und Trackpad */
+    #kanzlei-main-scroll {
+      overflow-y: auto;
+      overflow-x: hidden;
+      -webkit-overflow-scrolling: touch;
+      overscroll-behavior-y: contain;
+      scroll-behavior: smooth;
+    }
+    #kanzlei-main-scroll:focus { outline: none; }
+    #kanzlei-main-scroll:focus-visible {
+      outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+      outline-offset: -2px;
+    }
+
     a { color: inherit; text-decoration: none; }
     button { font-family: var(--font-body); cursor: pointer; }
     input, select, textarea { font-family: var(--font-body); }
@@ -1569,7 +1583,7 @@ function AufgabenSeite({ kpis, heute, onRefresh, isMobile = false }) {
   };
 
   return (
-    <div style={{ padding:"clamp(12px, 3vw, 28px) clamp(12px, 4vw, 36px)", flex:1, overflowY:"auto",
+    <div style={{ padding:"clamp(12px, 3vw, 28px) clamp(12px, 4vw, 36px)",
                   maxWidth:"100%", minWidth:0, boxSizing:"border-box" }}>
       {/* Header */}
       <div style={{ fontFamily:"var(--font-head)", fontSize:24, color:"var(--text)", marginBottom:4 }}>
@@ -2006,7 +2020,7 @@ function RisikoDashboard({ kpis, heute, onEmail, onTab, onRefresh, isMobile = fa
   };
 
   return (
-    <div style={{ flex:1, overflowY:"auto", background:"var(--bg)",
+    <div style={{ background:"var(--bg)",
                   maxWidth:"100%", minWidth:0, boxSizing:"border-box" }}>
 
       {/* Toast */}
@@ -2373,8 +2387,12 @@ function RisikoDashboard({ kpis, heute, onEmail, onTab, onRefresh, isMobile = fa
 }
 
 
+/** Tabs mit eigenem Scroll (Chat, KI) — kein äußerer #kanzlei-main-scroll */
+const TABS_OWN_SCROLL = new Set(["portalchat", "ki", "dokumente"]);
+
 function AppInner() {
   const location = useLocation();
+  const mainScrollRef = useRef(null);
   const [accessRev, setAccessRev] = useState(0);
   const [navSettings, setNavSettings] = useState(null);
   // accessRev: erneutes Lesen von Vorschau-Rolle (localStorage) nach View-as-Wechsel
@@ -2525,6 +2543,44 @@ function AppInner() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [isMobile, mobileNavOpen]);
+
+  useEffect(() => {
+    if (TABS_OWN_SCROLL.has(activeTab)) return;
+    const el = mainScrollRef.current;
+    if (!el) return;
+    const t = requestAnimationFrame(() => {
+      el.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(t);
+  }, [activeTab]);
+
+  useEffect(() => {
+    const scrollKeys = new Set(["PageDown", "PageUp", "Home", "End", " "]);
+    const onKey = (e) => {
+      if (!scrollKeys.has(e.key)) return;
+      if (TABS_OWN_SCROLL.has(activeTab)) return;
+      const tag = (e.target?.tagName || "").toUpperCase();
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (e.target?.isContentEditable) return;
+      const el = mainScrollRef.current;
+      if (!el || el.scrollHeight <= el.clientHeight) return;
+      if (!el.contains(document.activeElement)) {
+        el.focus({ preventScroll: true });
+      }
+      const step = Math.max(120, Math.round(el.clientHeight * 0.85));
+      let delta = 0;
+      if (e.key === "PageDown" || (e.key === " " && !e.shiftKey)) delta = step;
+      else if (e.key === "PageUp" || (e.key === " " && e.shiftKey)) delta = -step;
+      else if (e.key === "Home") delta = -el.scrollHeight;
+      else if (e.key === "End") delta = el.scrollHeight;
+      if (delta !== 0) {
+        el.scrollBy({ top: delta, behavior: "smooth" });
+        e.preventDefault();
+      }
+    };
+    window.addEventListener("keydown", onKey, { passive: false });
+    return () => window.removeEventListener("keydown", onKey);
+  }, [activeTab]);
 
   useEffect(() => {
     setSidebarWidth(prev => clamp(prev, sidebarMinWidth, sidebarMaxWidth));
@@ -2727,7 +2783,7 @@ function AppInner() {
 
       case "mandanten":
         return (
-          <div style={{ padding:contentPad, flex:1, overflowY:"auto" }}>
+          <div style={{ padding:contentPad }}>
             <div style={{
               background:"color-mix(in srgb, var(--accent) 8%, transparent)",
               border:"1px solid color-mix(in srgb, var(--accent) 22%, transparent)",
@@ -2770,7 +2826,7 @@ function AppInner() {
       // ── KI-INSIGHTS ────────────────────────────────────────
       case "empfehlungen":
         return (
-          <div style={{ padding:contentPad, flex:1, overflowY:"auto" }}>
+          <div style={{ padding:contentPad }}>
             <div style={{ marginBottom:24 }}>
               <div style={{ fontFamily:"var(--font-head)", fontSize:24, color:"var(--text)", marginBottom:4 }}>
                 KI-Insights
@@ -2809,7 +2865,7 @@ function AppInner() {
       // ── NEUER MANDANT ──────────────────────────────────────
       case "neu":
         return (
-          <div style={{ padding:contentPad, flex:1, overflowY:"auto" }}>
+          <div style={{ padding:contentPad }}>
             <div style={{ fontFamily:"var(--font-head)", fontSize:24, marginBottom:24, color:"var(--text)" }}>
               Neuer Mandant
             </div>
@@ -2962,15 +3018,47 @@ function AppInner() {
           </div>
         )}
         <div style={{
-          display: activeTab === "dokumente" ? "flex" : "none",
           flex: 1,
-          flexDirection: "column",
           minHeight: 0,
+          display: "flex",
+          flexDirection: "column",
           overflow: "hidden",
         }}>
-          <DokumentScanner tabActive={activeTab === "dokumente"} />
+          <div style={{
+            display: activeTab === "dokumente" ? "flex" : "none",
+            flex: 1,
+            flexDirection: "column",
+            minHeight: 0,
+            overflow: "hidden",
+          }}>
+            <DokumentScanner tabActive={activeTab === "dokumente"} />
+          </div>
+          {activeTab !== "dokumente" ? (
+            TABS_OWN_SCROLL.has(activeTab) ? (
+              <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+                {renderContent()}
+              </div>
+            ) : (
+              <div
+                id="kanzlei-main-scroll"
+                ref={mainScrollRef}
+                tabIndex={0}
+                role="region"
+                aria-label="Hauptinhalt"
+                style={{
+                  flex: 1,
+                  minHeight: 0,
+                  overflowY: "auto",
+                  overflowX: "hidden",
+                  WebkitOverflowScrolling: "touch",
+                  outline: "none",
+                }}
+              >
+                {renderContent()}
+              </div>
+            )
+          ) : null}
         </div>
-        {activeTab !== "dokumente" ? renderContent() : null}
       </main>
       {emailModal && (
         <EmailModal
