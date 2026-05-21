@@ -891,7 +891,7 @@ export default function WorkflowBaukasten() {
   const [tab, setTab] = useState("regeln");
 
   return (
-    <div style={{flex:1,background:"var(--bg)",overflowY:"auto",fontFamily:"'DM Sans',sans-serif"}}>
+    <div style={{background:"var(--bg)",fontFamily:"'DM Sans',sans-serif"}}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@300;400;500;600&display=swap');
         @keyframes spin{to{transform:rotate(360deg)}} @keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}

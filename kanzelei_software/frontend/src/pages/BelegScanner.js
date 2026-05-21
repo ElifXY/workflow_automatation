@@ -740,7 +740,7 @@ export default function BelegScanner() {
 
   return (
     <div style={{
-      flex: 1, background: "var(--bg)", overflowY: "auto",
+      background: "var(--bg)",
       fontFamily: "'DM Sans', sans-serif",
     }}>
       <style>{`

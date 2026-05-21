@@ -219,16 +219,21 @@ export default function ProfitMonitor() {
   const [tage,       setTage]       = useState(30);
   const [emailModal, setEmailModal] = useState(null);
   const [toast,      setToast]      = useState(null);
+  const [loadError,  setLoadError]  = useState(null);
 
   const showToast = (text) => { setToast(text); setTimeout(()=>setToast(null),3500); };
 
   const laden = useCallback(async () => {
     setLoading(true);
+    setLoadError(null);
     try {
       const d = await api(`/profit/kanzlei/uebersicht?tage=${tage}`);
       setUebersicht(d);
-    } catch(e) { console.error(e); }
-    finally { setLoading(false); }
+    } catch (e) {
+      console.error(e);
+      setUebersicht(null);
+      setLoadError(e?.message || String(e));
+    } finally { setLoading(false); }
   }, [tage]);
 
   useEffect(() => { laden(); }, [laden]);
@@ -240,7 +245,7 @@ export default function ProfitMonitor() {
   const u = uebersicht;
 
   return (
-    <div style={{flex:1,background:"var(--bg)",overflowY:"auto",fontFamily:"var(--font-body)"}}>
+    <div style={{background:"var(--bg)",fontFamily:"var(--font-body)"}}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@300;400;500;600&display=swap');
         @keyframes spin{to{transform:rotate(360deg)}} @keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
@@ -309,6 +314,21 @@ export default function ProfitMonitor() {
             <div style={{width:36,height:36,borderRadius:"50%",
               border:`2px solid var(--border2)`,borderTopColor:"var(--accent)",
               animation:"spin 0.7s linear infinite"}}/>
+          </div>
+        )}
+
+        {!loading && loadError && (
+          <div style={{
+            padding:24,maxWidth:560,margin:"0 auto",
+            background:"color-mix(in srgb, var(--orange) 12%, var(--bg2))",
+            border:"1px solid color-mix(in srgb, var(--orange) 35%, transparent)",
+            borderRadius:14,fontSize:14,color:"var(--text)",lineHeight:1.6,
+          }}>
+            <div style={{fontWeight:600,marginBottom:8,color:"var(--orange)"}}>Profit-Daten konnten nicht geladen werden</div>
+            <div style={{color:"var(--text2)",marginBottom:12}}>
+              Häufig: API-Pfad (Nginx → FastAPI), Session abgelaufen oder Rate-Limit. Technisch: {loadError}
+            </div>
+            <Btn size="sm" variant="primary" onClick={laden}>Erneut versuchen</Btn>
           </div>
         )}
 

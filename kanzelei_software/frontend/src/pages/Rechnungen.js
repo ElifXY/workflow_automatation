@@ -344,7 +344,7 @@ export default function Rechnungen() {
   );
 
   return (
-    <div style={{flex:1,background:"var(--bg)",overflowY:"auto",overflowX:"hidden",
+    <div style={{background:"var(--bg)",overflowX:"hidden",
       fontFamily:"var(--font-body)",maxWidth:"100%",minWidth:0,boxSizing:"border-box"}}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@300;400;500;600&display=swap');

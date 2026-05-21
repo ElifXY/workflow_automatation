@@ -606,9 +606,7 @@ export default function Analytics() {
   return (
     <div
       style={{
-        flex: 1,
         background: "var(--bg)",
-        overflowY: "auto",
         fontFamily: "'DM Sans', sans-serif",
       }}
     >

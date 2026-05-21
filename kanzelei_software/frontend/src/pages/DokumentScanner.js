@@ -805,7 +805,7 @@ export default function DokumentScanner({ tabActive = true }) {
   };
 
   return(
-    <div style={{flex:1,background:"var(--bg)",overflowY:"auto",fontFamily:"var(--font-body)"}}>
+    <div style={{flex:1,background:"var(--bg)",fontFamily:"var(--font-body)",minHeight:0,overflow:"hidden"}}>
       <style>{`@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@300;400;500;600&display=swap');@keyframes spin{to{transform:rotate(360deg)}}@keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}@keyframes slideIn{from{transform:translateX(100%);opacity:0}to{transform:translateX(0);opacity:1}}*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}::-webkit-scrollbar{width:4px}::-webkit-scrollbar-thumb{background:var(--border2);border-radius:4px}`}</style>
 
       {toast&&<div style={{position:"fixed",bottom:24,right:24,zIndex:9999,background:"var(--bg3)",borderRadius:12,padding:"12px 18px",color:"var(--text)",fontSize:13,fontWeight:500,animation:"slideIn 0.25s ease",border:`1px solid ${toast.type==="error"?"var(--red)":toast.type==="warn"?"var(--orange)":"var(--green)"}44`,borderLeft:`3px solid ${toast.type==="error"?"var(--red)":toast.type==="warn"?"var(--orange)":"var(--green)"}`}}>{toast.text}</div>}
