@@ -6184,41 +6184,50 @@ def export_excel(name: str,
          summary="DATEV Buchungsstapel CSV (EXTF v700)")
 def export_datev(
     name:         str,
-    berater_nr:   str = Query("1234"),
-    mandanten_nr: str = Query("00000"),
+    berater_nr:   str = Query(""),
+    mandanten_nr: str = Query(""),
     jahr:         int = Query(None),
-    _user: dict = Depends(get_current_user),
+    _user: dict = Depends(require_permission("export:datev")),
 ):
     """DATEV EXTF v700 Buchungsstapel — Übergabe an DATEV (Buchführung bleibt in DATEV)."""
     if not bool(global_setting_holen("datev_export_aktiv")):
         raise HTTPException(503, "DATEV Export ist deaktiviert")
     from fastapi.responses import StreamingResponse
     from core.export_service import export_datev_buchungsstapel
+    from core.datev_export_utils import normalize_berater_nr, validate_datev_buchungsstapel_csv
     import io
     store = get_ds(_user)
     m        = get_mandant_or_404(name, store)
     aufgaben = [a for a in store.hole_fristen().values() if a.get("mandant") == name]
+    bnr = normalize_berater_nr(berater_nr or global_setting_holen("datev_berater_nr") or "12345")
     try:
-        csv_bytes = export_datev_buchungsstapel(name, m, aufgaben, berater_nr, mandanten_nr, jahr)
+        csv_bytes = export_datev_buchungsstapel(name, m, aufgaben, bnr, mandanten_nr or None, jahr)
+        meta = validate_datev_buchungsstapel_csv(csv_bytes)
         datum     = datetime.now().strftime("%Y%m%d")
-        filename  = f"EXTF_{datum}_{name.replace(' ', '_')}_Buchungsstapel.csv"
-        store.log_eintrag(f"EXPORT_DATEV | {name}")
+        safe = re.sub(r"[^\w\-]+", "_", name).strip("_") or "Mandant"
+        filename  = f"EXTF_{datum}_{safe}_Buchungsstapel.csv"
+        store.log_eintrag(f"EXPORT_DATEV | {name} | {meta.get('buchungen', 0)} Buchungen")
         from core.product_focus import DATEV_EXPORT_HINWEIS
+        warn = (meta.get("warnings") or [""])[0]
         return StreamingResponse(
             io.BytesIO(csv_bytes),
             media_type="text/csv; charset=windows-1252",
             headers={
                 "Content-Disposition": f'attachment; filename="{filename}"',
                 "X-DATEV-Hinweis": DATEV_EXPORT_HINWEIS[:200],
+                "X-DATEV-Warnings": (warn or "")[:300],
+                "X-DATEV-Buchungen": str(meta.get("buchungen", 0)),
             },
         )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     except Exception as e:
         raise HTTPException(500, f"DATEV Export Fehler: {e}")
 
 @app.get("/export/datev/stammdaten", tags=["Export"],
          summary="DATEV Stammdaten aller Mandanten als Debitoren")
-def export_datev_stammdaten_ep(berater_nr: str = Query("1234"),
-    _user: dict = Depends(get_current_user)):
+def export_datev_stammdaten_ep(berater_nr: str = Query(""),
+    _user: dict = Depends(require_permission("export:datev"))):
     """Alle Mandanten als DATEV-Debitorenstammdaten exportieren."""
     if not bool(global_setting_holen("datev_export_aktiv")):
         raise HTTPException(503, "DATEV Export ist deaktiviert")
@@ -6226,12 +6235,14 @@ def export_datev_stammdaten_ep(berater_nr: str = Query("1234"),
     store = get_ds(_user)
     from fastapi.responses import StreamingResponse
     from core.export_service import export_datev_stammdaten
+    from core.datev_export_utils import normalize_berater_nr
     import io
     mandanten = store.hole_mandanten()
     if not mandanten:
         raise HTTPException(404, "Keine Mandanten vorhanden")
+    bnr = normalize_berater_nr(berater_nr or global_setting_holen("datev_berater_nr") or "12345")
     try:
-        csv_bytes = export_datev_stammdaten(mandanten, berater_nr)
+        csv_bytes = export_datev_stammdaten(mandanten, bnr)
         datum     = datetime.now().strftime("%Y%m%d")
         store.log_eintrag("EXPORT_DATEV_STAMMDATEN")
         return StreamingResponse(
@@ -6239,6 +6250,8 @@ def export_datev_stammdaten_ep(berater_nr: str = Query("1234"),
             media_type="text/csv; charset=windows-1252",
             headers={"Content-Disposition": f'attachment; filename="EXTF_{datum}_Stammdaten.csv"'}
         )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     except Exception as e:
         raise HTTPException(500, f"Stammdaten Export Fehler: {e}")
 
@@ -6308,7 +6321,7 @@ def export_csv_aufgaben_ep(_user: dict = Depends(get_current_user)):
 
 @app.get("/export/{name}/komplett", tags=["Export"],
          summary="Komplett-Paket ZIP (DATEV + ELSTER + Excel + CSV)")
-def export_komplett(name: str, _user: dict = Depends(get_current_user)):
+def export_komplett(name: str, _user: dict = Depends(require_permission("export:read"))):
     """
     ZIP mit allem: DATEV Buchungsstapel + Stammdaten, ELSTER XML,
     Excel-Report, Mandanten-CSV, Aufgaben-CSV + README.
@@ -6325,17 +6338,28 @@ def export_komplett(name: str, _user: dict = Depends(get_current_user)):
     aufgaben_list  = [a for a in alle_aufgaben.values() if a.get("mandant") == name]
     kommunikation  = store.hole_kommunikation(name)
     try:
-        zip_bytes = export_komplettpaket(
-            name, m, aufgaben_list, alle_mandanten, alle_aufgaben, kommunikation
+        from core.datev_export_utils import normalize_berater_nr
+        bnr = normalize_berater_nr(global_setting_holen("datev_berater_nr") or "12345")
+        zip_bytes, manifest = export_komplettpaket(
+            name, m, aufgaben_list, alle_mandanten, alle_aufgaben, kommunikation, berater_nr=bnr
         )
         datum    = datetime.now().strftime("%Y%m%d")
-        filename = f"{datum}_{name.replace(' ', '_')}_KanzleiAI_Export.zip"
-        store.log_eintrag(f"EXPORT_KOMPLETT | {name}")
+        safe = re.sub(r"[^\w\-]+", "_", name).strip("_") or "Mandant"
+        filename = f"{datum}_{safe}_KanzleiAI_Export.zip"
+        store.log_eintrag(
+            f"EXPORT_KOMPLETT | {name} | {manifest.get('dateien_gesamt', 0)} Dateien"
+        )
         return StreamingResponse(
             io.BytesIO(zip_bytes),
             media_type="application/zip",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "X-Export-Dateien": str(manifest.get("dateien_gesamt", 0)),
+                "X-Export-Fehler": str(len(manifest.get("fehler") or [])),
+            },
         )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     except Exception as e:
         log.error(f"Komplett-Export Fehler: {e}")
         raise HTTPException(500, f"Export Fehler: {e}")

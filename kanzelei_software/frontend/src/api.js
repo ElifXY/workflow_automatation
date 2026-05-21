@@ -788,8 +788,20 @@ const downloadFile = async (url, defaultFilename) => {
     headers: token ? { "Authorization": `Bearer ${token}` } : {},
   });
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || `Export Fehler ${res.status}`);
+    const ct = res.headers.get("content-type") || "";
+    let detail = `Export Fehler ${res.status}`;
+    if (ct.includes("application/json")) {
+      const err = await res.json().catch(() => ({}));
+      detail = err.detail || detail;
+    } else {
+      const txt = await res.text().catch(() => "");
+      if (txt) detail = txt.slice(0, 400);
+    }
+    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+  }
+  const datevWarn = res.headers.get("x-datev-warnings");
+  if (datevWarn) {
+    console.info("DATEV Hinweis:", datevWarn);
   }
   const blob     = await res.blob();
   const filename = res.headers.get("content-disposition")
