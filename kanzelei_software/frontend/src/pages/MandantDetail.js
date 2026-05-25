@@ -32,6 +32,7 @@ import {
   mandantAntwortEmpfangen,
   getSimulation,
   getMandantReport,
+  tageBisFristClient,
   workflowMonatsabschluss,
   workflowJahresabschluss,
   workflowOnboarding,
@@ -203,16 +204,13 @@ const AufgabenSection = ({ name, aufgaben, onToggle, onEdit, onDelete, onRefresh
     } finally { setAdding(false); }
   };
 
-  const jetzt = new Date();
   const filtered = aufgaben.filter((a) => !istErledigt(a));
 
   const getFristInfo = (fristStr, erledigt) => {
     if (erledigt) return { label: "Erledigt", color: "var(--green)", tage: null };
     if (!fristStr) return { label: "Kein Datum", color: "var(--text3)", tage: null };
-    const iso = String(fristStr).trim().slice(0, 10);
-    const f = /^\d{4}-\d{2}-\d{2}$/.test(iso) ? new Date(`${iso}T12:00:00`) : new Date(fristStr);
-    if (Number.isNaN(f.getTime())) return { label: "Ungültiges Datum", color: "var(--text3)", tage: null };
-    const diff = Math.round((f - jetzt) / 86400000);
+    const diff = tageBisFristClient(fristStr);
+    if (diff === null) return { label: "Ungültiges Datum", color: "var(--text3)", tage: null };
     if (diff < 0)  return { label: `${Math.abs(diff)}d überfällig`, color: "var(--red)",    tage: diff };
     if (diff === 0) return { label: "Heute fällig",                 color: "var(--red)",    tage: 0 };
     if (diff <= 1)  return { label: "Morgen fällig",                color: "var(--orange)", tage: 1 };

@@ -380,6 +380,36 @@ export function istAufgabeErledigt(a) {
   return Boolean(e);
 }
 
+/** Tage bis Frist (negativ = überfällig), analog zu core.frist_utils.tage_bis_frist */
+export function tageBisFristClient(fristStr) {
+  if (fristStr == null || fristStr === "") return null;
+  const s = String(fristStr).trim();
+  let d = null;
+  const iso = s.slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) {
+    d = new Date(`${iso}T12:00:00`);
+  } else {
+    const m = s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
+    if (m) d = new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]), 12, 0, 0);
+    else d = new Date(s);
+  }
+  if (!d || Number.isNaN(d.getTime())) return null;
+  const heute = new Date();
+  heute.setHours(12, 0, 0, 0);
+  return Math.round((d - heute) / 86400000);
+}
+
+export function aufgabeIstUeberfaellig(a) {
+  if (!a || istAufgabeErledigt(a)) return false;
+  const t = tageBisFristClient(a.frist);
+  return t !== null && t < 0;
+}
+
+export function zaehleUeberfaelligeAufgaben(aufgaben) {
+  if (!Array.isArray(aufgaben)) return 0;
+  return aufgaben.filter((a) => aufgabeIstUeberfaellig(a)).length;
+}
+
 /** GET /heute → ``ok_compat({ eintraege }``) */
 export function extrahiereHeuteEintraege(resp) {
   if (resp == null || typeof resp !== "object") return [];
@@ -799,10 +829,13 @@ const downloadFile = async (url, defaultFilename) => {
     }
     throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
   }
-  const datevWarn = res.headers.get("x-datev-warnings");
-  if (datevWarn) {
-    console.info("DATEV Hinweis:", datevWarn);
-  }
+  const meta = {
+    datevWarnings: res.headers.get("x-datev-warnings") || "",
+    datevBuchungen: res.headers.get("x-datev-buchungen") || "",
+    datevNutzen: res.headers.get("x-datev-nutzen") || "",
+    datevDebitor: res.headers.get("x-datev-debitor") || "",
+    exportDateien: res.headers.get("x-export-dateien") || "",
+  };
   const blob     = await res.blob();
   const filename = res.headers.get("content-disposition")
     ?.split("filename=")[1]?.replace(/"/g, "") || defaultFilename;
@@ -810,14 +843,25 @@ const downloadFile = async (url, defaultFilename) => {
   const a = document.createElement("a");
   a.href = objUrl; a.download = filename; a.click();
   URL.revokeObjectURL(objUrl);
+  return meta;
 };
+
+export const exportDatevInfo = (name, beraterNr = "") =>
+  apiFetch(`/export/${encodeURIComponent(name)}/datev/info${beraterNr ? `?berater_nr=${encodeURIComponent(beraterNr)}` : ""}`);
 
 export const exportExcel          = (name) =>
   downloadFile(`/export/${encodeURIComponent(name)}/excel`, `${name}_Report.xlsx`);
 
-export const exportDatev          = (name, beraterNr = "1234", mandantenNr = "00000") =>
-  downloadFile(`/export/${encodeURIComponent(name)}/datev?berater_nr=${beraterNr}&mandanten_nr=${mandantenNr}`,
-               `DATEV_${name}_Buchungsstapel.csv`);
+export const exportDatev          = (name, beraterNr = "", mandantenNr = "") => {
+  const q = new URLSearchParams();
+  if (beraterNr) q.set("berater_nr", beraterNr);
+  if (mandantenNr) q.set("mandanten_nr", mandantenNr);
+  const qs = q.toString();
+  return downloadFile(
+    `/export/${encodeURIComponent(name)}/datev${qs ? `?${qs}` : ""}`,
+    `DATEV_${name}_Buchungsstapel.csv`,
+  );
+};
 
 export const exportDatevStammdaten = (beraterNr = "1234") =>
   downloadFile(`/export/datev/stammdaten?berater_nr=${beraterNr}`, "DATEV_Stammdaten.csv");

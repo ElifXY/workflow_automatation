@@ -761,8 +761,8 @@ const LohnTab = () => {
             </div>
             <div>
               <div style={{fontSize:11,color:"var(--text3)",marginBottom:4}}>Urlaubstage/Jahr</div>
-              <input type="number" min={0} max={40} value={form.urlaubstage}
-                onChange={e=>setForm(f=>({...f,urlaubstage:parseInt(e.target.value,10)||0}))}
+              <DecimalInput integer min={0} max={40} value={form.urlaubstage} emptyValue={20}
+                onChange={v=>setForm(f=>({...f,urlaubstage:v}))}
                 style={inp()}/>
             </div>
             <div>

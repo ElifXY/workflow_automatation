@@ -26,6 +26,9 @@ import {
   extrahiereAufgabenArray,
   extrahiereHeuteEintraege,
   istAufgabeErledigt,
+  tageBisFristClient,
+  aufgabeIstUeberfaellig,
+  zaehleUeberfaelligeAufgaben,
   getPortalChatUnread,
   getHeuteOps,
   getPilotScorecard,
@@ -132,13 +135,12 @@ function mergeMandantenMitKpis(mandantenRows, kpiRows) {
   });
 
   // Pending-Aufgaben (lokal) in KPI-Zähler einrechnen — nur für echte Mandanten (keine Phantom-Namen).
-  const heute = new Date().toISOString().slice(0, 10);
   for (const p of lesePendingAufgaben()) {
     const name = String(p?.mandant || "").trim();
     if (!name || !byName.has(name)) continue;
     const prev = byName.get(name);
     const offen = !istAufgabeErledigt(p);
-    const ueberfaellig = offen && String(p?.frist || "") < heute;
+    const ueberfaellig = aufgabeIstUeberfaellig(p);
     byName.set(name, {
       ...prev,
       aufgaben_offen: Number(prev.aufgaben_offen || 0) + (offen ? 1 : 0),
@@ -444,9 +446,14 @@ const Sidebar = ({
   portalUnreadTotal = 0,
   navExtended = true,
   onNavExtendedChange,
+  heuteOps = null,
 }) => {
   const kritisch = kpis.filter(k => k.status === "KRITISCH").length;
   const wichtig  = kpis.filter(k => k.status === "WICHTIG").length;
+  const ueberfaelligAufgaben = Math.max(
+    Number(heuteOps?.aufgaben_ueberfaellig || 0),
+    (kpis || []).reduce((s, k) => s + Number(k.aufgaben_ueberfaellig || 0), 0),
+  );
   const normalizedRole = (role || "").toLowerCase();
   /** Auf dem Desktop: bei sehr schmaler Leiste Text kleiner statt komplett unsichtbar */
   const isCompact = !isMobile && width < 210;
@@ -454,7 +461,7 @@ const Sidebar = ({
     { id:"dashboard",    label:"Dashboard",        icon:"⬛" },
     { id:"mandanten",    label:"Mandanten",        icon:"◉",  badge:kpis.length },
     { id:"portalchat",   label:"Mandanten-Portal", icon:"💬", badge: portalUnreadTotal > 0 ? portalUnreadTotal : null },
-    { id:"aufgaben",     label:"Aufgaben",          icon:"▦",  badge:kritisch||null },
+    { id:"aufgaben",     label:"Aufgaben",          icon:"▦",  badge: ueberfaelligAufgaben > 0 ? ueberfaelligAufgaben : null },
     { id:"ki",           label:"KI-Assistent",     icon:"✦" },
     { id:"profit",       label:"Profit Monitor",   icon:"📈" },
     { id:"steuerbot",    label:"Steuer-Autopilot", icon:"🤖" },
@@ -623,7 +630,7 @@ const Sidebar = ({
                   }),
               }}>{item.label}</span>
               {item.badge ? (
-                <Badge color={item.id==="aufgaben"&&kritisch?"var(--red)":"var(--accent)"}
+                <Badge color={item.id==="aufgaben"&&ueberfaelligAufgaben>0?"var(--red)":"var(--accent)"}
                        style={{ fontSize:10, flexShrink: 0 }}>
                   {item.badge}
                 </Badge>
@@ -1551,6 +1558,7 @@ function AufgabenSeite({ kpis, heute, onRefresh, isMobile = false }) {
   };
 
   const offen    = allAufgaben.filter((a) => !istAufgabeErledigt(a));
+  const ueberfaelligCount = zaehleUeberfaelligeAufgaben(offen);
   const kritisch = offen.filter(a => a.prioritaet === "kritisch" || a.prioritaet === "hoch");
 
   const inp = {
@@ -1567,7 +1575,7 @@ function AufgabenSeite({ kpis, heute, onRefresh, isMobile = false }) {
         Aufgaben & Fristen
       </div>
       <div style={{ fontSize:13, color:"var(--text3)", marginBottom:24 }}>
-        {offen.length} offen · {kritisch.length} kritisch/hoch
+        {offen.length} offen · {ueberfaelligCount} überfällig · {kritisch.length} kritisch/hoch
         {ladeAufgaben && <span style={{ marginLeft:12, opacity:0.5 }}><Spinner size={12} /></span>}
       </div>
 
@@ -2419,6 +2427,7 @@ function AppInner() {
     } catch {}
   }, []);
   const [kpis,         setKpis]         = useState([]);
+  const [heuteOpsGlobal, setHeuteOpsGlobal] = useState(null);
   const [heute,        setHeute]        = useState([]);
   const [empfehlungen, setEmpfehlungen] = useState([]);
   const [loading,      setLoading]      = useState(true);
@@ -2627,8 +2636,9 @@ function AppInner() {
   const ladeAlles = useCallback(async (initial=false) => {
     try {
       if (initial) setLoading(true);
-      const [m, k, h, e, r, b] = await Promise.allSettled([
+      const [m, k, h, e, r, b, ops] = await Promise.allSettled([
         getMandanten(), getKpis(), getHeute(), getEmpfehlungen(), getSaasReadiness(), getBillingUsage(),
+        getHeuteOps(),
       ]);
       const mandantenRows = m.status === "fulfilled" ? normalisiereMandanten(m.value) : [];
       const kpiRows = k.status === "fulfilled" ? normalisiereKpis(k.value) : [];
@@ -2639,6 +2649,7 @@ function AppInner() {
         return mergedRows;
       });
       if (h.status === "fulfilled") setHeute(extrahiereHeuteEintraege(h.value));
+      if (ops.status === "fulfilled") setHeuteOpsGlobal(ops.value?.data ?? ops.value ?? null);
       if (e.status === "fulfilled") {
         const emp = Array.isArray(e.value) ? e.value : [];
         setEmpfehlungen(emp.filter(x => x?.mandant && (x?.empfehlungen?.length || x?.empfehlung)));
@@ -2911,6 +2922,7 @@ function AppInner() {
           portalUnreadTotal={portalUnreadTotal}
           navExtended={navExtended}
           onNavExtendedChange={setNavExtended}
+          heuteOps={heuteOpsGlobal}
         />
       ) : null}
       {!isMobile && sidebarVisible ? (
