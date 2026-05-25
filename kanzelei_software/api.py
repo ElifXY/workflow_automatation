@@ -1523,6 +1523,8 @@ def _required_permission_for_path(path: str, method: str) -> Optional[str]:
         return "settings:write" if m in {"POST", "PUT", "PATCH", "DELETE"} else "settings:read"
     if p.startswith("/admin/") or p.startswith("/api/admin/") or p.startswith("/users"):
         return "settings:write"
+    if p.startswith("/regeln"):
+        return "engine:run" if m in {"POST", "PUT", "PATCH", "DELETE"} else "engine:read"
     if p.startswith("/workflow/"):
         return "engine:run"
     if p.startswith("/engine/run"):

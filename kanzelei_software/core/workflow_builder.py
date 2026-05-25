@@ -233,8 +233,32 @@ class WorkflowBaukasten:
         elif typ == "umsatz_über":
             return m.get("umsatz", 0) > float(p or 0)
 
-        elif typ in ("taeglich", "monatlich", "manuell"):
+        elif typ == "taeglich":
+            # Optional: nur ab konfigurierter Uhrzeit (HH:MM)
+            if p and isinstance(p, str) and ":" in p:
+                return datetime.now().strftime("%H:%M") >= p[:5]
             return True
+
+        elif typ == "monatlich":
+            try:
+                ziel_tag = int(p if p is not None else 1)
+            except (TypeError, ValueError):
+                ziel_tag = 1
+            return datetime.now().day == max(1, min(28, ziel_tag))
+
+        elif typ == "manuell":
+            return True
+
+        elif typ == "dokument_hochgeladen":
+            uploads = self.ds.portal_liste("upload") or []
+            return any(u.get("mandant") == mandant for u in uploads)
+
+        elif typ == "unterschrift_erledigt":
+            sigs = self.ds.portal_liste("unterschrift") or []
+            return any(
+                u.get("mandant") == mandant and u.get("status") == "erledigt"
+                for u in sigs
+            )
 
         return False
 
@@ -312,6 +336,24 @@ class WorkflowBaukasten:
                 "timestamp": datetime.now().isoformat(),
                 "workflow":  regel["name"],
             })
+            to_addr = (params.get("empfaenger") or m.get("email") or "").strip()
+            if to_addr and "@" in to_addr:
+                try:
+                    from core.daten_speicher import email_outbox_enqueue
+
+                    kid = str(getattr(self.ds, "kanzlei_id", None) or "default")
+                    idem = f"wf-email|{regel['id']}|{mandant}|{datetime.now().strftime('%Y-%m-%d')}"
+                    email_outbox_enqueue(
+                        kanzlei_id=kid,
+                        mandant=mandant,
+                        to_email=to_addr,
+                        subject=params.get("betreff") or f"Mitteilung — {mandant}",
+                        body_text=text,
+                        body_html="",
+                        idempotency_key=idem,
+                    )
+                except Exception as e:
+                    log.warning("Workflow E-Mail Outbox %s: %s", mandant, e)
             self.ds.log_eintrag(f"WORKFLOW_EMAIL | {mandant} | {regel['name']}")
 
         elif typ == "aufgabe_anlegen":
@@ -347,6 +389,39 @@ class WorkflowBaukasten:
                 mm["fehlende_dokumente_liste"] = fehlende
                 self.ds.mandant_speichern(mandant, mm)
 
+        elif typ == "unterschrift_anfragen":
+            try:
+                from portal_api import erstelle_unterschrift_anfrage
+
+                erstelle_unterschrift_anfrage(
+                    self.ds,
+                    mandant,
+                    params.get("dokumentname", "Dokument").strip() or "Dokument",
+                    params.get("dokument_b64"),
+                    params.get("dokumenttyp", "pdf"),
+                    params.get("betreff", f"Unterschrift — {params.get('dokumentname', 'Dokument')}"),
+                    params.get("hinweis", ""),
+                    int(params.get("gueltig_tage", 14) or 14),
+                    portal_sichtbar=True,
+                )
+            except Exception as e:
+                log.warning("unterschrift_anfragen %s: %s", mandant, e)
+                raise
+
+        elif typ == "freigabe_anfragen":
+            aufgabe_id = str(uuid.uuid4())
+            self.ds.aufgabe_speichern(aufgabe_id, {
+                "id":           aufgabe_id,
+                "mandant":      mandant,
+                "beschreibung": params.get("titel", f"Freigabe: {regel['name']}"),
+                "frist":        (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d"),
+                "prioritaet":   "hoch",
+                "kategorie":    "workflow_freigabe",
+                "erledigt":     False,
+                "erstellt_am":  datetime.now().isoformat(),
+                "workflow":     regel["name"],
+            })
+
         elif typ == "benachrichtigung":
             self.ds.log_eintrag(
                 f"WORKFLOW_NOTIZ | {mandant} | {params.get('text', '')[:80]}"
@@ -363,6 +438,13 @@ class WorkflowBaukasten:
 
         # Weitere Aktionen (honorar_anpassen, datev_export etc.) werden
         # als Aufgaben angelegt, nicht direkt ausgeführt
+        elif typ == "workflow_starten":
+            ziel_id = params.get("workflow_id") or params.get("regel_id")
+            if ziel_id:
+                ziel = self.ds.workflow_regel_holen(str(ziel_id))
+                if ziel and ziel.get("aktiv"):
+                    self._fuehre_regel_aus(ziel, self.ds.hole_mandanten())
+
         elif typ in ("honorar_anpassen", "datev_export", "monatsabschluss"):
             aufgabe_id = str(uuid.uuid4())
             self.ds.aufgabe_speichern(aufgabe_id, {

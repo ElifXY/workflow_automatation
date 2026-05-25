@@ -66,25 +66,50 @@ def job_id(name: str) -> str:
     return f"{datetime.now().strftime('%Y-%m-%d')}_{name}"
 
 
+def _iter_tenant_stores():
+    """Pro Kanzlei eigener DatenSpeicher (Mandanten/Regeln sind tenant-isoliert)."""
+    try:
+        from backend.auth import liste_kanzleien
+
+        tenants = liste_kanzleien() or []
+    except Exception as e:
+        log.warning("Kanzleien-Liste nicht verfügbar, nur default: %s", e)
+        tenants = [{"id": "default"}]
+    if not tenants:
+        tenants = [{"id": "default"}]
+    for t in tenants:
+        kid = str((t or {}).get("id") or "").strip() or "default"
+        yield kid, DatenSpeicher(kanzlei_id=kid)
+
+
 def run_workflow_batch():
-    """Alle aktiven Workflow-Regeln ausführen."""
-    if not bool(_setting("auto_workflow_monatsabschluss", True)):
-        return
+    """Alle aktiven Workflow-Regeln ausführen (je Kanzlei)."""
     jid = job_id("workflow")
     if jid in _heute_gelaufen:
         return
     try:
         from core.workflow_builder import WorkflowBaukasten
-        from core.proaktiver_bot   import ProaktiverBot
-        bot     = ProaktiverBot(ds)
-        builder = WorkflowBaukasten(ds, bot=bot)
-        result  = builder.fuehre_alle_aus()
-        log.info(f"Workflow-Batch: {result['regeln_geprueft']} Regeln, "
-                 f"{result['aktionen']} Aktionen")
+        from core.proaktiver_bot import ProaktiverBot
+
+        total_regeln = 0
+        total_aktionen = 0
+        for kid, store in _iter_tenant_stores():
+            if not bool(store.setting_holen("auto_workflow_monatsabschluss", True)):
+                continue
+            bot = ProaktiverBot(store)
+            builder = WorkflowBaukasten(store, bot=bot)
+            result = builder.fuehre_alle_aus()
+            total_regeln += int(result.get("regeln_geprueft", 0) or 0)
+            total_aktionen += int(result.get("aktionen", 0) or 0)
+            if result.get("aktionen"):
+                log.info(
+                    "Workflow-Batch kanzlei=%s: %s Regeln, %s Aktionen",
+                    kid, result.get("regeln_geprueft"), result.get("aktionen"),
+                )
+        log.info(f"Workflow-Batch gesamt: {total_regeln} Regeln, {total_aktionen} Aktionen")
         _heute_gelaufen.add(jid)
         ds.log_eintrag(
-            f"SCHEDULER_WORKFLOW | {result['regeln_geprueft']} Regeln | "
-            f"{result['aktionen']} Aktionen"
+            f"SCHEDULER_WORKFLOW | {total_regeln} Regeln | {total_aktionen} Aktionen"
         )
     except Exception as e:
         log.error(f"Workflow-Batch Fehler: {e}")

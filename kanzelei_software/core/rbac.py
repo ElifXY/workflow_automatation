@@ -100,7 +100,7 @@ _BASE_ROLE_PERMISSIONS: Dict[str, Set[str]] = {
         "lohn:read", "lohn:approve",
         "payments:release",
         "export:read", "export:datev",
-        "settings:read",
+        "settings:read", "settings:write",
         "engine:run", "engine:read",
         "email:send",
         "reports:read",
