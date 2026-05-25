@@ -2149,38 +2149,54 @@ class DatenSpeicher(DatenSpeicher):
     # AUFGABEN
     # ══════════════════════════════════════════════════════════
 
-    def hole_fristen(self) -> Dict[str, Dict]:
-        """Alle Aufgaben dieser Kanzlei als Dict {id: daten}."""
-        if _pg_mandanten_mode():
-            conn = _pg_conn()
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT * FROM aufgaben WHERE kanzlei_id = %s ORDER BY frist",
-                    (self.kanzlei_id,),
-                )
-                rows = cur.fetchall()
-            return {r["id"]: _pg_normalize_row_dict(dict(r)) for r in rows}
+    def _hole_fristen_sqlite(self) -> Dict[str, Dict]:
         rows = self._conn().execute(
             "SELECT * FROM aufgaben WHERE kanzlei_id = ? ORDER BY frist",
-            (self.kanzlei_id,)
+            (self.kanzlei_id,),
         ).fetchall()
         return {r["id"]: dict(r) for r in rows}
 
+    def _hole_fristen_postgres(self) -> Dict[str, Dict]:
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM aufgaben WHERE kanzlei_id = %s ORDER BY frist",
+                (self.kanzlei_id,),
+            )
+            rows = cur.fetchall()
+        return {r["id"]: _pg_normalize_row_dict(dict(r)) for r in rows}
+
+    def hole_fristen(self) -> Dict[str, Dict]:
+        """Alle Aufgaben dieser Kanzlei als Dict {id: daten}."""
+        if _pg_mandanten_mode():
+            merged = self._hole_fristen_postgres()
+            try:
+                for aid, row in self._hole_fristen_sqlite().items():
+                    merged.setdefault(aid, row)
+            except Exception as e:
+                log.debug("hole_fristen sqlite-merge übersprungen: %s", e)
+            return merged
+        return self._hole_fristen_sqlite()
+
     def hole_aufgaben_fuer_mandant(self, mandant: str) -> List[Dict]:
-        rows = self._conn().execute(
-            "SELECT * FROM aufgaben WHERE kanzlei_id = ? AND mandant = ? ORDER BY frist",
-            (self.kanzlei_id, mandant)
-        ).fetchall()
-        result = []
-        for r in rows:
-            a = dict(r)
-            if a.get("frist"):
-                try:
-                    diff = (datetime.strptime(a["frist"], "%Y-%m-%d") - datetime.now()).days
-                    a["tage_bis_frist"] = diff
-                except Exception:
-                    a["tage_bis_frist"] = None
-            result.append(a)
+        from core.frist_utils import tage_bis_frist
+
+        result: List[Dict] = []
+        for a in self.hole_fristen().values():
+            if (a.get("mandant") or "") != mandant:
+                continue
+            row = dict(a)
+            tage = tage_bis_frist(row.get("frist"))
+            row["tage_bis_frist"] = tage
+            row["ueberfaellig"] = tage is not None and tage < 0
+            row["dringend"] = tage is not None and 0 <= tage <= 3
+            result.append(row)
+        result.sort(
+            key=lambda x: (
+                1 if x.get("erledigt") else 0,
+                x.get("tage_bis_frist") if x.get("tage_bis_frist") is not None else 9999,
+            )
+        )
         return result
 
     def hole_aufgaben_naechste_tage(self, tage: int = 7) -> List[Dict]:
@@ -2200,7 +2216,57 @@ class DatenSpeicher(DatenSpeicher):
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def _aufgabe_speichern_postgres(self, aufgabe_id: str, daten: Dict) -> bool:
+        try:
+            conn = _pg_conn()
+            erledigt = 1 if daten.get("erledigt") else 0
+            erledigt_am = daten.get("erledigt_am") if daten.get("erledigt") else None
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO aufgaben
+                        (id, kanzlei_id, mandant, beschreibung, frist, prioritaet,
+                         kategorie, erledigt, erledigt_am, zugewiesen_an, notiz, quelle)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        mandant       = EXCLUDED.mandant,
+                        beschreibung  = EXCLUDED.beschreibung,
+                        frist         = EXCLUDED.frist,
+                        prioritaet    = EXCLUDED.prioritaet,
+                        kategorie     = EXCLUDED.kategorie,
+                        erledigt      = EXCLUDED.erledigt,
+                        erledigt_am   = EXCLUDED.erledigt_am,
+                        zugewiesen_an = EXCLUDED.zugewiesen_an,
+                        notiz         = EXCLUDED.notiz,
+                        quelle        = EXCLUDED.quelle
+                    """,
+                    (
+                        aufgabe_id,
+                        self.kanzlei_id,
+                        daten.get("mandant", ""),
+                        daten.get("beschreibung", ""),
+                        daten.get("frist", ""),
+                        daten.get("prioritaet", "normal"),
+                        daten.get("kategorie", "allgemein"),
+                        erledigt,
+                        erledigt_am,
+                        daten.get("zugewiesen_an", ""),
+                        daten.get("notiz", ""),
+                        daten.get("quelle", "manuell"),
+                    ),
+                )
+            conn.commit()
+            return True
+        except Exception as e:
+            log.error(f"aufgabe_speichern({aufgabe_id}) [pg]: {e}")
+            try:
+                _pg_conn().rollback()
+            except Exception:
+                pass
+            return False
+
     def aufgabe_speichern(self, aufgabe_id: str, daten: Dict) -> bool:
+        ok_sqlite = False
         try:
             with db_transaction(self.kanzlei_id) as conn:
                 ps = daten.get("portal_sichtbar")
@@ -2238,22 +2304,42 @@ class DatenSpeicher(DatenSpeicher):
                     daten.get("quelle", "manuell"),
                     portal_sichtbar,
                 ))
-            return True
+            ok_sqlite = True
         except Exception as e:
             log.error(f"aufgabe_speichern({aufgabe_id}): {e}")
-            return False
+        if _pg_mandanten_mode():
+            ok_pg = self._aufgabe_speichern_postgres(aufgabe_id, daten)
+            return ok_pg or ok_sqlite
+        return ok_sqlite
 
     def aufgabe_loeschen(self, aufgabe_id: str) -> bool:
+        ok = False
+        if _pg_mandanten_mode():
+            try:
+                conn = _pg_conn()
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM aufgaben WHERE id = %s AND kanzlei_id = %s",
+                        (aufgabe_id, self.kanzlei_id),
+                    )
+                conn.commit()
+                ok = True
+            except Exception as e:
+                log.error(f"aufgabe_loeschen({aufgabe_id}) [pg]: {e}")
+                try:
+                    _pg_conn().rollback()
+                except Exception:
+                    pass
         try:
             with db_transaction(self.kanzlei_id) as conn:
                 conn.execute(
                     "DELETE FROM aufgaben WHERE id = ? AND kanzlei_id = ?",
-                    (aufgabe_id, self.kanzlei_id)
+                    (aufgabe_id, self.kanzlei_id),
                 )
-            return True
+            ok = True
         except Exception as e:
             log.error(f"aufgabe_loeschen({aufgabe_id}): {e}")
-            return False
+        return ok
 
     # ══════════════════════════════════════════════════════════
     # KOMMUNIKATION / TIMELINE

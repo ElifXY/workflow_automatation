@@ -17,6 +17,11 @@ def parse_frist(frist: Any) -> Optional[date]:
             return datetime.strptime(s[:10], "%Y-%m-%d").date()
         except ValueError:
             pass
+    if "T" in s[:20] or " " in s[:20]:
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00")[:26]).date()
+        except ValueError:
+            pass
     for fmt in ("%d.%m.%Y", "%d/%m/%Y", "%d.%m.%y", "%d/%m/%y"):
         try:
             return datetime.strptime(s[:10] if len(s) >= 10 else s, fmt).date()

@@ -85,6 +85,7 @@ def heute_operations(store) -> Dict[str, Any]:
         "bot_top_mandanten": bot_pro_mandant[:5],
         "docs_top_mandanten": mandanten_mit_docs[:5],
         "ueberfaellig_preview": ueberfaellig_liste,
+        "referenz_datum": heute_datum.isoformat(),
         "timestamp": jetzt.isoformat(),
     }
 
