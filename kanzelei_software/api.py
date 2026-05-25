@@ -1293,7 +1293,25 @@ def health():
 @app.get("/api/ready", tags=["System"])
 def ready():
     """Readiness für Load-Balancer / go_live_check (ohne DB-Schreiblast)."""
-    return {"status": "ready", "timestamp": datetime.now().isoformat()}
+    return {
+        "status": "ready",
+        "build": "api-deploy-20260519b",
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+@app.get("/system/build", tags=["System"])
+@app.get("/api/system/build", tags=["System"])
+def system_build():
+    """Öffentlicher Deploy-Marker (ohne Auth) — zum Prüfen ob die API-Image-Version live ist."""
+    return {
+        "api_build": "api-deploy-20260519b",
+        "ui_build_expected": "deploy-20260519b",
+        "portal_build": "portal-deploy-20260519b",
+        "email_absender_build": "email-absender-20260519b",
+        "check_ui": "/build-info.json",
+        "check_portal": "/portal/health",
+    }
 
 
 @app.get("/api/v1/meta", tags=["System"])
@@ -1464,11 +1482,14 @@ _AUTH_EXEMPT_EXACT_PATHS = frozenset(
         # Nginx / öffentliche Checks nutzen /api/* — Präfixe "/ready" schützen nicht "/api/ready".
         "/api/health",
         "/api/ready",
+        "/system/build",
+        "/api/system/build",
     }
 )
 _AUTH_EXEMPT_PREFIXES = (
     "/health",
     "/ready",
+    "/system/build",
     "/docs",
     "/redoc",
     "/openapi.json",
@@ -1909,7 +1930,7 @@ def email_absender(_user: dict = Depends(get_current_user)):
 
     r = resolve_email_from(store.kanzlei_id, store)
     return ok_compat({
-        "build": "email-absender-20260519",
+        "build": "email-absender-20260519b",
         "display_name": r["display_name"],
         "from_email": r["from_email"],
         "from_header": r["from_header"],

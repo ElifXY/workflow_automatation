@@ -236,7 +236,7 @@ def portal_startseite():
 
 @portal_router.get("/portal/health")
 def health():
-    return {"status": "ok", "version": "2.1.0", "build": "portal-sig-20260519"}
+    return {"status": "ok", "version": "2.1.0", "build": "portal-deploy-20260519b"}
 
 @portal_router.post("/portal/login", tags=["Portal"])
 @portal_router.get("/portal/login", tags=["Portal"])

@@ -122,6 +122,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.nginx
+      args:
+        APP_BUILD_ID: ${APP_BUILD_ID:-deploy-20260519b}
+        GIT_REV: ${GIT_REV:-local}
     image: kanzlei-nginx:local
     container_name: kanzlei_nginx
     ports:

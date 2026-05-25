@@ -36,18 +36,54 @@ server {
     gzip_types text/plain application/json application/javascript text/css;
     gzip_min_length 1000;
 
+    # index.html nie lange cachen — sonst zeigt der Browser nach Deploy alte JS-Bundles
+    location = /index.html {
+        root /usr/share/nginx/html;
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        add_header Pragma "no-cache" always;
+        expires -1;
+    }
+
+    location = /build-info.json {
+        root /usr/share/nginx/html;
+        default_type application/json;
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        expires -1;
+    }
+
+    location /static/ {
+        root /usr/share/nginx/html;
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+    }
+
     location / {
         root /usr/share/nginx/html;
         index index.html;
         try_files $uri $uri/ /index.html;
-        expires 1h;
-        add_header Cache-Control "public, no-transform";
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        expires -1;
     }
 
+    # Login/OAuth: /api/auth/* → /auth/* (explizit, vor generischem /api/-Strip)
+    location ^~ /api/auth/ {
+        limit_req zone=login_limit burst=10 nodelay;
+        rewrite ^/api/auth/(.*)$ /auth/$1 break;
+        proxy_pass http://api_backend;
+        include /etc/nginx/snippets/proxy_params.conf;
+    }
+
+    # FastAPI: Routen unter /api/v1/* sind mit diesem Präfix registriert — URI nicht kürzen.
+    location ^~ /api/v1/ {
+        limit_req zone=api_limit burst=20 nodelay;
+        proxy_pass http://api_backend;
+        include /etc/nginx/snippets/proxy_params.conf;
+    }
+
+    # Alle anderen /api/*: SPA nutzt REACT_APP_API_URL=/api, Backend aber /mandanten, /ki/chat, …
     location /api/ {
         limit_req zone=api_limit burst=20 nodelay;
-        # Kein trailing slash => /api/* bleibt unverändert am Backend erhalten.
-        proxy_pass http://api_backend;
+        proxy_pass http://api_backend/;
         include /etc/nginx/snippets/proxy_params.conf;
     }
 

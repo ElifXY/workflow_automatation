@@ -5,11 +5,17 @@
 FROM node:20-alpine AS frontend_build
 WORKDIR /app
 ARG REACT_APP_API_URL=/api
+ARG APP_BUILD_ID=deploy-20260519b
+ARG GIT_REV=unknown
 ENV REACT_APP_API_URL=$REACT_APP_API_URL
+ENV REACT_APP_BUILD_ID=$APP_BUILD_ID
 COPY frontend/package*.json ./
 RUN npm install --no-audit --no-fund
 COPY frontend/ ./
-RUN npm run build
+# Prüfbar unter https://<domain>/build-info.json (nach Deploy)
+RUN printf '{"build":"%s","git":"%s","built_at":"%s","features":["rate_limit_fix","email_absender_visible"]}\n' \
+    "$APP_BUILD_ID" "$GIT_REV" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > public/build-info.json \
+    && npm run build
 
 FROM nginx:1.25-alpine
 RUN apk add --no-cache gettext curl openssl \
