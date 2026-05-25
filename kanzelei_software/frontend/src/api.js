@@ -515,7 +515,8 @@ export const unwrapApiData = (body) => {
   return body;
 };
 
-export const getEmailAbsender = () => apiFetch("/email/absender");
+export const getEmailAbsender = async () =>
+  unwrapApiData(await apiFetch("/email/absender"));
 
 // BUGFIX: Alter Endpoint war /email/{name} — neu: /email/{name}/vorschau
 export const getEmailPreview = async (name) =>

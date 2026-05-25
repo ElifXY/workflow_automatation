@@ -87,7 +87,9 @@ export default function PortalChatSuite({
       setInbox(rows);
       onInboxChange?.();
     } catch (e) {
-      showToast?.(e.message || "Chat-Liste konnte nicht geladen werden", "error");
+      if (e?.status !== 429) {
+        showToast?.(e.message || "Chat-Liste konnte nicht geladen werden", "error");
+      }
       setInbox([]);
     } finally {
       setLoading(false);
@@ -96,7 +98,7 @@ export default function PortalChatSuite({
 
   useEffect(() => {
     laden();
-    const t = setInterval(laden, 60000);
+    const t = setInterval(laden, 120000);
     return () => clearInterval(t);
   }, [laden]);
 

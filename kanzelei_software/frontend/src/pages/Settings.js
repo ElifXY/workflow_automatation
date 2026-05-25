@@ -1306,10 +1306,10 @@ const SchnittstellenTab = ({s, save}) => {
             fontFamily:"'DM Sans',sans-serif"}}/>
       </Row>
 
-      <Row label="API Rate Limit" description="Max. Anfragen pro Minute an Kanzlei AI API">
+      <Row label="API Rate Limit (Schreibzugriffe)" description="0 = aus. Nur POST/PUT/DELETE zählen — Lese-Polling blockiert nicht. Unter 500 wird ignoriert.">
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
-          <input type="number" defaultValue={s.api_rate_limit_pro_minute||600} min={100} max={10000}
-            onBlur={e=>save("api_rate_limit_pro_minute",parseInt(e.target.value))}
+          <input type="number" defaultValue={s.api_rate_limit_pro_minute ?? 0} min={0} max={10000}
+            onBlur={e=>save("api_rate_limit_pro_minute",parseInt(e.target.value,10)||0)}
             style={{width:70,background:"var(--bg)",border:`1px solid var(--border2)`,borderRadius:8,
               color:"var(--text)",padding:"7px 10px",fontSize:14,textAlign:"center",
               outline:"none",fontFamily:"'DM Sans',sans-serif"}}/>

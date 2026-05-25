@@ -115,8 +115,7 @@ export default function KiEmailComposer({
   useEffect(() => {
     let cancelled = false;
     getEmailAbsender()
-      .then((raw) => {
-        const d = raw?.data ?? raw;
+      .then((d) => {
         if (!cancelled && d) {
           setAbsenderInfo({
             anzeige: d.from_header || d.display_name || "",
@@ -266,24 +265,24 @@ export default function KiEmailComposer({
         </div>
       )}
 
-      {(absenderInfo?.anzeige || absenderInfo?.name) && (
-        <div style={{
-          marginBottom: 12, padding: "10px 12px", borderRadius: 10,
-          background: "var(--bg3)", border: "1px solid var(--border)",
-        }}>
-          <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 4,
-            textTransform: "uppercase", letterSpacing: "0.06em" }}>
-            Absender (im Postfach des Empfängers)
-          </div>
-          <div style={{ fontSize: 14, color: "var(--text)", fontWeight: 500 }}>
-            {absenderInfo.anzeige || absenderInfo.name}
-          </div>
-          <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 6, lineHeight: 1.5 }}>
-            Ändern unter Einstellungen → Kanzlei-Daten → „Name im Postfach des Empfängers“
-            {absenderInfo.build ? "" : " (nach Deploy: api + nginx neu bauen)"}
-          </div>
+      <div style={{
+        marginBottom: 12, padding: "10px 12px", borderRadius: 10,
+        background: "var(--bg3)", border: "1px solid var(--border)",
+      }}>
+        <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 4,
+          textTransform: "uppercase", letterSpacing: "0.06em" }}>
+          Absender (im Postfach des Empfängers)
         </div>
-      )}
+        <div style={{ fontSize: 14, color: "var(--text)", fontWeight: 500 }}>
+          {absenderInfo?.anzeige || absenderInfo?.name || "— wird geladen …"}
+        </div>
+        {absenderInfo?.email ? (
+          <div style={{ fontSize: 12, color: "var(--text2)", marginTop: 4 }}>{absenderInfo.email}</div>
+        ) : null}
+        <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 6, lineHeight: 1.5 }}>
+          Ändern unter Einstellungen → Kanzlei-Daten → „Name im Postfach des Empfängers“
+        </div>
+      </div>
 
       {!preview ? (
         <button
