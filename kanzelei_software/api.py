@@ -738,11 +738,18 @@ def darf_email_senden(name: str, mindest_abstand_stunden: int = 24, store: Optio
         return True
 
 
-def send_email_smtp(to_email: str, subject: str, body: str, html_body: str = None) -> bool:
+def send_email_smtp(
+    to_email: str,
+    subject: str,
+    body: str,
+    html_body: str = None,
+    from_header: Optional[str] = None,
+) -> bool:
     """
     Sendet Email via SMTP.
     FIX: Sendet HTML wenn html_body angegeben — nicht mehr als Plain Text.
     Fallback: Plain Text wenn kein HTML.
+    from_header: z. B. „Steuerkanzlei Müller <mail@…>“ (pro Kanzlei aus Einstellungen).
     """
     sender   = os.getenv("EMAIL_USER")
     password = os.getenv("EMAIL_PASS")
@@ -755,7 +762,7 @@ def send_email_smtp(to_email: str, subject: str, body: str, html_body: str = Non
 
     try:
         msg = MIMEMultipart("alternative")
-        msg["From"]    = os.getenv("EMAIL_FROM", sender)
+        msg["From"]    = (from_header or "").strip() or os.getenv("EMAIL_FROM", sender)
         msg["To"]      = to_email
         msg["Subject"] = subject
 
@@ -857,11 +864,17 @@ def _process_email_outbox_once(limit: int = 10) -> Dict[str, int]:
             skipped += 1
             continue
         try:
+            kid = str(row.get("kanzlei_id") or "default")
+            from core.email_sender import resolve_email_from
+
+            st_out = DatenSpeicher(kanzlei_id=kid)
+            from_hdr = resolve_email_from(kid, st_out)["from_header"]
             ok_send = send_email_smtp(
                 row.get("to_email", ""),
                 row.get("subject", ""),
                 row.get("body_text", ""),
                 row.get("body_html") or None,
+                from_header=from_hdr,
             )
             if not ok_send:
                 raise RuntimeError("SMTP send fehlgeschlagen")
@@ -1888,13 +1901,34 @@ class EmailSendRequest(BaseModel):
     empfaenger:   Optional[str] = None   # Ziel-Adresse (sonst Mandanten-Stammdaten)
     force:        bool          = True
 
+@app.get("/email/absender", tags=["Email"], summary="SMTP-Absender der Kanzlei (Anzeigename)")
+def email_absender(_user: dict = Depends(get_current_user)):
+    store = get_ds(_user)
+    from core.email_sender import resolve_email_from
+
+    r = resolve_email_from(store.kanzlei_id, store)
+    return ok_compat({
+        "build": "email-absender-20260519",
+        "display_name": r["display_name"],
+        "from_email": r["from_email"],
+        "from_header": r["from_header"],
+        "hinweis": (
+            "Absender unter Einstellungen → Kanzlei-Daten → „Name im Postfach des Empfängers“ "
+            "und „E-Mail-Adresse der Kanzlei“ anpassen."
+        ),
+    })
+
+
 @app.get("/email/{name}/vorschau", tags=["Email"])
 def email_vorschau(name: str, _user: dict = Depends(get_current_user)):
     store    = get_ds(_user)
     m        = get_mandant_or_404(name, store)
     aufgaben = store.hole_fristen()
     from core.ai_email import erstelle_email_vorschau
+    from core.email_sender import resolve_email_from
+
     vorschau = erstelle_email_vorschau(name, m, aufgaben, store)
+    absender = resolve_email_from(store.kanzlei_id, store)
     return {
         "mandant":       name,
         "empfaenger":    m.get("email", ""),
@@ -1904,6 +1938,9 @@ def email_vorschau(name: str, _user: dict = Depends(get_current_user)):
         "ton":           vorschau["ton"],
         "ki_generiert":  bool(vorschau.get("ki_generiert")),
         "generiert_am":  datetime.now().isoformat(),
+        "absender_name": absender["display_name"],
+        "absender_email": absender["from_email"],
+        "absender_anzeige": absender["from_header"],
     }
 
 @app.post("/email/{name}/senden", tags=["Email"])

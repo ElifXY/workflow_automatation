@@ -1330,7 +1330,10 @@ const KanzleiTab = ({s, save, sysInfo, readiness, onExport, onReset}) => (
 
     {[
       {id:"k_name",   key:"kanzlei_name",         label:"Kanzlei-Name",       ph:"Dr. Müller Steuerberatung GmbH"},
-      {id:"k_email",  key:"kanzlei_email",         label:"Email",              ph:"kanzlei@mail.de",          type:"email"},
+      {id:"k_abs",    key:"email_absender_name",  label:"Name im Postfach des Empfängers",
+        ph:"Dr. Müller Steuerberatung", description:"So erscheint der Absender bei Mandanten-E-Mails (nicht „Kanzlei AI“). Leer = Kanzlei-Name."},
+      {id:"k_email",  key:"kanzlei_email",         label:"E-Mail-Adresse der Kanzlei", ph:"kanzlei@mail.de", type:"email",
+        description:"Antwort-Adresse im Mailtext; SMTP-Absender-Adresse, sofern mit Ihrem Mail-Konto übereinstimmt."},
       {id:"k_telefon",key:"kanzlei_telefon",       label:"Telefon",            ph:"+49 89 123456"},
       {id:"k_web",    key:"kanzlei_website",       label:"Website",            ph:"https://kanzlei.de",        type:"url"},
       {id:"k_adr",    key:"kanzlei_adresse",       label:"Adresse"},
@@ -1338,7 +1341,7 @@ const KanzleiTab = ({s, save, sysInfo, readiness, onExport, onReset}) => (
       {id:"k_iban",   key:"kanzlei_iban",          label:"IBAN",               ph:"DE89 3704 0044 ...",  mono:true},
       {id:"k_bic",    key:"kanzlei_bic",           label:"BIC",                mono:true},
     ].map(f=>(
-      <Row key={f.key} label={f.label}>
+      <Row key={f.key} label={f.label} description={f.description}>
         <input id={f.id} type={f.type||"text"} defaultValue={s[f.key]||""}
           placeholder={f.ph||""}
           onBlur={e=>{ if(e.target.value!==s[f.key]) save(f.key,e.target.value); }}

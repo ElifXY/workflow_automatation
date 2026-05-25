@@ -14,27 +14,20 @@ log = logging.getLogger(__name__)
 
 
 def _kanzlei_meta(ds=None) -> Tuple[str, str, str]:
-    name = "Ihre Steuerkanzlei"
-    email = os.getenv("EMAIL_USER", "")
+    from core.email_sender import resolve_email_from
+
+    kid = getattr(ds, "kanzlei_id", None) or "default"
+    resolved = resolve_email_from(kid, ds)
+    name = resolved["display_name"]
+    email = resolved["from_email"]
     telefon = ""
 
     if ds is not None:
         try:
-            name = (ds.setting_holen("kanzlei_name") or name).strip() or name
-            email = (ds.setting_holen("kanzlei_email") or email).strip() or email
             telefon = (ds.setting_holen("kanzlei_telefon") or "").strip()
         except Exception as e:
             log.debug(f"Kanzlei-Stammdaten: {e}")
 
-    if not email:
-        raw_from = os.getenv("EMAIL_FROM", "")
-        if "<" in raw_from:
-            part_name = raw_from.split("<")[0].strip().strip('"')
-            if part_name:
-                name = part_name
-            email = raw_from.split("<")[1].rstrip(">").strip()
-        elif raw_from:
-            email = raw_from
     if not email:
         email = "kanzlei@example.com"
 

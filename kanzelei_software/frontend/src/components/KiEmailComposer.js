@@ -288,6 +288,24 @@ export default function KiEmailComposer({
             )}
           </div>
 
+          {(preview?.absender_anzeige || preview?.absender_name) && (
+            <div style={{
+              marginBottom: 12, padding: "10px 12px", borderRadius: 10,
+              background: "var(--bg3)", border: "1px solid var(--border)",
+            }}>
+              <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 4,
+                textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                Absender (im Postfach des Empfängers)
+              </div>
+              <div style={{ fontSize: 14, color: "var(--text)", fontWeight: 500 }}>
+                {preview.absender_anzeige || preview.absender_name}
+              </div>
+              <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 6, lineHeight: 1.5 }}>
+                Anpassen unter Einstellungen → Kanzlei-Daten → „Name im Postfach des Empfängers“.
+              </div>
+            </div>
+          )}
+
           <div style={{ marginBottom: 12 }}>
             <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 4,
               textTransform: "uppercase", letterSpacing: "0.06em" }}>

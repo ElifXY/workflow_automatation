@@ -172,6 +172,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "kanzlei_email":               "",
     "kanzlei_telefon":             "",
     "kanzlei_website":             "",
+    "email_absender_name":         "",
     "email_signatur":              "Mit freundlichen Grüßen\nIhre Steuerkanzlei",
     "stundensatz":                 150.0,
     "waehrung":                    "EUR",
