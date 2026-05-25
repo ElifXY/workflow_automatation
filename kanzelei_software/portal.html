@@ -6,6 +6,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Mandantenportal — Kanzlei AI</title>
+<!-- portal-build: portal-sig-20260519 -->
 <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
@@ -78,6 +79,13 @@ input,textarea,select{width:100%;background:var(--bg3);border:1px solid var(--bo
   font-size:15px;outline:none;transition:border .15s;appearance:none;-webkit-appearance:none;
   margin-bottom:10px}
 input:focus,textarea:focus,select:focus{border-color:var(--accent)}
+input[type=checkbox],input[type=radio]{
+  width:20px;height:20px;min-width:20px;max-width:20px;padding:0;margin:0;
+  accent-color:var(--accent);appearance:auto;-webkit-appearance:checkbox;
+  cursor:pointer;background:var(--bg3);border:1px solid var(--border2);border-radius:4px;
+  flex-shrink:0;box-shadow:none}
+input[type=checkbox]:checked{background:var(--accent);border-color:var(--accent)}
+label.sig-check{display:flex;gap:10px;align-items:flex-start;cursor:pointer}
 
 /* ── BUTTONS ── */
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;
@@ -156,6 +164,14 @@ input:focus,textarea:focus,select:focus{border-color:var(--accent)}
   display:flex;align-items:center;justify-content:center}
 .pdf-viewer embed{width:100%;height:60vh;border:none}
 .pdf-viewer img{width:100%;object-fit:contain;max-height:60vh}
+.sig-mode-tabs{display:flex;gap:8px;margin-bottom:12px}
+.sig-mode-tab{flex:1;padding:8px 10px;border-radius:10px;border:1px solid var(--border2);
+  background:var(--bg3);color:var(--text2);font-size:12px;cursor:pointer;text-align:center}
+.sig-mode-tab.active{border-color:var(--accent);color:var(--accent);background:rgba(200,169,110,.12)}
+#sig-pdf-pages{max-height:50vh;overflow-y:auto;border:1px solid var(--border);border-radius:10px;background:#1a1d24}
+.sig-pdf-page{position:relative;margin:8px auto;background:#fff;box-shadow:0 2px 12px rgba(0,0,0,.35)}
+.sig-pdf-page canvas{display:block;width:100%;height:auto}
+.sig-overlay-img{position:absolute;pointer-events:none;max-width:42%;opacity:.95}
 
 /* ── FREIGABE ── */
 .freigabe-card{background:linear-gradient(135deg,rgba(91,141,232,.1),rgba(200,169,110,.05));
@@ -420,9 +436,20 @@ input:focus,textarea:focus,select:focus{border-color:var(--accent)}
     <div id="sig-dokument-info" style="background:var(--bg3);border-radius:10px;padding:12px 14px;
          margin-bottom:16px;font-size:13px;color:var(--text2)"></div>
 
-    <!-- Dokument-Vorschau -->
-    <div id="sig-vorschau" class="pdf-viewer" style="margin-bottom:16px">
-      <div style="color:var(--text3);font-size:13px">Dokument wird geladen...</div>
+    <div class="sig-mode-tabs">
+      <button type="button" class="sig-mode-tab active" id="sig-tab-dok" onclick="setSigModus('dokument')">✍ Auf Dokument</button>
+      <button type="button" class="sig-mode-tab" id="sig-tab-pad" onclick="setSigModus('pad')">Unterschriftsfeld</button>
+    </div>
+
+    <!-- Dokument-Vorschau (PDF-Seiten oder Bild) -->
+    <div id="sig-vorschau-wrap" style="margin-bottom:12px">
+      <div id="sig-vorschau" class="pdf-viewer" style="display:none">
+        <div style="color:var(--text3);font-size:13px">Dokument wird geladen...</div>
+      </div>
+      <div id="sig-pdf-pages" style="display:none"></div>
+      <div id="sig-place-hint" style="display:none;font-size:12px;color:var(--text3);margin:8px 0">
+        Unterschrift zeichnen, dann auf die gewünschte Stelle im Dokument tippen.
+      </div>
     </div>
 
     <!-- Unterschrift-Pad -->
@@ -432,14 +459,14 @@ input:focus,textarea:focus,select:focus{border-color:var(--accent)}
     </div>
     <div style="display:flex;justify-content:space-between;margin-top:8px;margin-bottom:16px">
       <span style="font-size:12px;color:var(--text3)">Feld mit Finger oder Maus unterschreiben</span>
-      <button class="btn btn-ghost btn-sm" onclick="loescheUnterschrift()">↺ Löschen</button>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="loescheUnterschrift()">↺ Löschen</button>
     </div>
 
     <!-- Bestätigung -->
     <div style="background:rgba(91,141,232,.08);border:1px solid rgba(91,141,232,.2);
          border-radius:10px;padding:12px 14px;margin-bottom:16px">
-      <label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer">
-        <input type="checkbox" id="sig-bestaetigung" style="width:auto;margin:0;margin-top:2px;flex-shrink:0">
+      <label class="sig-check">
+        <input type="checkbox" id="sig-bestaetigung">
         <span style="font-size:13px;color:var(--text2);line-height:1.5">
           Ich bestätige, dass ich das Dokument vollständig gelesen und verstanden habe.
           Diese digitale Unterschrift ist rechtsgültig nach eIDAS (EES).
@@ -456,6 +483,11 @@ input:focus,textarea:focus,select:focus{border-color:var(--accent)}
   </div>
 </div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+<script>
+if(window.pdfjsLib){pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";}
+</script>
 <script>
 // ============================================================
 // KONFIGURATION
@@ -795,6 +827,120 @@ async function ladeDokumente(){
 // ✍ UNTERSCHRIFT
 // ============================================================
 let sigCanvas, sigCtx, sigZeichnet = false, sigLeer = true;
+let SIG_MODUS = "dokument";
+let sigPlacement = null;
+let sigDokumentB64 = "";
+let sigDokumentTyp = "application/pdf";
+let sigPdfPages = [];
+
+function setSigModus(m){
+  SIG_MODUS = m === "pad" ? "pad" : "dokument";
+  document.getElementById("sig-tab-dok").classList.toggle("active", SIG_MODUS === "dokument");
+  document.getElementById("sig-tab-pad").classList.toggle("active", SIG_MODUS === "pad");
+  const pages = document.getElementById("sig-pdf-pages");
+  const embed = document.getElementById("sig-vorschau");
+  const hint = document.getElementById("sig-place-hint");
+  if(SIG_MODUS === "dokument" && sigPdfPages.length){
+    pages.style.display = "block";
+    embed.style.display = "none";
+    hint.style.display = "block";
+  } else if(SIG_MODUS === "pad"){
+    pages.style.display = "none";
+    hint.style.display = "none";
+    if(sigDokumentTyp.startsWith("image/") || sigDokumentTyp === "jpeg" || sigDokumentTyp === "png"){
+      embed.style.display = "block";
+    }
+  }
+}
+
+async function renderPdfSeiten(b64){
+  const host = document.getElementById("sig-pdf-pages");
+  host.innerHTML = "";
+  sigPdfPages = [];
+  if(!window.pdfjsLib){
+    host.innerHTML = '<div style="padding:16px;color:var(--text3);font-size:13px">PDF-Vorschau nicht verfügbar — bitte Unterschriftsfeld nutzen.</div>';
+    setSigModus("pad");
+    return;
+  }
+  try{
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for(let i=0;i<bin.length;i++) bytes[i] = bin.charCodeAt(i);
+    const pdf = await pdfjsLib.getDocument({data: bytes}).promise;
+    for(let p=1; p<=pdf.numPages; p++){
+      const page = await pdf.getPage(p);
+      const viewport = page.getViewport({scale: 1.2});
+      const wrap = document.createElement("div");
+      wrap.className = "sig-pdf-page";
+      wrap.dataset.page = String(p);
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d");
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      await page.render({canvasContext: ctx, viewport}).promise;
+      wrap.appendChild(canvas);
+      wrap.addEventListener("click", (ev) => platziereSignatur(ev, wrap, p));
+      host.appendChild(wrap);
+      sigPdfPages.push({page: p, wrap, canvas});
+    }
+    host.style.display = "block";
+    document.getElementById("sig-vorschau").style.display = "none";
+    document.getElementById("sig-place-hint").style.display = "block";
+    setSigModus("dokument");
+  }catch(e){
+    host.innerHTML = `<div style="padding:16px;color:var(--red);font-size:13px">PDF konnte nicht angezeigt werden: ${esc(e.message)}</div>`;
+    setSigModus("pad");
+  }
+}
+
+function platziereSignatur(ev, wrap, pageNum){
+  if(sigLeer){
+    toast("Bitte zuerst im Unterschriftsfeld zeichnen","warn");
+    return;
+  }
+  wrap.querySelectorAll(".sig-overlay-img").forEach(el => el.remove());
+  const rect = wrap.getBoundingClientRect();
+  const x = (ev.clientX - rect.left) / rect.width;
+  const y = (ev.clientY - rect.top) / rect.height;
+  const img = document.createElement("img");
+  img.className = "sig-overlay-img";
+  img.src = sigCanvas.toDataURL("image/png");
+  img.style.left = (x * 100) + "%";
+  img.style.top = (y * 100) + "%";
+  img.style.transform = "translate(-20%, -70%)";
+  wrap.appendChild(img);
+  sigPlacement = {page: pageNum, x, y, width: 0.28};
+  toast("Unterschrift platziert — jetzt bestätigen und absenden","success");
+}
+
+async function erstelleSignedPdfB64(){
+  if(!sigPlacement || !window.PDFLib || !sigDokumentB64) return null;
+  try{
+    const {PDFDocument} = PDFLib;
+    const pdfDoc = await PDFDocument.load(Uint8Array.from(atob(sigDokumentB64), c => c.charCodeAt(0)));
+    const pages = pdfDoc.getPages();
+    const page = pages[sigPlacement.page - 1];
+    if(!page) return null;
+    const pngBytes = Uint8Array.from(atob(sigCanvas.toDataURL("image/png").split(",")[1]), c => c.charCodeAt(0));
+    const png = await pdfDoc.embedPng(pngBytes);
+    const {width, height} = page.getSize();
+    const sigW = width * (sigPlacement.width || 0.28);
+    const sigH = sigW * (png.height / png.width);
+    const x = width * sigPlacement.x - sigW * 0.2;
+    const y = height * (1 - sigPlacement.y) - sigH * 0.3;
+    page.drawImage(png, {x: Math.max(0, x), y: Math.max(0, y), width: sigW, height: sigH});
+    const out = await pdfDoc.save();
+    let s = "";
+    const chunk = 0x8000;
+    for(let i=0;i<out.length;i+=chunk){
+      s += String.fromCharCode.apply(null, out.subarray(i, i + chunk));
+    }
+    return btoa(s);
+  }catch(e){
+    console.warn("signed pdf:", e);
+    return null;
+  }
+}
 
 async function ladeUnterschriften(){
   try{
@@ -822,7 +968,7 @@ async function ladeUnterschriften(){
         </div>
         ${u.status!=="abgelaufen"?`
         <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <button class="btn btn-success btn-sm" onclick="oeffneUnterschriftModal('${u.id}','${esc(u.dokumentname)}','${esc(u.betreff)}',${u.hat_dokument})">
+          <button class="btn btn-success btn-sm" onclick="oeffneUnterschriftModal('${u.id}')">
             ✍ Unterzeichnen
           </button>
           <button class="btn btn-danger btn-sm" onclick="schnellAblehnen('${u.id}')">Ablehnen</button>
@@ -831,16 +977,20 @@ async function ladeUnterschriften(){
   }catch(e){ console.error(e); }
 }
 
-async function oeffneUnterschriftModal(id, dokname, betreff, hatDok){
+async function oeffneUnterschriftModal(id){
   AKTUELLE_SIG_ID = id;
+  sigPlacement = null;
+  sigPdfPages = [];
+  sigDokumentB64 = "";
+  document.getElementById("sig-bestaetigung").checked = false;
   document.getElementById("sig-modal").style.display = "flex";
-  document.getElementById("sig-dokument-info").innerHTML =
-    `<strong>${esc(dokname)}</strong><br><span style="font-size:12px;color:var(--text3)">${esc(betreff)}</span>`;
+  document.getElementById("sig-dokument-info").innerHTML = '<div class="loading-box"><div class="spinner"></div></div>';
+  document.getElementById("sig-pdf-pages").style.display = "none";
+  document.getElementById("sig-pdf-pages").innerHTML = "";
+  document.getElementById("sig-place-hint").style.display = "none";
 
-  // Canvas initialisieren
   sigCanvas = document.getElementById("sig-canvas");
   sigCtx    = sigCanvas.getContext("2d");
-  // Tatsächliche Größe setzen
   const rect = sigCanvas.getBoundingClientRect();
   sigCanvas.width  = rect.width  || 500;
   sigCanvas.height = rect.height || 150;
@@ -852,23 +1002,43 @@ async function oeffneUnterschriftModal(id, dokname, betreff, hatDok){
   sigLeer = true;
   registriereSignaturEvents();
 
-  // Dokument laden
   const vorschau = document.getElementById("sig-vorschau");
-  if(hatDok){
-    vorschau.innerHTML = '<div style="color:var(--text3);font-size:13px"><div class="loading-box"><div class="spinner"></div><span>Dokument laden...</span></div></div>';
-    try{
-      const dokD = await api(`/portal/unterschrift/${id}/dokument`);
-      if(dokD.dokumenttyp==="pdf"){
-        vorschau.innerHTML = `<embed src="data:application/pdf;base64,${dokD.dokument_b64}" type="application/pdf">`;
-      } else {
-        vorschau.innerHTML = `<img src="data:image/${dokD.dokumenttyp||'jpeg'};base64,${dokD.dokument_b64}" alt="Dokument">`;
-      }
-    }catch(e){
-      vorschau.innerHTML = `<div style="color:var(--text3);padding:20px;font-size:13px">
-        Dokument konnte nicht geladen werden: ${e.message}</div>`;
+  vorschau.style.display = "none";
+  try{
+    const offen = await api("/portal/unterschrift/offen");
+    const u = (offen.unterschriften||[]).find(x => x.id === id);
+    if(u){
+      document.getElementById("sig-dokument-info").innerHTML =
+        `<strong>${esc(u.dokumentname)}</strong><br><span style="font-size:12px;color:var(--text3)">${esc(u.betreff)}</span>`;
     }
-  } else {
-    vorschau.innerHTML = '<div style="color:var(--text3);padding:20px;font-size:13px">Kein Dokument beigefügt — bitte bei Kanzlei nachfragen</div>';
+    if(!u || !u.hat_dokument){
+      vorschau.style.display = "block";
+      vorschau.innerHTML = '<div style="color:var(--text3);padding:20px;font-size:13px">Kein Dokument beigefügt — bitte bei Kanzlei nachfragen</div>';
+      setSigModus("pad");
+      return;
+    }
+    vorschau.innerHTML = '<div class="loading-box"><div class="spinner"></div><span>Dokument laden...</span></div>';
+    vorschau.style.display = "block";
+    const dokD = await api(`/portal/unterschrift/${id}/dokument`);
+    sigDokumentB64 = dokD.dokument_b64 || "";
+    sigDokumentTyp = (dokD.dokumenttyp || "application/pdf").toLowerCase();
+    if(sigDokumentTyp === "pdf") sigDokumentTyp = "application/pdf";
+    const isPdf = sigDokumentTyp.includes("pdf") || (u.dokumentname||"").toLowerCase().endsWith(".pdf");
+    if(isPdf && sigDokumentB64){
+      vorschau.style.display = "none";
+      await renderPdfSeiten(sigDokumentB64);
+    } else if(sigDokumentB64){
+      vorschau.style.display = "block";
+      vorschau.innerHTML = `<img src="data:${sigDokumentTyp.startsWith("image/")?sigDokumentTyp:"image/jpeg"};base64,${sigDokumentB64}" alt="Dokument">`;
+      setSigModus("pad");
+    } else {
+      vorschau.innerHTML = '<div style="color:var(--text3);padding:20px;font-size:13px">Dokument leer — Kanzlei kontaktieren</div>';
+      setSigModus("pad");
+    }
+  }catch(e){
+    vorschau.style.display = "block";
+    vorschau.innerHTML = `<div style="color:var(--text3);padding:20px;font-size:13px">Dokument konnte nicht geladen werden: ${esc(e.message)}</div>`;
+    setSigModus("pad");
   }
 }
 
@@ -910,13 +1080,22 @@ function loescheUnterschrift(){
 function schliesseModal(){
   document.getElementById("sig-modal").style.display = "none";
   AKTUELLE_SIG_ID = "";
+  sigPlacement = null;
+  sigPdfPages = [];
   document.getElementById("sig-bestaetigung").checked = false;
 }
 
 async function unterschriftLeisten(){
   if(sigLeer){ toast("Bitte erst unterschreiben","warn"); return; }
-  if(!document.getElementById("sig-bestaetigung").checked){
-    toast("Bitte Kenntnisnahme bestätigen","warn"); return;
+  const chk = document.getElementById("sig-bestaetigung");
+  if(!chk.checked){
+    toast("Bitte Kenntnisnahme bestätigen","warn");
+    chk.focus();
+    return;
+  }
+  if(SIG_MODUS === "dokument" && sigPdfPages.length && !sigPlacement){
+    toast("Bitte Unterschrift auf dem Dokument platzieren (Seite antippen)","warn");
+    return;
   }
   const btn = document.getElementById("sig-submit-btn");
   btn.disabled = true;
@@ -924,9 +1103,20 @@ async function unterschriftLeisten(){
 
   try{
     const unterschrift_b64 = sigCanvas.toDataURL("image/png").split(",")[1];
+    let signed_dokument_b64 = null;
+    if(sigPlacement && sigDokumentB64){
+      signed_dokument_b64 = await erstelleSignedPdfB64();
+    }
+    const payload = {
+      unterschrift_b64,
+      bestaetigung: true,
+      signatur_modus: sigPlacement ? "auf_dokument" : "pad",
+    };
+    if(sigPlacement) payload.signatur_platzierung = sigPlacement;
+    if(signed_dokument_b64) payload.signed_dokument_b64 = signed_dokument_b64;
     await api(`/portal/unterschrift/${AKTUELLE_SIG_ID}/leisten`,{
       method:"POST",
-      body:JSON.stringify({unterschrift_b64, bestaetigung:true})
+      body:JSON.stringify(payload)
     });
     schliesseModal();
     toast("✓ Erfolgreich unterzeichnet! Kanzlei wurde informiert.");

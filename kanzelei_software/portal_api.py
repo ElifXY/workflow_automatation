@@ -191,6 +191,9 @@ class UnterschriftLeisten(BaseModel):
     unterschrift_b64: str   # Canvas-PNG als Base64
     bestaetigung:     bool = True
     ip_adresse:       Optional[str] = None
+    signed_dokument_b64: Optional[str] = None
+    signatur_modus: Optional[str] = None  # pad | auf_dokument
+    signatur_platzierung: Optional[Dict[str, Any]] = None
 
 class UnterschriftAnfragen(BaseModel):
     mandant:       str
@@ -233,7 +236,7 @@ def portal_startseite():
 
 @portal_router.get("/portal/health")
 def health():
-    return {"status": "ok", "version": "2.0.0"}
+    return {"status": "ok", "version": "2.1.0", "build": "portal-sig-20260519"}
 
 @portal_router.post("/portal/login", tags=["Portal"])
 @portal_router.get("/portal/login", tags=["Portal"])
@@ -657,8 +660,8 @@ def offene_unterschriften(mandant: str = Depends(hole_mandant)):
                            "hinweis":u["hinweis"],"status":u["status"],
                            "erstellt_am":u["erstellt_am"],"gueltig_bis":u["gueltig_bis"],
                            "hat_dokument":bool(u.get("dokument_b64"))})
-    if offene:
-        _save_portal(p, store)
+        if u.get("status") == "abgelaufen":
+            store.portal_speichern("unterschrift", uid, mandant, u)
     return {"unterschriften": sorted(offene, key=lambda x: x["erstellt_am"], reverse=True),
             "anzahl": len(offene)}
 
@@ -672,8 +675,17 @@ def dokument_herunterladen(uid: str, mandant: str = Depends(hole_mandant)):
     if not u: raise HTTPException(404, "Nicht gefunden")
     if u.get("mandant") != mandant: raise HTTPException(403, "Kein Zugriff")
     if u.get("status") == "abgelaufen": raise HTTPException(410, "Frist abgelaufen")
-    return {"dokument_b64":u.get("dokument_b64",""),"dokumenttyp":u.get("dokumenttyp","pdf"),
-            "dokumentname":u.get("dokumentname","")}
+    dok_b64 = u.get("signed_dokument_b64") or u.get("dokument_b64") or ""
+    dok_typ = u.get("dokumenttyp") or "application/pdf"
+    if dok_typ == "pdf":
+        dok_typ = "application/pdf"
+    return {
+        "dokument_b64": dok_b64,
+        "dokumenttyp": dok_typ,
+        "dokumentname": u.get("dokumentname", ""),
+        "signatur_platzierung": u.get("signatur_platzierung"),
+        "unterschrift_b64": u.get("unterschrift_b64") if u.get("status") == "unterschrieben" else None,
+    }
 
 @portal_router.post("/portal/unterschrift/{uid}/leisten", tags=["Unterschrift"])
 def unterschrift_leisten(uid: str, data: UnterschriftLeisten,
@@ -714,6 +726,7 @@ def unterschrift_leisten(uid: str, data: UnterschriftLeisten,
         "unterschrift_b64":  data.unterschrift_b64,
         "unterschrieben_am": jetzt.isoformat(),
         "status":            "unterschrieben",
+        "signatur_modus":    (data.signatur_modus or "pad").strip() or "pad",
         "unterzeichner_info": {
             "mandant":   mandant,
             "ip":        data.ip_adresse or client_ip,
@@ -723,6 +736,10 @@ def unterschrift_leisten(uid: str, data: UnterschriftLeisten,
             "eidas_typ": "EES",  # Einfache Elektronische Signatur
         }
     })
+    if data.signatur_platzierung:
+        u["signatur_platzierung"] = data.signatur_platzierung
+    if data.signed_dokument_b64:
+        u["signed_dokument_b64"] = data.signed_dokument_b64
     trail = list(u.get("audit_trail") or [])
     trail.append({
         "aktion": "unterschrieben",
@@ -761,17 +778,27 @@ def unterschrift_ablehnen(uid: str, grund: str = Query(""),
                            mandant: str = Depends(hole_mandant)):
     if not bool(setting_holen("portal_unterschrift_aktiv")):
         raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
-    p = _portal()
-    u = p["portal"]["unterschriften"].get(uid)
-    if not u or u.get("mandant") != mandant: raise HTTPException(404, "Nicht gefunden")
+    store = _store_for_mandant(mandant)
+    u = store.portal_holen("unterschrift", uid) or {}
+    if not u or u.get("mandant") != mandant:
+        raise HTTPException(404, "Nicht gefunden")
     u["status"] = "abgelehnt"
-    u["audit_trail"].append({"aktion":"abgelehnt","zeitpunkt":datetime.now().isoformat(),"grund":grund})
-    _save_portal(p)
-    ds.kommunikation_hinzufuegen(mandant,{"typ":"unterschrift_abgelehnt",
-        "text":f"Abgelehnt: {u['dokumentname']} — {grund or 'kein Grund'}",
-        "timestamp":datetime.now().isoformat()})
-    ds.log_eintrag(f"UNTERSCHRIFT_ABGELEHNT | {mandant} | {u['dokumentname']}")
-    return {"status":"abgelehnt"}
+    trail = list(u.get("audit_trail") or [])
+    trail.append({"aktion": "abgelehnt", "zeitpunkt": datetime.now().isoformat(), "grund": grund})
+    u["audit_trail"] = trail
+    if not store.portal_speichern("unterschrift", uid, mandant, u):
+        raise HTTPException(500, "Ablehnung konnte nicht gespeichert werden")
+    store.kommunikation_hinzufuegen(mandant, {
+        "typ": "unterschrift_abgelehnt",
+        "text": f"Abgelehnt: {u['dokumentname']} — {grund or 'kein Grund'}",
+        "timestamp": datetime.now().isoformat(),
+    })
+    store.log_eintrag(f"UNTERSCHRIFT_ABGELEHNT | {mandant} | {u['dokumentname']}")
+    try:
+        pc.chat_unterschrift_status(store, mandant, uid, u["dokumentname"], "abgelehnt")
+    except Exception as e:
+        log.warning("chat nach ablehnung: %s", e)
+    return {"status": "abgelehnt"}
 
 @portal_router.get("/portal/unterschrift/{uid}/status", tags=["Unterschrift"])
 def unterschrift_status(uid: str, admin_key: str = Query(...)):

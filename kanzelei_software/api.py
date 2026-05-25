@@ -8084,6 +8084,249 @@ def dokument_wiederherstellen(dok_id: str, _user: dict = Depends(get_current_use
 # PORTAL INTEGRATION — Haupt-API leitet Portal-Anfragen weiter
 # ============================================================
 
+def _portal_dokument_baum(dateien: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Ordnerbaum mit Dateien je Knoten (Kanzlei-Dokument-Explorer)."""
+    wurzel: Dict[str, Any] = {"ordner": {}, "dateien": []}
+
+    def _node(parts: List[str]) -> Dict[str, Any]:
+        cur = wurzel
+        acc: List[str] = []
+        for part in parts:
+            acc.append(part)
+            cur = cur["ordner"].setdefault(part, {
+                "name": part,
+                "typ": "ordner",
+                "pfad": "/".join(acc),
+                "ordner": {},
+                "dateien": [],
+            })
+        return cur
+
+    for item in dateien:
+        pfad = (item.get("ordner_pfad") or item.get("pfad") or "Sonstiges").replace("\\", "/").strip("/")
+        parts = [p for p in pfad.split("/") if p] or ["Sonstiges"]
+        node = _node(parts)
+        node["dateien"].append({
+            "id": item.get("id"),
+            "quelle": item.get("quelle"),
+            "dateiname": item.get("dateiname") or "",
+            "dateityp": item.get("dateityp") or "application/pdf",
+            "ordner_pfad": node.get("pfad") or pfad,
+        })
+
+    def _serialize(node: Dict[str, Any]) -> List[Dict[str, Any]]:
+        out = []
+        for key in sorted((node.get("ordner") or {}).keys(), key=lambda x: x.lower()):
+            ch = node["ordner"][key]
+            out.append({
+                "name": ch["name"],
+                "typ": "ordner",
+                "pfad": ch["pfad"],
+                "dateien": ch.get("dateien") or [],
+                "kinder": _serialize(ch),
+            })
+        return out
+
+    return _serialize(wurzel)
+
+
+@app.get("/portal/mandant/{name}/dokument-quellen", tags=["Portal"],
+         summary="Dokument-Explorer für Unterschrift (Archiv + Portal-Uploads)")
+def portal_mandant_dokument_quellen(name: str, _user: dict = Depends(get_current_user)):
+    store = get_ds(_user)
+    get_mandant_or_404(name, store)
+    dateien: List[Dict[str, Any]] = []
+
+    for d in _dokument_archiv_liste(store):
+        if (d.get("mandant") or "").strip() != name:
+            continue
+        if (d.get("status") or "gespeichert") != "gespeichert":
+            continue
+        dok_id = str(d.get("dok_id") or "")
+        if not dok_id:
+            continue
+        dateiname = d.get("dateiname") or "dokument"
+        dateien.append({
+            "id": dok_id,
+            "quelle": "archiv",
+            "dateiname": dateiname,
+            "dateityp": _dokument_media_type(dateiname),
+            "ordner_pfad": d.get("ordner_pfad") or f"{name}/{d.get('ordner_kategorie') or 'Sonstiges'}",
+            "datei_vorhanden": Path(_dokument_datei_pfad(d)).is_file(),
+        })
+
+    for u in store.portal_liste("upload", mandant=name):
+        uid = str(u.get("id") or "")
+        if not uid:
+            continue
+        kat = (u.get("kategorie") or "Portal-Uploads").strip()
+        dateiname = u.get("original") or u.get("dateiname") or "upload"
+        pfad = os.path.join("data", "uploads", name.replace(" ", "_"), u.get("dateiname") or "")
+        dateien.append({
+            "id": uid,
+            "quelle": "upload",
+            "dateiname": dateiname,
+            "dateityp": _dokument_media_type(dateiname),
+            "ordner_pfad": f"{name}/Portal-Uploads/{kat}",
+            "datei_vorhanden": Path(pfad).is_file() if pfad else False,
+        })
+
+    baum = _portal_dokument_baum(dateien)
+    return ok_compat({
+        "mandant": name,
+        "baum": baum,
+        "dateien": dateien,
+        "anzahl": len(dateien),
+    })
+
+
+@app.get("/portal/mandant/{name}/dokument-quellen/{quelle}/{item_id}/inhalt", tags=["Portal"],
+         summary="Dateiinhalt für Unterschriftsanfrage (Base64)")
+def portal_mandant_dokument_quelle_inhalt(
+    name: str,
+    quelle: str,
+    item_id: str,
+    _user: dict = Depends(get_current_user),
+):
+    store = get_ds(_user)
+    get_mandant_or_404(name, store)
+    quelle = (quelle or "").strip().lower()
+    if quelle == "archiv":
+        archiv = _dokument_archiv_holen(store)
+        dok = archiv.get(item_id)
+        if not dok:
+            dok = next(
+                (d for d in _dokument_archiv_liste(store) if str(d.get("dok_id")) == str(item_id)),
+                None,
+            )
+        if not dok or (dok.get("mandant") or "").strip() != name:
+            raise HTTPException(404, "Dokument nicht gefunden")
+        datei_pfad = _dokument_datei_pfad(dok)
+        if not Path(datei_pfad).is_file():
+            raise HTTPException(404, "Datei nicht auf dem Server gefunden")
+        with open(datei_pfad, "rb") as f:
+            raw = f.read()
+        dateiname = dok.get("dateiname") or "dokument.pdf"
+        return ok_compat({
+            "quelle": "archiv",
+            "id": item_id,
+            "dateiname": dateiname,
+            "dateityp": _dokument_media_type(dateiname),
+            "inhalt_b64": base64.b64encode(raw).decode("ascii"),
+            "groesse_kb": round(len(raw) / 1024, 1),
+        })
+
+    if quelle == "upload":
+        u = store.portal_holen("upload", item_id) or {}
+        if not u or u.get("mandant") != name:
+            raise HTTPException(404, "Upload nicht gefunden")
+        datei_pfad = u.get("dateipfad") or ""
+        if not datei_pfad or not Path(datei_pfad).is_file():
+            raise HTTPException(404, "Datei nicht gefunden")
+        with open(datei_pfad, "rb") as f:
+            raw = f.read()
+        dateiname = u.get("original") or u.get("dateiname") or "upload.pdf"
+        return ok_compat({
+            "quelle": "upload",
+            "id": item_id,
+            "dateiname": dateiname,
+            "dateityp": _dokument_media_type(dateiname),
+            "inhalt_b64": base64.b64encode(raw).decode("ascii"),
+            "groesse_kb": round(len(raw) / 1024, 1),
+        })
+
+    raise HTTPException(400, "quelle muss archiv oder upload sein")
+
+
+@app.get("/portal/mandant/{name}/unterschrift/{uid}", tags=["Portal"],
+         summary="Unterschrifts-Detail (Kanzlei, inkl. Vorschau-Flags)")
+def portal_mandant_unterschrift_detail(
+    name: str,
+    uid: str,
+    _user: dict = Depends(get_current_user),
+):
+    from modules.settings_manager import setting_holen
+    if not bool(setting_holen("portal_unterschrift_aktiv")):
+        raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
+    store = get_ds(_user)
+    get_mandant_or_404(name, store)
+    u = store.portal_holen("unterschrift", uid) or {}
+    if not u or u.get("mandant") != name:
+        raise HTTPException(404, "Unterschrift nicht gefunden")
+    return ok_compat({
+        "id": uid,
+        "mandant": name,
+        "dokumentname": u.get("dokumentname"),
+        "betreff": u.get("betreff", ""),
+        "status": u.get("status"),
+        "erstellt_am": u.get("erstellt_am"),
+        "unterschrieben_am": u.get("unterschrieben_am"),
+        "hat_dokument": bool(u.get("dokument_b64") or u.get("signed_dokument_b64")),
+        "hat_unterschrift": bool(u.get("unterschrift_b64")),
+        "hat_signed_pdf": bool(u.get("signed_dokument_b64")),
+        "signatur_modus": u.get("signatur_modus"),
+        "signatur_platzierung": u.get("signatur_platzierung"),
+        "audit_trail": u.get("audit_trail") or [],
+        "unterzeichner_info": u.get("unterzeichner_info"),
+    })
+
+
+@app.get("/portal/mandant/{name}/unterschrift/{uid}/unterschrift-bild", tags=["Portal"],
+         summary="Unterschrifts-Bild (PNG) für Kanzlei")
+def portal_mandant_unterschrift_bild(
+    name: str,
+    uid: str,
+    _user: dict = Depends(get_current_user),
+):
+    from modules.settings_manager import setting_holen
+    if not bool(setting_holen("portal_unterschrift_aktiv")):
+        raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
+    store = get_ds(_user)
+    get_mandant_or_404(name, store)
+    u = store.portal_holen("unterschrift", uid) or {}
+    if not u or u.get("mandant") != name:
+        raise HTTPException(404, "Unterschrift nicht gefunden")
+    if u.get("status") != "unterschrieben" or not u.get("unterschrift_b64"):
+        raise HTTPException(404, "Noch keine Unterschrift vorhanden")
+    return ok_compat({
+        "unterschrift_b64": u.get("unterschrift_b64"),
+        "dokumentname": u.get("dokumentname"),
+        "unterschrieben_am": u.get("unterschrieben_am"),
+        "signatur_platzierung": u.get("signatur_platzierung"),
+    })
+
+
+@app.get("/portal/mandant/{name}/unterschrift/{uid}/dokument", tags=["Portal"],
+         summary="Zu unterzeichnendes / unterschriebenes Dokument (Kanzlei)")
+def portal_mandant_unterschrift_dokument(
+    name: str,
+    uid: str,
+    _user: dict = Depends(get_current_user),
+):
+    from modules.settings_manager import setting_holen
+    if not bool(setting_holen("portal_unterschrift_aktiv")):
+        raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
+    store = get_ds(_user)
+    get_mandant_or_404(name, store)
+    u = store.portal_holen("unterschrift", uid) or {}
+    if not u or u.get("mandant") != name:
+        raise HTTPException(404, "Unterschrift nicht gefunden")
+    dok_b64 = u.get("signed_dokument_b64") or u.get("dokument_b64") or ""
+    if not dok_b64:
+        raise HTTPException(404, "Kein Dokument gespeichert")
+    dok_typ = u.get("dokumenttyp") or "application/pdf"
+    if dok_typ == "pdf":
+        dok_typ = "application/pdf"
+    return ok_compat({
+        "dokument_b64": dok_b64,
+        "dokumenttyp": dok_typ,
+        "dokumentname": u.get("dokumentname", ""),
+        "status": u.get("status"),
+        "unterschrift_b64": u.get("unterschrift_b64") if u.get("status") == "unterschrieben" else None,
+        "signatur_platzierung": u.get("signatur_platzierung"),
+    })
+
+
 @app.get("/portal/unterschriften/alle", tags=["Portal"],
          summary="Alle Unterschriften-Anfragen (für Kanzlei-Übersicht)")
 def portal_unterschriften_alle(
@@ -8110,6 +8353,8 @@ def portal_unterschriften_alle(
         "erstellt_am":   u["erstellt_am"],
         "unterschrieben_am": u.get("unterschrieben_am"),
         "hat_unterschrift":  bool(u.get("unterschrift_b64")),
+        "hat_signed_pdf":    bool(u.get("signed_dokument_b64")),
+        "signatur_modus":    u.get("signatur_modus"),
     } for u in sorted(alle, key=lambda x: x["erstellt_am"], reverse=True)],
     "gesamt":       len(alle),
     "unterschrieben": sum(1 for u in alle if u["status"] == "unterschrieben"),

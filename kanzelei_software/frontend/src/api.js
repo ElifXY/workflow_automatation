@@ -902,6 +902,23 @@ export const portalUnterschriftAnfragen = (name, body) =>
     body: JSON.stringify(body),
   });
 
+export const getPortalDokumentQuellen = (name) =>
+  apiFetch(`/portal/mandant/${encodeURIComponent(name)}/dokument-quellen`);
+
+export const getPortalDokumentQuelleInhalt = (name, quelle, itemId) =>
+  apiFetch(
+    `/portal/mandant/${encodeURIComponent(name)}/dokument-quellen/${encodeURIComponent(quelle)}/${encodeURIComponent(itemId)}/inhalt`
+  );
+
+export const getPortalUnterschriftDetail = (name, uid) =>
+  apiFetch(`/portal/mandant/${encodeURIComponent(name)}/unterschrift/${encodeURIComponent(uid)}`);
+
+export const getPortalUnterschriftBild = (name, uid) =>
+  apiFetch(`/portal/mandant/${encodeURIComponent(name)}/unterschrift/${encodeURIComponent(uid)}/unterschrift-bild`);
+
+export const getPortalUnterschriftDokument = (name, uid) =>
+  apiFetch(`/portal/mandant/${encodeURIComponent(name)}/unterschrift/${encodeURIComponent(uid)}/dokument`);
+
 export const sendPortalAntwort = (name, betreff, text) =>
   apiFetch(`/kommunikation/${encodeURIComponent(name)}/portal-antwort`, {
     method: "POST",

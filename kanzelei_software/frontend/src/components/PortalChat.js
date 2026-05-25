@@ -8,6 +8,10 @@ import {
   sendPortalChatUpload,
   patchPortalChat,
   deletePortalChat,
+  getPortalDokumentQuellen,
+  getPortalDokumentQuelleInhalt,
+  getPortalUnterschriftBild,
+  getPortalUnterschriftDokument,
 } from "../api";
 
 const fileToBase64 = (file) =>
@@ -20,6 +24,150 @@ const fileToBase64 = (file) =>
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
+
+const flattenBaumDateien = (knoten, zielPfad = "") => {
+  const out = [];
+  (knoten || []).forEach((k) => {
+    const pfad = k.pfad || zielPfad || k.name;
+    (k.dateien || []).forEach((d) => out.push({ ...d, ordner_pfad: d.ordner_pfad || pfad }));
+    if (k.kinder?.length) out.push(...flattenBaumDateien(k.kinder, pfad));
+  });
+  return out;
+};
+
+const DokumentExplorer = ({ mandantName, selected, onSelect, showToast }) => {
+  const [baum, setBaum] = useState([]);
+  const [alle, setAlle] = useState([]);
+  const [aktOrdner, setAktOrdner] = useState("");
+  const [laden, setLaden] = useState(false);
+
+  useEffect(() => {
+    if (!mandantName) return;
+    let cancelled = false;
+    (async () => {
+      setLaden(true);
+      try {
+        const d = await getPortalDokumentQuellen(mandantName);
+        const payload = d?.data || d;
+        const b = payload?.baum || [];
+        const flat = Array.isArray(payload?.dateien) && payload.dateien.length
+          ? payload.dateien
+          : flattenBaumDateien(b);
+        if (!cancelled) {
+          setBaum(b);
+          setAlle(flat);
+          if (!aktOrdner && flat.length) setAktOrdner(flat[0].ordner_pfad || "");
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setBaum([]);
+          setAlle([]);
+          showToast?.(e.message || "Dokumente konnten nicht geladen werden", "error");
+        }
+      } finally {
+        if (!cancelled) setLaden(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [mandantName, showToast]);
+
+  const ordnerListe = [...new Set(alle.map((x) => x.ordner_pfad || "Sonstiges"))].sort();
+  const dateienImOrdner = alle.filter(
+    (x) => (x.ordner_pfad || "Sonstiges") === (aktOrdner || ordnerListe[0] || "Sonstiges")
+  );
+
+  return (
+    <div style={{ display: "flex", gap: 8, minHeight: 140, marginBottom: 10 }}>
+      <div style={{
+        flex: "0 0 38%",
+        maxHeight: 200,
+        overflowY: "auto",
+        border: "1px solid var(--border)",
+        borderRadius: 8,
+        padding: 6,
+        background: "var(--bg)",
+      }}>
+        <div style={{ fontSize: 10, color: "var(--text3)", marginBottom: 6, textTransform: "uppercase" }}>
+          Ordner {laden ? "…" : `(${alle.length} Dateien)`}
+        </div>
+        {ordnerListe.length === 0 && !laden ? (
+          <div style={{ fontSize: 11, color: "var(--text3)", padding: 8 }}>Keine Dokumente im Archiv/Uploads</div>
+        ) : (
+          ordnerListe.map((o) => (
+            <button
+              key={o}
+              type="button"
+              onClick={() => setAktOrdner(o)}
+              style={{
+                display: "block",
+                width: "100%",
+                textAlign: "left",
+                padding: "6px 8px",
+                marginBottom: 4,
+                borderRadius: 6,
+                border: "none",
+                cursor: "pointer",
+                fontSize: 11,
+                background: aktOrdner === o ? "rgba(200,169,110,0.15)" : "transparent",
+                color: aktOrdner === o ? "var(--accent)" : "var(--text2)",
+              }}
+            >
+              📁 {o}
+            </button>
+          ))
+        )}
+      </div>
+      <div style={{
+        flex: 1,
+        maxHeight: 200,
+        overflowY: "auto",
+        border: "1px solid var(--border)",
+        borderRadius: 8,
+        padding: 6,
+        background: "var(--bg)",
+      }}>
+        <div style={{ fontSize: 10, color: "var(--text3)", marginBottom: 6, textTransform: "uppercase" }}>
+          Dateien
+        </div>
+        {dateienImOrdner.length === 0 ? (
+          <div style={{ fontSize: 11, color: "var(--text3)", padding: 8 }}>
+            {laden ? "Lade…" : "In diesem Ordner keine Dateien"}
+          </div>
+        ) : (
+          dateienImOrdner.map((d) => {
+            const key = `${d.quelle}:${d.id}`;
+            const active = selected?.quelle === d.quelle && selected?.id === d.id;
+            return (
+              <button
+                key={key}
+                type="button"
+                disabled={d.datei_vorhanden === false}
+                onClick={() => onSelect(d)}
+                style={{
+                  display: "block",
+                  width: "100%",
+                  textAlign: "left",
+                  padding: "7px 8px",
+                  marginBottom: 4,
+                  borderRadius: 6,
+                  border: active ? "1px solid var(--accent)" : "1px solid var(--border)",
+                  cursor: d.datei_vorhanden === false ? "not-allowed" : "pointer",
+                  fontSize: 11,
+                  opacity: d.datei_vorhanden === false ? 0.45 : 1,
+                  background: active ? "rgba(200,169,110,0.12)" : "var(--bg2)",
+                  color: "var(--text)",
+                }}
+              >
+                📄 {d.dateiname}
+                {d.datei_vorhanden === false ? " (Datei fehlt auf Server)" : ""}
+              </button>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+};
 
 const fmtZeit = (iso) => {
   if (!iso) return "";
@@ -67,13 +215,62 @@ const ChatBubble = ({ msg, mandantName, showToast, onRefresh }) => {
       </div>
     );
   } else if (msg.typ === "unterschrift_anfrage") {
+    const uid = refs.unterschrift_id;
+    const st = meta.unterschrift_status || "ausstehend";
     body = (
       <div>
         <div style={{ fontWeight: 600, marginBottom: 4 }}>✍ Unterschrift</div>
         <div>{meta.dokumentname || msg.text}</div>
-        <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 4 }}>
-          Status: {meta.unterschrift_status || "ausstehend"}
+        <div style={{ fontSize: 11, color: st === "unterschrieben" ? "var(--green)" : "var(--text3)", marginTop: 4 }}>
+          Status: {st}
         </div>
+        {isKanzlei && uid && st === "unterschrieben" ? (
+          <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+            <button
+              type="button"
+              style={{ fontSize: 10, padding: "4px 10px", borderRadius: 6, border: "1px solid var(--border)", background: "transparent", cursor: "pointer", color: "var(--text2)" }}
+              onClick={async () => {
+                try {
+                  const d = await getPortalUnterschriftDokument(mandantName, uid);
+                  const p = d?.data || d;
+                  const b64 = p?.dokument_b64;
+                  const typ = (p?.dokumenttyp || "application/pdf").includes("pdf") ? "application/pdf" : p?.dokumenttyp;
+                  if (!b64) { showToast?.("Kein Dokument", "error"); return; }
+                  const w = window.open("", "_blank");
+                  if (w) {
+                    w.document.title = p?.dokumentname || "Dokument";
+                    if (typ.includes("pdf")) {
+                      w.document.write(`<embed width="100%" height="100%" src="data:application/pdf;base64,${b64}" type="application/pdf"/>`);
+                    } else {
+                      w.document.write(`<img style="max-width:100%" src="data:${typ};base64,${b64}"/>`);
+                    }
+                  }
+                } catch (e) { showToast?.(e.message, "error"); }
+              }}
+            >
+              📄 Dokument
+            </button>
+            <button
+              type="button"
+              style={{ fontSize: 10, padding: "4px 10px", borderRadius: 6, border: "1px solid var(--border)", background: "transparent", cursor: "pointer", color: "var(--text2)" }}
+              onClick={async () => {
+                try {
+                  const d = await getPortalUnterschriftBild(mandantName, uid);
+                  const p = d?.data || d;
+                  const b64 = p?.unterschrift_b64;
+                  if (!b64) { showToast?.("Keine Unterschrift gespeichert", "error"); return; }
+                  const w = window.open("", "_blank");
+                  if (w) {
+                    w.document.title = "Unterschrift";
+                    w.document.write(`<img style="max-width:100%;background:#fff;padding:20px" src="data:image/png;base64,${b64}"/>`);
+                  }
+                } catch (e) { showToast?.(e.message, "error"); }
+              }}
+            >
+              ✍ Unterschrift ansehen
+            </button>
+          </div>
+        ) : null}
       </div>
     );
   } else if (msg.typ === "dokument_anfrage") {
@@ -200,7 +397,9 @@ export default function PortalChat({
   const [aufgabeForm, setAufgabeForm] = useState({ beschreibung: "", frist: "", hinweis: "" });
   const [dokForm, setDokForm] = useState({ name: "", beschreibung: "", frist: "" });
   const [sigFile, setSigFile] = useState(null);
+  const [sigAusArchiv, setSigAusArchiv] = useState(null);
   const [sigBetreff, setSigBetreff] = useState("Bitte unterzeichnen");
+  const [sigQuelle, setSigQuelle] = useState("explorer");
   const [uploadFile, setUploadFile] = useState(null);
   const [uploadKategorie, setUploadKategorie] = useState("Sonstiges");
   const [uploadBeschreibung, setUploadBeschreibung] = useState("");
@@ -333,17 +532,38 @@ export default function PortalChat({
   };
 
   const sendUnterschrift = async () => {
-    if (!sigFile) {
-      showToast?.("PDF wählen", "error");
-      return;
-    }
     setSending(true);
     try {
-      const b64 = await fileToBase64(sigFile);
+      let dokumentname = "";
+      let dokument_b64 = "";
+      let dokumenttyp = "application/pdf";
+      if (sigQuelle === "datei") {
+        if (!sigFile) {
+          showToast?.("PDF wählen", "error");
+          return;
+        }
+        dokumentname = sigFile.name;
+        dokument_b64 = await fileToBase64(sigFile);
+        dokumenttyp = sigFile.type || "application/pdf";
+      } else {
+        if (!sigAusArchiv?.id || !sigAusArchiv?.quelle) {
+          showToast?.("Dokument im Explorer wählen", "error");
+          return;
+        }
+        const inh = await getPortalDokumentQuelleInhalt(mandantName, sigAusArchiv.quelle, sigAusArchiv.id);
+        const p = inh?.data || inh;
+        dokumentname = p?.dateiname || sigAusArchiv.dateiname;
+        dokument_b64 = p?.inhalt_b64 || "";
+        dokumenttyp = p?.dateityp || "application/pdf";
+        if (!dokument_b64 || dokument_b64.length < 20) {
+          showToast?.("Dateiinhalt leer — Datei fehlt evtl. auf dem Server", "error");
+          return;
+        }
+      }
       await sendPortalChatUnterschrift(mandantName, {
-        dokumentname: sigFile.name,
-        dokument_b64: b64,
-        dokumenttyp: sigFile.type || "application/pdf",
+        dokumentname,
+        dokument_b64,
+        dokumenttyp,
         betreff: sigBetreff.trim() || "Bitte unterzeichnen",
         hinweis: "",
         gueltig_tage: 30,
@@ -352,6 +572,7 @@ export default function PortalChat({
       showToast?.("Unterschrift im Chat angefordert", "success");
       setMode(null);
       setSigFile(null);
+      setSigAusArchiv(null);
       await laden();
       onSent?.();
     } catch (e) {
@@ -557,7 +778,51 @@ export default function PortalChat({
 
       {mode === "unterschrift" && (
         <div style={{ marginBottom: 10, padding: 10, border: "1px dashed var(--border)", borderRadius: 8 }}>
-          <input type="file" accept=".pdf,application/pdf" onChange={(e) => setSigFile(e.target.files?.[0] || null)} style={{ fontSize: 12, marginBottom: 8 }} />
+          <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+            {[
+              ["explorer", "Aus Archiv"],
+              ["datei", "Datei hochladen"],
+            ].map(([k, label]) => (
+              <button
+                key={k}
+                type="button"
+                onClick={() => setSigQuelle(k)}
+                style={{
+                  fontSize: 11,
+                  padding: "5px 10px",
+                  borderRadius: 8,
+                  border: `1px solid ${sigQuelle === k ? "var(--accent)" : "var(--border)"}`,
+                  background: sigQuelle === k ? "rgba(200,169,110,0.12)" : "transparent",
+                  color: sigQuelle === k ? "var(--accent)" : "var(--text2)",
+                  cursor: "pointer",
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {sigQuelle === "explorer" ? (
+            <>
+              <DokumentExplorer
+                mandantName={mandantName}
+                selected={sigAusArchiv}
+                onSelect={(d) => setSigAusArchiv(d)}
+                showToast={showToast}
+              />
+              {sigAusArchiv ? (
+                <div style={{ fontSize: 11, color: "var(--green)", marginBottom: 8 }}>
+                  ✓ {sigAusArchiv.dateiname}
+                </div>
+              ) : null}
+            </>
+          ) : (
+            <input
+              type="file"
+              accept=".pdf,application/pdf"
+              onChange={(e) => setSigFile(e.target.files?.[0] || null)}
+              style={{ fontSize: 12, marginBottom: 8, width: "100%" }}
+            />
+          )}
           <input
             placeholder="Betreff"
             value={sigBetreff}
