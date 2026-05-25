@@ -130,6 +130,8 @@ _API_GATEWAY_EXACT = frozenset(
         "/api/v1/webhooks/verify-example",
         "/billing/stripe/webhook",
         "/billing/stripe/config",
+        "/system/build",
+        "/api/system/build",
         # E-Mail-Login (öffentlich wie /auth/login) — sonst 403 hinter API_GATEWAY_KEY
         "/login",
         "/api/login",

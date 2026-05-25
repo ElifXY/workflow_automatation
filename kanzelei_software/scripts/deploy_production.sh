@@ -44,7 +44,7 @@ echo "==> API ready:"
 docker compose exec -T api curl -fsS http://127.0.0.1:8000/ready || true
 echo ""
 echo "==> API system/build:"
-docker compose exec -T api curl -fsS http://127.0.0.1:8000/system/build || true
+docker compose exec -T api curl -fsS http://127.0.0.1:8000/api/system/build || true
 echo ""
 echo "==> Portal-Build (portal-deploy-20260519b):"
 docker compose exec -T api curl -fsS http://127.0.0.1:8000/portal/health || true
