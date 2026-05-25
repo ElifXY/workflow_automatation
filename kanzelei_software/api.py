@@ -3877,7 +3877,7 @@ def apply_settings_suggestion(
     _user: dict = Depends(require_permission("settings:write")),
 ):
     store = get_ds(_user)
-    from modules.settings_manager import setting_setzen, FESTGESCHRIEBEN
+    from modules.settings_manager import FESTGESCHRIEBEN
 
     sugs = _settings_suggestions(store)
     chosen = next((s for s in sugs if s.get("id") == suggestion_id), None)
@@ -3890,7 +3890,12 @@ def apply_settings_suggestion(
         raise HTTPException(400, "Vorschlag ohne key ist ungültig")
     if key in FESTGESCHRIEBEN:
         raise HTTPException(403, f"'{key}' ist festgeschrieben und kann nicht geändert werden")
-    ok_set = setting_setzen(key, wert)
+    svc = SettingsService(store)
+    try:
+        svc.update_one(key, wert)
+        ok_set = True
+    except (PermissionError, ValueError):
+        ok_set = False
     if not ok_set:
         raise HTTPException(400, f"Ungültige Empfehlung: {key}={wert}")
     store.log_eintrag(f"SETTING_SUGGESTION_APPLIED | {suggestion_id} | {key}={wert}")

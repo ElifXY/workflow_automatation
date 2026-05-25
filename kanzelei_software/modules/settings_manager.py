@@ -280,39 +280,131 @@ def _normalize_nav_lists(settings: Dict[str, Any]) -> None:
 
 
 # ============================================================
-# KERN-FUNKTIONEN
+# KERN-FUNKTIONEN (pro Kanzlei / DatenSpeicher)
 # ============================================================
 
-def _lade_settings() -> Dict:
-    store = DatenSpeicher()
+# Einzelkeys spiegeln (Legacy-Leser wie email_sender vor Blob-Migration)
+_FLAT_MIRROR_KEYS = frozenset({
+    "kanzlei_name", "email_absender_name", "kanzlei_email", "kanzlei_telefon",
+    "kanzlei_website", "kanzlei_adresse", "kanzlei_steuernummer", "kanzlei_iban", "kanzlei_bic",
+    "email_signatur", "stundensatz",
+})
+
+
+def _merge_settings_blob(store: DatenSpeicher, gespeichert: Any) -> Dict:
+    result = DEFAULT_SETTINGS.copy()
+    if isinstance(gespeichert, dict):
+        result.update(gespeichert)
+    for k in _FLAT_MIRROR_KEYS:
+        try:
+            flat = store.setting_holen(k, None)
+        except Exception:
+            flat = None
+        if flat is not None and str(flat).strip() != "":
+            if not str(result.get(k) or "").strip():
+                result[k] = flat
+    result.update(FESTGESCHRIEBEN)
+    _normalize_nav_lists(result)
+    return result
+
+
+def _maybe_migrate_settings_from_default(store: DatenSpeicher) -> None:
+    """Einmalig: alte Deploys speicherten in kanzlei_id=default — Daten übernehmen."""
+    kid = str(getattr(store, "kanzlei_id", "") or "default")
+    if kid == "default":
+        return
+    cur = store.setting_holen(SETTINGS_KEY, None)
+    if isinstance(cur, dict) and len(cur) >= 8:
+        return
+    try:
+        legacy = DatenSpeicher(kanzlei_id="default").setting_holen(SETTINGS_KEY, None)
+    except Exception:
+        legacy = None
+    if isinstance(legacy, dict) and legacy:
+        merged = DEFAULT_SETTINGS.copy()
+        merged.update(legacy)
+        save_settings_blob_for_store(store, merged)
+        log.info("Settings von 'default' nach '%s' migriert", kid)
+
+
+def load_settings_for_store(store: DatenSpeicher) -> Dict:
+    """Alle Settings der Kanzlei (tenant-isoliert)."""
+    _maybe_migrate_settings_from_default(store)
     gespeichert = store.setting_holen(SETTINGS_KEY, None)
     if not isinstance(gespeichert, dict):
-        _speichere_settings(DEFAULT_SETTINGS.copy())
-        gespeichert = {}
+        save_settings_blob_for_store(store, DEFAULT_SETTINGS.copy())
+        gespeichert = store.setting_holen(SETTINGS_KEY, None)
     try:
-        result = DEFAULT_SETTINGS.copy()
-        result.update(gespeichert)
-        # Festgeschriebene Werte immer erzwingen
-        result.update(FESTGESCHRIEBEN)
-        _normalize_nav_lists(result)
-        return result
+        return _merge_settings_blob(store, gespeichert if isinstance(gespeichert, dict) else {})
     except Exception as e:
-        log.error(f"Settings-Ladefehler: {e}")
+        log.error(f"Settings-Ladefehler ({store.kanzlei_id}): {e}")
         return DEFAULT_SETTINGS.copy()
 
 
-def _speichere_settings(settings: Dict) -> bool:
-    # Festgeschriebene Werte niemals überschreiben
+def _mirror_flat_keys(store: DatenSpeicher, settings: Dict) -> None:
+    for k in _FLAT_MIRROR_KEYS:
+        if k in settings:
+            try:
+                store.setting_setzen(k, settings[k])
+            except Exception as e:
+                log.warning("Flat-Mirror %s: %s", k, e)
+
+
+def save_settings_blob_for_store(store: DatenSpeicher, settings: Dict) -> bool:
+    settings = dict(settings)
     settings.update(FESTGESCHRIEBEN)
     try:
-        return DatenSpeicher().setting_setzen(SETTINGS_KEY, settings)
+        ok = store.setting_setzen(SETTINGS_KEY, settings)
+        if ok:
+            _mirror_flat_keys(store, settings)
+        return ok
     except Exception as e:
-        log.error(f"Settings-Speicherfehler: {e}")
+        log.error(f"Settings-Speicherfehler ({store.kanzlei_id}): {e}")
         return False
 
 
-def setting_holen(key: str) -> Optional[Any]:
-    return _lade_settings().get(key, DEFAULT_SETTINGS.get(key))
+def save_setting_for_store(store: DatenSpeicher, key: str, wert: Any) -> bool:
+    if key in FESTGESCHRIEBEN:
+        log.warning(f"Festgeschriebener Wert kann nicht geändert werden: {key}")
+        return False
+    if key not in DEFAULT_SETTINGS and not key.startswith(("custom_", "ext_")):
+        log.warning(f"Unbekannter Setting-Key: {key}")
+        return False
+    settings = load_settings_for_store(store)
+    ok, normalized = _normalize_value(key, wert, settings)
+    if not ok:
+        log.warning(f"Ungültiger Wert '{wert}' für '{key}'")
+        return False
+    settings[key] = normalized
+    if not _validate_invariants(settings, key):
+        return False
+    erfolg = save_settings_blob_for_store(store, settings)
+    if erfolg:
+        log.info(f"Setting [{store.kanzlei_id}]: {key} = {normalized}")
+    return erfolg
+
+
+def reset_settings_for_store(store: DatenSpeicher, key: Optional[str] = None) -> bool:
+    if key:
+        if key in FESTGESCHRIEBEN:
+            return False
+        return save_setting_for_store(store, key, DEFAULT_SETTINGS.get(key))
+    base = DEFAULT_SETTINGS.copy()
+    base.update(FESTGESCHRIEBEN)
+    return save_settings_blob_for_store(store, base)
+
+
+def _lade_settings() -> Dict:
+    return load_settings_for_store(DatenSpeicher())
+
+
+def _speichere_settings(settings: Dict) -> bool:
+    return save_settings_blob_for_store(DatenSpeicher(), settings)
+
+
+def setting_holen(key: str, store: Optional[DatenSpeicher] = None) -> Optional[Any]:
+    st = store if store is not None else DatenSpeicher()
+    return load_settings_for_store(st).get(key, DEFAULT_SETTINGS.get(key))
 
 
 def _is_valid_url(value: str) -> bool:
@@ -450,50 +542,31 @@ def _normalize_value(key: str, wert: Any, settings: Dict[str, Any]) -> tuple[boo
     return True, wert
 
 
-def setting_setzen(key: str, wert: Any) -> bool:
-    """
-    Setting ändern mit vollständiger Validierung.
-    Festgeschriebene Werte sind unveränderbar.
-    """
-    # Festgeschriebene Werte schützen
-    if key in FESTGESCHRIEBEN:
-        log.warning(f"Festgeschriebener Wert kann nicht geändert werden: {key}")
-        return False
-
-    # Key muss bekannt sein (offenes Schema über Prefix erlaubt)
-    if key not in DEFAULT_SETTINGS and not key.startswith(("custom_", "ext_")):
-        log.warning(f"Unbekannter Setting-Key: {key}")
-        return False
-
-    settings = _lade_settings()
-    ok, normalized = _normalize_value(key, wert, settings)
-    if not ok:
-        log.warning(f"Ungültiger Wert '{wert}' für '{key}'")
-        return False
-    settings[key] = normalized
-    if not _validate_invariants(settings, key):
-        return False
-    erfolg = _speichere_settings(settings)
-    if erfolg:
-        log.info(f"Setting: {key} = {normalized}")
-    return erfolg
+def setting_setzen(key: str, wert: Any, store: Optional[DatenSpeicher] = None) -> bool:
+    """Setting ändern — mit ``store`` für die eingeloggte Kanzlei."""
+    st = store if store is not None else DatenSpeicher()
+    return save_setting_for_store(st, key, wert)
 
 
-def settings_batch_setzen(updates: Dict[str, Any]) -> Dict[str, bool]:
-    """Mehrere Settings auf einmal speichern."""
+def settings_batch_setzen(
+    updates: Dict[str, Any],
+    store: Optional[DatenSpeicher] = None,
+) -> Dict[str, bool]:
+    st = store if store is not None else DatenSpeicher()
     results = {}
     for key, wert in updates.items():
-        results[key] = setting_setzen(key, wert)
+        results[key] = save_setting_for_store(st, key, wert)
     return results
 
 
-def alle_settings_holen() -> Dict:
-    return _lade_settings()
+def alle_settings_holen(store: Optional[DatenSpeicher] = None) -> Dict:
+    st = store if store is not None else DatenSpeicher()
+    return load_settings_for_store(st)
 
 
-def settings_nach_kategorie() -> Dict[str, Dict]:
+def settings_nach_kategorie(store: Optional[DatenSpeicher] = None) -> Dict[str, Dict]:
     """Settings gruppiert nach Kategorie für das Frontend."""
-    alle = _lade_settings()
+    alle = alle_settings_holen(store)
     kategorien = {
         "ki":           {},
         "workflow":     {},
@@ -514,14 +587,9 @@ def settings_nach_kategorie() -> Dict[str, Dict]:
     return kategorien
 
 
-def settings_zuruecksetzen(key: Optional[str] = None) -> bool:
-    if key:
-        if key in FESTGESCHRIEBEN:
-            return False
-        return setting_setzen(key, DEFAULT_SETTINGS.get(key))
-    base = DEFAULT_SETTINGS.copy()
-    base.update(FESTGESCHRIEBEN)
-    return _speichere_settings(base)
+def settings_zuruecksetzen(key: Optional[str] = None, store: Optional[DatenSpeicher] = None) -> bool:
+    st = store if store is not None else DatenSpeicher()
+    return reset_settings_for_store(st, key)
 
 
 # ── CLI ───────────────────────────────────────────────────────

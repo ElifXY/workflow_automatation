@@ -1324,7 +1324,7 @@ const SchnittstellenTab = ({s, save}) => {
 // 7. KANZLEI-DATEN
 // ═══════════════════════════════════════════════════════════
 
-const KanzleiTab = ({s, save, sysInfo, readiness, onExport, onReset}) => (
+const KanzleiTab = ({s, save, setSettings, sysInfo, readiness, onExport, onReset}) => (
   <div>
     <SectionTitle>Kanzlei-Stammdaten</SectionTitle>
 
@@ -1342,9 +1342,10 @@ const KanzleiTab = ({s, save, sysInfo, readiness, onExport, onReset}) => (
       {id:"k_bic",    key:"kanzlei_bic",           label:"BIC",                mono:true},
     ].map(f=>(
       <Row key={f.key} label={f.label} description={f.description}>
-        <input id={f.id} type={f.type||"text"} defaultValue={s[f.key]||""}
+        <input id={f.id} type={f.type||"text"} value={s[f.key] ?? ""}
           placeholder={f.ph||""}
-          onBlur={e=>{ if(e.target.value!==s[f.key]) save(f.key,e.target.value); }}
+          onChange={e=>setSettings(p=>({...p,[f.key]:e.target.value}))}
+          onBlur={e=>{ const v=e.target.value; if(v!==(s[f.key]??"")) save(f.key,v); }}
           style={{width:260,background:"var(--bg)",border:`1px solid var(--border2)`,borderRadius:8,
             color:"var(--text)",padding:"7px 11px",fontSize:13,outline:"none",
             fontFamily:f.mono?"'DM Mono',monospace":"'DM Sans',sans-serif"}}/>
@@ -1363,7 +1364,8 @@ const KanzleiTab = ({s, save, sysInfo, readiness, onExport, onReset}) => (
     </Row>
 
     <SectionTitle>Email-Signatur</SectionTitle>
-    <textarea id="email_sig" rows={4} defaultValue={s.email_signatur||""}
+    <textarea id="email_sig" rows={4} value={s.email_signatur||""}
+      onChange={e=>setSettings(p=>({...p,email_signatur:e.target.value}))}
       onBlur={e=>save("email_signatur",e.target.value)}
       style={{width:"100%",background:"var(--bg)",border:`1px solid var(--border2)`,borderRadius:10,
         color:"var(--text)",padding:"9px 13px",fontSize:13,fontFamily:"'DM Sans',sans-serif",
@@ -1600,7 +1602,11 @@ export default function Settings() {
     try {
       await updateSetting(key, wert);
       setSettings(p=>({...p,[key]:wert}));
-      if (String(key).startsWith("rollen_nav")) {
+      if (
+        String(key).startsWith("rollen_nav")
+        || String(key).startsWith("kanzlei_")
+        || String(key).startsWith("email_")
+      ) {
         try {
           window.dispatchEvent(new CustomEvent("kanzlei-settings-changed"));
         } catch {}
@@ -1666,7 +1672,7 @@ export default function Settings() {
     billing:         <BillingTab s={settings} save={save}/>,
     compliance:      <ComplianceTab s={settings} save={save}/>,
     schnittstellen:  <SchnittstellenTab s={settings} save={save}/>,
-    kanzlei:         <KanzleiTab s={settings} save={save} sysInfo={sysInfo}
+    kanzlei:         <KanzleiTab s={settings} save={save} setSettings={setSettings} sysInfo={sysInfo}
                       readiness={readiness}
                        onExport={handleExport} onReset={handleReset}/>,
   };

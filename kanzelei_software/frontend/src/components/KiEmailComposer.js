@@ -1,5 +1,5 @@
 // KI-E-Mail: Vorschau, Bearbeiten (Text/HTML), Empfänger, Versand
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { getEmailPreview, getEmailAbsender, sendEmail } from "../api";
 
 const emailOk = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test((v || "").trim());
@@ -112,22 +112,32 @@ export default function KiEmailComposer({
     setEmpfaenger(mandantEmail || "");
   }, [mandantEmail, mandantName]);
 
-  useEffect(() => {
-    let cancelled = false;
+  const ladeAbsender = useCallback(() => {
     getEmailAbsender()
       .then((d) => {
-        if (!cancelled && d) {
-          setAbsenderInfo({
-            anzeige: d.from_header || d.display_name || "",
-            name: d.display_name || "",
-            email: d.from_email || "",
-            build: d.build || "",
-          });
-        }
+        if (!d) return;
+        setAbsenderInfo({
+          anzeige: d.from_header || d.display_name || "",
+          name: d.display_name || "",
+          email: d.from_email || "",
+          build: d.build || "",
+        });
       })
       .catch(() => {});
-    return () => { cancelled = true; };
-  }, [mandantName]);
+  }, []);
+
+  useEffect(() => {
+    ladeAbsender();
+    const onSettings = () => ladeAbsender();
+    try {
+      window.addEventListener("kanzlei-settings-changed", onSettings);
+    } catch {}
+    return () => {
+      try {
+        window.removeEventListener("kanzlei-settings-changed", onSettings);
+      } catch {}
+    };
+  }, [mandantName, ladeAbsender]);
 
   const basisHtml = original?.html || preview?.email_html || "";
 

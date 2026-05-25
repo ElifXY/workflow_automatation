@@ -40,9 +40,12 @@ def resolve_email_from(
 
     if store is not None:
         try:
-            abs_name = (store.setting_holen("email_absender_name") or "").strip()
-            k_name = (store.setting_holen("kanzlei_name") or "").strip()
-            k_mail = (store.setting_holen("kanzlei_email") or "").strip()
+            from modules.settings_manager import load_settings_for_store
+
+            cfg = load_settings_for_store(store)
+            abs_name = (cfg.get("email_absender_name") or "").strip()
+            k_name = (cfg.get("kanzlei_name") or "").strip()
+            k_mail = (cfg.get("kanzlei_email") or "").strip()
             if abs_name:
                 display = abs_name
             elif k_name and k_name.lower() not in ("steuerkanzlei", "standard-kanzlei"):
@@ -60,7 +63,13 @@ def resolve_email_from(
     display = (display or "Ihre Steuerkanzlei").strip()
     # Produktname nicht als Mandanten-Mail-Absender
     if re.fullmatch(r"kanzlei\s*ai", display, re.I):
-        display = (store.setting_holen("kanzlei_name") if store else None) or "Ihre Steuerkanzlei"
+        try:
+            from modules.settings_manager import load_settings_for_store
+
+            kn = (load_settings_for_store(store).get("kanzlei_name") or "").strip() if store else ""
+        except Exception:
+            kn = ""
+        display = kn or "Ihre Steuerkanzlei"
         if re.fullmatch(r"kanzlei\s*ai", str(display), re.I):
             display = "Ihre Steuerkanzlei"
 
