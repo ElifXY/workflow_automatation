@@ -22,9 +22,9 @@ REQUIRED_CHECKS = {
     "scripts/test_api_users_invites.py",
     "scripts/tenant_enforcement_audit.py",
 }
+# Kern (Mandanten, Aufgaben) bleiben immer nutzbar — sonst ist die Suite in Produktion leer.
+# Advanced = optionale Module (KI, Automation, Belege, …) bis Baseline + ENABLE_ADVANCED_FEATURES.
 ADVANCED_PREFIXES = (
-    "/mandanten",
-    "/aufgaben",
     "/dokumente",
     "/ki",
     "/ai",

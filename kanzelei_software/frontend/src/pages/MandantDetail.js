@@ -834,12 +834,13 @@ export default function MandantDetail() {
   const ladeMandant = useCallback(async () => {
     try {
       const d = await getMandant(name);
-      setMandant(d);
+      const row = d?.data ?? d;
+      setMandant(row?.name || row?.mandant ? row : d);
     } catch (e) {
-      // Fallback: alle Mandanten laden und filtern (wenn /mandanten/{name} nicht verfügbar)
       try {
         const all = await getMandanten();
-        const m   = all?.data?.find(x => x.name === name);
+        const list = Array.isArray(all) ? all : (all?.data || all?.mandanten || []);
+        const m = list.find((x) => (x.name || x.mandant) === name);
         setMandant(m || null);
       } catch { setMandant(null); }
     }
