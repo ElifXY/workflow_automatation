@@ -1,16 +1,17 @@
 # Dashboard „Heute“ — operative Kennzahlen auf einen Blick
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Dict, List
 
 from core.aufgabe_erledigt import aufgabe_ist_erledigt
+from core.frist_utils import parse_frist, tage_bis_frist
 
 
 def heute_operations(store) -> Dict[str, Any]:
     """Bot offen, fehlende Belege, überfällige/heute fällige Aufgaben."""
     jetzt = datetime.now()
-    heute = jetzt.strftime("%Y-%m-%d")
+    heute_datum = jetzt.date()
 
     mandanten = store.hole_mandanten() or {}
     aufgaben = store.hole_fristen() or {}
@@ -39,16 +40,21 @@ def heute_operations(store) -> Dict[str, Any]:
     for a in aufgaben.values():
         if not isinstance(a, dict) or aufgabe_ist_erledigt(a):
             continue
-        frist = str(a.get("frist") or "9999")
-        if frist < heute:
+        frist_raw = a.get("frist")
+        tage = tage_bis_frist(frist_raw, heute=heute_datum)
+        if tage is None:
+            continue
+        frist_iso = parse_frist(frist_raw)
+        frist_str = frist_iso.isoformat() if frist_iso else str(frist_raw or "")
+        if tage < 0:
             ueberfaellig += 1
             if len(ueberfaellig_liste) < 8:
                 ueberfaellig_liste.append({
                     "mandant": a.get("mandant", ""),
                     "beschreibung": (a.get("beschreibung") or "")[:80],
-                    "frist": frist,
+                    "frist": frist_str,
                 })
-        elif frist == heute:
+        elif tage == 0:
             faellig_heute += 1
 
     fehlende_docs = 0

@@ -209,7 +209,9 @@ const AufgabenSection = ({ name, aufgaben, onToggle, onEdit, onDelete, onRefresh
   const getFristInfo = (fristStr, erledigt) => {
     if (erledigt) return { label: "Erledigt", color: "var(--green)", tage: null };
     if (!fristStr) return { label: "Kein Datum", color: "var(--text3)", tage: null };
-    const f    = new Date(fristStr);
+    const iso = String(fristStr).trim().slice(0, 10);
+    const f = /^\d{4}-\d{2}-\d{2}$/.test(iso) ? new Date(`${iso}T12:00:00`) : new Date(fristStr);
+    if (Number.isNaN(f.getTime())) return { label: "Ungültiges Datum", color: "var(--text3)", tage: null };
     const diff = Math.round((f - jetzt) / 86400000);
     if (diff < 0)  return { label: `${Math.abs(diff)}d überfällig`, color: "var(--red)",    tage: diff };
     if (diff === 0) return { label: "Heute fällig",                 color: "var(--red)",    tage: 0 };
@@ -945,9 +947,18 @@ export default function MandantDetail() {
   };
 
   // ── Loading & Not Found ────────────────────────────────
+  const pageScrollStyle = {
+    height: "100dvh",
+    maxHeight: "100dvh",
+    overflowY: "auto",
+    overflowX: "hidden",
+    WebkitOverflowScrolling: "touch",
+    background: "var(--bg)",
+  };
+
   if (loading) return (
     <div style={{
-      minHeight: "100vh", background: "var(--bg)",
+      ...pageScrollStyle,
       display: "flex", alignItems: "center", justifyContent: "center",
       flexDirection: "column", gap: 16,
     }}>
@@ -968,7 +979,8 @@ export default function MandantDetail() {
 
   if (!mandant) return (
     <div style={{
-      minHeight: "100vh", background: "var(--bg)", padding: 40,
+      ...pageScrollStyle,
+      padding: 40,
       fontFamily: "var(--font-body)",
     }}>
       <style>{`
@@ -992,7 +1004,11 @@ export default function MandantDetail() {
   const tage     = mandant.score_details?.tage ?? mandant.tage_ohne_antwort ?? 0;
 
   return (
-    <div style={{ minHeight: "100vh", background: "var(--bg)", fontFamily: "var(--font-body)" }}>
+    <div
+      id="mandant-detail-scroll"
+      data-mandant-detail-scroll="true"
+      style={{ ...pageScrollStyle, fontFamily: "var(--font-body)" }}
+    >
 
       {/* Fonts + Animations */}
       <style>{`
@@ -1168,9 +1184,9 @@ export default function MandantDetail() {
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {[
                   { label: "📊 Excel-Report",        fn: () => exportExcel(name),          desc: "Stammdaten, Aufgaben, Kommunikation" },
-                  { label: "🏛 DATEV Buchungsstapel", fn: () => exportDatev(name),          desc: "EXTF v700 — Berater-Nr. aus Einstellungen" },
+                  { label: "🏛 DATEV Buchungsstapel", fn: () => exportDatev(name),          desc: "EXTF v700 — Berater-Nr. aus Einstellungen", datev: true },
                   { label: "⚖ ELSTER UStVA XML",     fn: () => exportElster(name, "UStVA"), desc: "ERiC Transfer-Format" },
-                  { label: "📦 Komplett-Paket ZIP",   fn: () => exportKomplett(name),       desc: "DATEV + ELSTER + Excel + CSV" },
+                  { label: "📦 Komplett-Paket ZIP",   fn: () => exportKomplett(name),       desc: "DATEV + ELSTER + Excel + CSV", datev: true },
                 ].map((ex, i) => (
                   <div key={i} style={{
                     display: "flex", alignItems: "center", justifyContent: "space-between",
@@ -1182,7 +1198,20 @@ export default function MandantDetail() {
                       <div style={{ fontSize: 11, color: "var(--text3)" }}>{ex.desc}</div>
                     </div>
                     <Btn size="xs" variant="ghost"
-                         onClick={() => ex.fn().catch(e => showToast(e.message, "error"))}>
+                         onClick={() => ex.fn()
+                           .then((meta) => {
+                             if (!ex.datev || !meta) {
+                               showToast("Export gestartet", "success");
+                               return;
+                             }
+                             const parts = [];
+                             if (meta.datevNutzen) parts.push(`Nutzen: ${meta.datevNutzen}`);
+                             if (meta.datevBuchungen !== "") parts.push(`${meta.datevBuchungen} Buchungszeilen`);
+                             if (meta.datevDebitor) parts.push(`Debitor ${meta.datevDebitor}`);
+                             if (meta.datevWarnings) parts.push(meta.datevWarnings.slice(0, 120));
+                             showToast(parts.length ? parts.join(" · ") : "DATEV-Export heruntergeladen", "success");
+                           })
+                           .catch(e => showToast(e.message, "error"))}>
                       ⬇
                     </Btn>
                   </div>

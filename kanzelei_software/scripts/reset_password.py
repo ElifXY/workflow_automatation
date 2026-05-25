@@ -23,7 +23,7 @@ def main() -> int:
         print("Ungültige E-Mail")
         return 2
 
-    from core.auth import _hash_passwort, _interner_benutzername_fuer_email
+    from backend.auth import _hash_passwort, _interner_benutzername_fuer_email
     from core.auth_postgres import auth_pg_enabled, pg_aendere_passwort, pg_login_fetch_by_email
 
     if not auth_pg_enabled():

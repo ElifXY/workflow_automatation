@@ -2857,21 +2857,21 @@ def get_dashboard(_user: dict = Depends(get_current_user)):
     faellig_heute = []
     faellig_diese_woche = []
 
+    from core.frist_utils import tage_bis_frist
+
     for a in aufgaben.values():
         if aufgabe_ist_erledigt(a):
             continue
-        try:
-            frist = datetime.strptime(a["frist"], "%Y-%m-%d")
-            tage = (frist - jetzt).days
-            eintrag = {**a, "tage_bis_frist": tage}
-            if tage < 0:
-                ueberfaellig.append(eintrag)
-            elif tage == 0:
-                faellig_heute.append(eintrag)
-            elif tage <= 7:
-                faellig_diese_woche.append(eintrag)
-        except Exception:
+        tage = tage_bis_frist(a.get("frist"), heute=jetzt.date())
+        if tage is None:
             continue
+        eintrag = {**a, "tage_bis_frist": tage}
+        if tage < 0:
+            ueberfaellig.append(eintrag)
+        elif tage == 0:
+            faellig_heute.append(eintrag)
+        elif tage <= 7:
+            faellig_diese_woche.append(eintrag)
 
     return ok_compat({
         "kpis": {
@@ -4947,7 +4947,7 @@ async def auth_oauth_callback(provider: str, code: str = Query(...), state: str 
 
         import secrets
 
-        from core.auth import TOKEN_TTL, _session_speichern
+        from backend.auth import TOKEN_TTL, _session_speichern
 
         session_tok = secrets.token_urlsafe(48)
         expires = datetime.now() + timedelta(seconds=TOKEN_TTL)
@@ -6180,6 +6180,25 @@ def export_excel(name: str,
     except Exception as e:
         raise HTTPException(500, f"Excel-Export Fehler: {e}")
 
+@app.get("/export/{name}/datev/info", tags=["Export"],
+         summary="DATEV Export-Vorschau (Nutzen, Buchungen, Hinweise)")
+def export_datev_info(
+    name: str,
+    berater_nr: str = Query(""),
+    _user: dict = Depends(require_permission("export:datev")),
+):
+    """Vor dem Download: Relevanz und erwartete Buchungszeilen."""
+    if not bool(global_setting_holen("datev_export_aktiv")):
+        raise HTTPException(503, "DATEV Export ist deaktiviert")
+    from core.datev_export_utils import assess_datev_export_relevance, normalize_berater_nr
+    store = get_ds(_user)
+    m = get_mandant_or_404(name, store)
+    aufgaben = [a for a in store.hole_fristen().values() if a.get("mandant") == name]
+    alle_mandanten = store.hole_mandanten()
+    bnr = normalize_berater_nr(berater_nr or global_setting_holen("datev_berater_nr") or "12345")
+    return assess_datev_export_relevance(name, m, aufgaben, bnr, alle_mandanten)
+
+
 @app.get("/export/{name}/datev", tags=["Export"],
          summary="DATEV Buchungsstapel CSV (EXTF v700)")
 def export_datev(
@@ -6194,29 +6213,44 @@ def export_datev(
         raise HTTPException(503, "DATEV Export ist deaktiviert")
     from fastapi.responses import StreamingResponse
     from core.export_service import export_datev_buchungsstapel
-    from core.datev_export_utils import normalize_berater_nr, validate_datev_buchungsstapel_csv
+    from core.datev_export_utils import (
+        assess_datev_export_relevance,
+        normalize_berater_nr,
+        validate_datev_buchungsstapel_csv,
+    )
     import io
     store = get_ds(_user)
     m        = get_mandant_or_404(name, store)
+    alle_mandanten = store.hole_mandanten()
     aufgaben = [a for a in store.hole_fristen().values() if a.get("mandant") == name]
     bnr = normalize_berater_nr(berater_nr or global_setting_holen("datev_berater_nr") or "12345")
     try:
-        csv_bytes = export_datev_buchungsstapel(name, m, aufgaben, bnr, mandanten_nr or None, jahr)
-        meta = validate_datev_buchungsstapel_csv(csv_bytes)
+        rel = assess_datev_export_relevance(name, m, aufgaben, bnr, alle_mandanten)
+        if not rel.get("exportierbar", True):
+            raise HTTPException(400, (rel.get("hinweise") or ["Export nicht möglich"])[0])
+        csv_bytes = export_datev_buchungsstapel(
+            name, m, aufgaben, bnr, mandanten_nr or None, jahr, alle_mandanten=alle_mandanten
+        )
+        meta = validate_datev_buchungsstapel_csv(csv_bytes, strict=True)
         datum     = datetime.now().strftime("%Y%m%d")
         safe = re.sub(r"[^\w\-]+", "_", name).strip("_") or "Mandant"
         filename  = f"EXTF_{datum}_{safe}_Buchungsstapel.csv"
         store.log_eintrag(f"EXPORT_DATEV | {name} | {meta.get('buchungen', 0)} Buchungen")
         from core.product_focus import DATEV_EXPORT_HINWEIS
-        warn = (meta.get("warnings") or [""])[0]
+        warn_parts = list(meta.get("warnings") or [])
+        if rel.get("hinweise"):
+            warn_parts.extend(rel["hinweise"][:2])
+        warn = "; ".join(warn_parts)[:300]
         return StreamingResponse(
             io.BytesIO(csv_bytes),
             media_type="text/csv; charset=windows-1252",
             headers={
                 "Content-Disposition": f'attachment; filename="{filename}"',
                 "X-DATEV-Hinweis": DATEV_EXPORT_HINWEIS[:200],
-                "X-DATEV-Warnings": (warn or "")[:300],
+                "X-DATEV-Warnings": warn,
                 "X-DATEV-Buchungen": str(meta.get("buchungen", 0)),
+                "X-DATEV-Nutzen": str(rel.get("nutzen", ""))[:20],
+                "X-DATEV-Debitor": str(rel.get("debitoren_konto", ""))[:12],
             },
         )
     except ValueError as e:
@@ -6340,8 +6374,16 @@ def export_komplett(name: str, _user: dict = Depends(require_permission("export:
     try:
         from core.datev_export_utils import normalize_berater_nr
         bnr = normalize_berater_nr(global_setting_holen("datev_berater_nr") or "12345")
+        datev_on = bool(global_setting_holen("datev_export_aktiv"))
         zip_bytes, manifest = export_komplettpaket(
-            name, m, aufgaben_list, alle_mandanten, alle_aufgaben, kommunikation, berater_nr=bnr
+            name,
+            m,
+            aufgaben_list,
+            alle_mandanten,
+            alle_aufgaben,
+            kommunikation,
+            berater_nr=bnr,
+            datev_aktiv=datev_on,
         )
         datum    = datetime.now().strftime("%Y%m%d")
         safe = re.sub(r"[^\w\-]+", "_", name).strip("_") or "Mandant"
@@ -6349,6 +6391,7 @@ def export_komplett(name: str, _user: dict = Depends(require_permission("export:
         store.log_eintrag(
             f"EXPORT_KOMPLETT | {name} | {manifest.get('dateien_gesamt', 0)} Dateien"
         )
+        rel = manifest.get("datev_relevanz") or {}
         return StreamingResponse(
             io.BytesIO(zip_bytes),
             media_type="application/zip",
@@ -6356,6 +6399,7 @@ def export_komplett(name: str, _user: dict = Depends(require_permission("export:
                 "Content-Disposition": f'attachment; filename="{filename}"',
                 "X-Export-Dateien": str(manifest.get("dateien_gesamt", 0)),
                 "X-Export-Fehler": str(len(manifest.get("fehler") or [])),
+                "X-DATEV-Nutzen": str(rel.get("nutzen", ""))[:20],
             },
         )
     except ValueError as e:

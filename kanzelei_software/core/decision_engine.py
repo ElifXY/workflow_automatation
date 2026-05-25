@@ -141,26 +141,27 @@ def _berechne_risiko_daten(name: str, m: Dict, ds) -> Dict:
     except Exception:
         tage = 0
 
+    from core.aufgabe_erledigt import aufgabe_ist_offen
+    from core.frist_utils import tage_bis_frist
+
     try:
         meine = [
             a for a in ds.hole_fristen().values()
-            if _safe(a, "mandant") == name and not _safe(a, "erledigt", default=False)
+            if _safe(a, "mandant") == name and aufgabe_ist_offen(a)
         ]
     except Exception:
         meine = []
 
-    heute = datetime.now().strftime("%Y-%m-%d")
-
     for a in meine:
-        frist = _safe(a, "frist", default="9999-99-99")
+        frist = _safe(a, "frist", default="")
         prio  = _safe(a, "prioritaet", default="normal")
         mult  = PRIO_MAP.get(prio, 1.0)
-        try:
-            diff = (datetime.now() - datetime.strptime(frist, "%Y-%m-%d")).days
-        except Exception:
-            diff = 0
+        tage_f = tage_bis_frist(frist)
+        if tage_f is None:
+            continue
+        diff = -tage_f  # positiv = Tage überfällig
 
-        if frist < heute:
+        if tage_f < 0:
             punkte = int(3000 * mult * min(max(diff, 1) / 7, 3))
             raw_score += punkte
             ueberfaellig.append(_safe(a, "beschreibung", default="Aufgabe")[:40])
