@@ -1,6 +1,6 @@
 // KI-E-Mail: Vorschau, Bearbeiten (Text/HTML), Empfänger, Versand
 import { useState, useEffect, useMemo } from "react";
-import { getEmailPreview, sendEmail } from "../api";
+import { getEmailPreview, getEmailAbsender, sendEmail } from "../api";
 
 const emailOk = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test((v || "").trim());
 
@@ -106,10 +106,29 @@ export default function KiEmailComposer({
   const [gesendet, setGesendet] = useState(false);
   const [kiGeneriert, setKiGeneriert] = useState(false);
   const [fehler, setFehler] = useState(null);
+  const [absenderInfo, setAbsenderInfo] = useState(null);
 
   useEffect(() => {
     setEmpfaenger(mandantEmail || "");
   }, [mandantEmail, mandantName]);
+
+  useEffect(() => {
+    let cancelled = false;
+    getEmailAbsender()
+      .then((raw) => {
+        const d = raw?.data ?? raw;
+        if (!cancelled && d) {
+          setAbsenderInfo({
+            anzeige: d.from_header || d.display_name || "",
+            name: d.display_name || "",
+            email: d.from_email || "",
+            build: d.build || "",
+          });
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [mandantName]);
 
   const basisHtml = original?.html || preview?.email_html || "";
 
@@ -121,6 +140,14 @@ export default function KiEmailComposer({
 
   const applyPreview = (d) => {
     setPreview(d);
+    if (d.absender_anzeige || d.absender_name) {
+      setAbsenderInfo({
+        anzeige: d.absender_anzeige || d.absender_name || "",
+        name: d.absender_name || "",
+        email: d.absender_email || "",
+        build: d.build || absenderInfo?.build || "",
+      });
+    }
     setOriginal({
       text: d.email_text || "",
       html: d.email_html || "",
@@ -239,6 +266,25 @@ export default function KiEmailComposer({
         </div>
       )}
 
+      {(absenderInfo?.anzeige || absenderInfo?.name) && (
+        <div style={{
+          marginBottom: 12, padding: "10px 12px", borderRadius: 10,
+          background: "var(--bg3)", border: "1px solid var(--border)",
+        }}>
+          <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 4,
+            textTransform: "uppercase", letterSpacing: "0.06em" }}>
+            Absender (im Postfach des Empfängers)
+          </div>
+          <div style={{ fontSize: 14, color: "var(--text)", fontWeight: 500 }}>
+            {absenderInfo.anzeige || absenderInfo.name}
+          </div>
+          <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 6, lineHeight: 1.5 }}>
+            Ändern unter Einstellungen → Kanzlei-Daten → „Name im Postfach des Empfängers“
+            {absenderInfo.build ? "" : " (nach Deploy: api + nginx neu bauen)"}
+          </div>
+        </div>
+      )}
+
       {!preview ? (
         <button
           type="button"
@@ -287,24 +333,6 @@ export default function KiEmailComposer({
               </div>
             )}
           </div>
-
-          {(preview?.absender_anzeige || preview?.absender_name) && (
-            <div style={{
-              marginBottom: 12, padding: "10px 12px", borderRadius: 10,
-              background: "var(--bg3)", border: "1px solid var(--border)",
-            }}>
-              <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 4,
-                textTransform: "uppercase", letterSpacing: "0.06em" }}>
-                Absender (im Postfach des Empfängers)
-              </div>
-              <div style={{ fontSize: 14, color: "var(--text)", fontWeight: 500 }}>
-                {preview.absender_anzeige || preview.absender_name}
-              </div>
-              <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 6, lineHeight: 1.5 }}>
-                Anpassen unter Einstellungen → Kanzlei-Daten → „Name im Postfach des Empfängers“.
-              </div>
-            </div>
-          )}
 
           <div style={{ marginBottom: 12 }}>
             <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 4,

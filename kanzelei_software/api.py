@@ -155,8 +155,8 @@ def _billing_enabled() -> bool:
 
 # ── Rate-Limiting (In-Memory) ─────────────────────────────────
 _rate_store: Dict[str, List[float]] = {}
-# SPA: viele parallele GETs (Dashboard, Chat-Polling) — 60/min war zu streng
-RATE_LIMIT   = int(os.getenv("API_RATE_LIMIT", "300"))   # Requests/Minute pro IP
+# SPA: viele parallele GETs (Dashboard, Chat-Polling) — ausreichend hoch halten
+RATE_LIMIT   = int(os.getenv("API_RATE_LIMIT", "2000"))   # Requests/Minute pro IP (nur ohne Login)
 RATE_WINDOW  = 60  # Sekunden
 _tenant_rate_store: Dict[str, List[float]] = {}
 
@@ -177,41 +177,31 @@ _TENANT_RL_EXEMPT_GET_PREFIXES = (
     "/portal/unterschriften/",
     "/prognose/",
     "/dashboard",
+    "/email/",
 )
 _TENANT_RL_EXEMPT_EXACT = frozenset({"/ready", "/health", "/portal/health"})
 
 
 def _effective_tenant_rate_limit() -> int:
-    """Mindestens 600/min für SPA — alte Werte (z. B. 60) blockieren normale Nutzung."""
+    """0 = aus. Nur Schreibzugriffe zählen (_tenant_rate_counts). Zu niedrige Werte ignorieren."""
     try:
         v = int(global_setting_holen("api_rate_limit_pro_minute") or 0)
     except Exception:
         v = 0
-    if v <= 0:
-        v = 600
-    elif v < 200:
-        v = 600
     env_rl = (os.getenv("TENANT_API_RATE_LIMIT") or "").strip()
     if env_rl.isdigit():
         v = max(0, int(env_rl))
-    # Auch gespeicherte/env-Werte unter 200 (z. B. 60) würden die SPA blockieren
-    if 0 < v < 200:
-        v = 600
+    if v > 0 and v < 500:
+        log.warning("api_rate_limit_pro_minute=%s zu niedrig — deaktiviert (min. 500)", v)
+        return 0
     return v
 
 
 def _tenant_rate_counts(path: str, method: str) -> bool:
-    """Ob die Anfrage gegen das Tenant-Minutenlimit zählt."""
+    """Nur Schreibzugriffe (POST/PUT/PATCH/DELETE) — Lese-Polling blockiert die SPA nicht."""
     m = (method or "GET").upper()
-    if m in ("OPTIONS", "HEAD"):
+    if m in ("OPTIONS", "HEAD", "GET"):
         return False
-    p = str(path or "/")
-    if p in _TENANT_RL_EXEMPT_EXACT:
-        return False
-    if m == "GET":
-        for prefix in _TENANT_RL_EXEMPT_GET_PREFIXES:
-            if p.startswith(prefix) or p == prefix.rstrip("/"):
-                return False
     return True
 
 def _get_client_ip(request: Request) -> str:
@@ -220,10 +210,21 @@ def _get_client_ip(request: Request) -> str:
         return forwarded.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
 
+def _has_bearer_auth(request: Request) -> bool:
+    auth = (request.headers.get("Authorization") or "").strip()
+    return auth.lower().startswith("bearer ") and len(auth) > 14
+
+
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
-    # Auth-Endpoints strenger limitieren
+    # Eingeloggte Nutzer: kein IP-Limit (Polling würde sonst „Zu viele Anfragen“ auslösen)
     path = request.url.path or "/"
+    if _has_bearer_auth(request) and path not in (
+        "/auth/login", "/login", "/api/login", "/api/auth/login",
+    ):
+        return await call_next(request)
+
+    # Auth-Endpoints strenger limitieren
     is_auth = path in frozenset(
         {
             "/auth/login",

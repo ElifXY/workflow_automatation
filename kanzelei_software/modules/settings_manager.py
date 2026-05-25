@@ -161,7 +161,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "lexoffice_aktiv":             False,
     "lexoffice_api_key":           "",
     "webhook_url":                 "",      # Outgoing Webhooks
-    "api_rate_limit_pro_minute":   600,
+    "api_rate_limit_pro_minute":   0,
 
     # ── KANZLEI-STAMMDATEN ────────────────────────────────────
     "kanzlei_name":                "Steuerkanzlei",

@@ -2470,7 +2470,7 @@ function AppInner() {
 
   useEffect(() => {
     refreshPortalUnread();
-    const t = setInterval(refreshPortalUnread, 30000);
+    const t = setInterval(refreshPortalUnread, 120000);
     return () => clearInterval(t);
   }, [refreshPortalUnread]);
 
@@ -2677,7 +2677,7 @@ function AppInner() {
 
   useEffect(() => {
     ladeAlles(true);
-    // Auto-Reload alle 45s — pausiert beim Tippen/Formularen/Save (schont API Rate-Limit)
+    // Auto-Reload alle 3 Min — pausiert beim Tippen/Formularen/Save
     refreshRef.current = setInterval(() => {
       if (
         !typingRef.current &&
@@ -2687,7 +2687,7 @@ function AppInner() {
       ) {
         ladeAlles();
       }
-    }, 45000);
+    }, 180000);
     return () => clearInterval(refreshRef.current);
   }, [ladeAlles]);
 

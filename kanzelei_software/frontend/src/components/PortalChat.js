@@ -417,7 +417,9 @@ export default function PortalChat({
       const list = d?.nachrichten || d?.data?.nachrichten || [];
       setMsgs(Array.isArray(list) ? list : []);
     } catch (e) {
-      showToast?.(e.message || "Chat konnte nicht geladen werden", "error");
+      if (e?.status !== 429) {
+        showToast?.(e.message || "Chat konnte nicht geladen werden", "error");
+      }
       setMsgs([]);
     } finally {
       setLoading(false);
@@ -427,7 +429,7 @@ export default function PortalChat({
 
   useEffect(() => {
     laden();
-    const t = setInterval(laden, 20000);
+    const t = setInterval(laden, 90000);
     return () => clearInterval(t);
   }, [laden]);
 

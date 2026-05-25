@@ -507,9 +507,19 @@ export const dokumentErhalten = (name, dokument_name) =>
 // EMAIL
 // ═══════════════════════════════════════════════════════════════
 
+/** API-Antwort: Top-Level oder ok/data-Wrapper */
+export const unwrapApiData = (body) => {
+  if (!body || typeof body !== "object") return body;
+  if (body.email_html || body.email_text || body.mandant || body.nachrichten) return body;
+  if (body.data != null && typeof body.data === "object") return body.data;
+  return body;
+};
+
+export const getEmailAbsender = () => apiFetch("/email/absender");
+
 // BUGFIX: Alter Endpoint war /email/{name} — neu: /email/{name}/vorschau
-export const getEmailPreview = (name) =>
-  apiFetch(`/email/${encodeURIComponent(name)}/vorschau`);
+export const getEmailPreview = async (name) =>
+  unwrapApiData(await apiFetch(`/email/${encodeURIComponent(name)}/vorschau`));
 
 // BUGFIX: Unterstützt jetzt benutzerdefinierten Text + force-Bypass der 24h-Sperre
 export const sendEmail = (name, options = {}) =>
