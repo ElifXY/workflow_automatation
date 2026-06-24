@@ -108,6 +108,14 @@ class ProaktiverBot:
     def __init__(self, ds):
         self.ds = ds
 
+    def _min_tage_ohne_antwort(self) -> int:
+        from core.tenant_settings import tenant_int
+        return tenant_int(self.ds, "eskalation_stufe_1_tage", MIN_TAGE_OHNE_ANTWORT)
+
+    def _stundensatz(self) -> float:
+        from core.tenant_settings import tenant_float
+        return tenant_float(self.ds, "stundensatz", 150.0)
+
     def _portal_daten(self) -> Dict:
         fragen = self.ds.bot_fragen_liste()
         return {"bot_fragen": fragen if isinstance(fragen, dict) else {}}
@@ -294,7 +302,7 @@ class ProaktiverBot:
             "mandant": name,
             "umsatz_anomalie": umsatz_ok and "umsatz_anomalie" not in bestehende,
             "beleg_fehlend": len(fehlende_docs) >= MIN_FEHLENDE_BELEGE and "beleg_fehlend" not in bestehende,
-            "kontakt_erinnerung": tage >= MIN_TAGE_OHNE_ANTWORT and "kontakt_erinnerung" not in bestehende,
+            "kontakt_erinnerung": tage >= self._min_tage_ohne_antwort() and "kontakt_erinnerung" not in bestehende,
             "fahrtenbuch": kfz and "fahrtenbuch" not in bestehende,
             "frist_erinnerung": len(ueberfaellige) >= MIN_UEBERFAELLIGE_FRISTEN and "frist_erinnerung" not in bestehende,
             "fehlende_docs_anzahl": len(fehlende_docs),
@@ -409,7 +417,7 @@ class ProaktiverBot:
             neue_fragen.append(f)
 
         tage_ohne_antwort = self._tage_ohne_antwort(name)
-        if tage_ohne_antwort >= MIN_TAGE_OHNE_ANTWORT and "kontakt_erinnerung" not in bestehende:
+        if tage_ohne_antwort >= self._min_tage_ohne_antwort() and "kontakt_erinnerung" not in bestehende:
             f = self.frage_stellen(
                 mandant=name,
                 frage_text=(
@@ -493,6 +501,7 @@ class ProaktiverBot:
         gesparte_minuten    = gesparte_telefonate * 8
         gesparte_stunden    = round(gesparte_minuten / 60, 1)
 
+        stundensatz = self._stundensatz()
         return {
             "fragen_gesamt":         gesamt,
             "fragen_offen":          offen,
@@ -500,5 +509,6 @@ class ProaktiverBot:
             "antwortquote_prozent":  antwortquote,
             "gesparte_telefonate":   gesparte_telefonate,
             "gesparte_stunden":      gesparte_stunden,
-            "zeitersparnis_euro":    round(gesparte_stunden * 150, 2),
+            "zeitersparnis_euro":    round(gesparte_stunden * stundensatz, 2),
+            "stundensatz":           stundensatz,
         }

@@ -23,13 +23,9 @@ def _portal_base_url() -> str:
     return base
 
 
-def _bool_setting(key: str, default: bool = True) -> bool:
-    v = setting_holen(key)
-    if v is None:
-        return default
-    if isinstance(v, bool):
-        return v
-    return str(v).strip().lower() in ("1", "true", "yes", "on")
+def _bool_setting(store, key: str, default: bool = True) -> bool:
+    from core.tenant_settings import tenant_bool
+    return tenant_bool(store, key, default)
 
 
 def _kanzlei_notify_emails(store) -> List[str]:
@@ -83,7 +79,7 @@ def _enqueue(
 
 def notify_mandant_new_bot_frage(store, mandant: str, frage: Dict[str, Any]) -> bool:
     """Mandant erhält E-Mail bei neuer Portal-Frage."""
-    if not _bool_setting("bot_email_mandant_aktiv", True):
+    if not _bool_setting(store, "bot_email_mandant_aktiv", True):
         return False
     m = store.hole_mandant(mandant) if hasattr(store, "hole_mandant") else (store.hole_mandanten() or {}).get(mandant)
     if not m:
@@ -137,7 +133,7 @@ def notify_kanzlei_bot_analyse(
     """Kanzlei: Zusammenfassung nach Bot-Analyse (Scheduler oder manuell)."""
     if not neue_fragen:
         return 0
-    if not _bool_setting("bot_email_kanzlei_aktiv", True):
+    if not _bool_setting(store, "bot_email_kanzlei_aktiv", True):
         return 0
 
     emails = _kanzlei_notify_emails(store)

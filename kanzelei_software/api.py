@@ -4229,8 +4229,10 @@ def add_kommunikation(name: str, data: dict,
 
     store.kommunikation_hinzufuegen(name, eintrag)
 
-    # Letzte Antwort aktualisieren wenn Typ "antwort" oder "anruf"
-    if eintrag["typ"] in ["antwort", "anruf", "meeting"]:
+    # Letzte Mandanten-Antwort nur bei eingehendem Kontakt (nicht Kanzlei-Ausgang)
+    richtung = str(data.get("richtung") or "").strip().lower()
+    typ = str(eintrag["typ"] or "").strip().lower()
+    if richtung == "eingehend" or typ in ("mandant_antwort", "portal_nachricht", "portal_upload"):
         m = store.hole_mandanten().get(name, {})
         m["letzte_antwort"] = datetime.now().isoformat()
         store.mandant_speichern(name, m)

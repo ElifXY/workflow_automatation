@@ -277,7 +277,12 @@ def portal_login(token: str = Query(...)):
         tage_ohne_antwort = 0
 
     antwort_hinweis = ""
-    if tage_ohne_antwort >= 7:
+    try:
+        from core.tenant_settings import tenant_int
+        warn_tage = tenant_int(store, "antwort_warnung_tage", 7)
+    except Exception:
+        warn_tage = 7
+    if tage_ohne_antwort >= warn_tage:
         antwort_hinweis = (
             f"Ihre Kanzlei wartet seit {tage_ohne_antwort} Tagen auf Ihre Rückmeldung. "
             "Bitte beantworten Sie offene Fragen oder schreiben Sie im Chat."

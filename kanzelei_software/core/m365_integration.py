@@ -235,7 +235,7 @@ def m365_heute_block(store) -> Dict[str, Any]:
     if store is None:
         return {"aktiv": False, "verbunden": False}
     try:
-        kalender_aktiv = bool(store.setting_holen("m365_kalender_sync_aktiv"))
+        kalender_aktiv = bool(__import__("core.tenant_settings", fromlist=["tenant_bool"]).tenant_bool(store, "m365_kalender_sync_aktiv", False))
     except Exception:
         kalender_aktiv = False
     if not graph_connected(store):
@@ -269,7 +269,7 @@ def run_m365_kalender_workflow_action(store, mandant: str, params: Dict[str, Any
     if not graph_connected(store):
         return "M365 nicht verbunden — übersprungen"
     try:
-        if not store.setting_holen("m365_kalender_sync_aktiv"):
+        if not __import__("core.tenant_settings", fromlist=["tenant_bool"]).tenant_bool(store, "m365_kalender_sync_aktiv", False):
             return "Kalender-Sync deaktiviert — übersprungen"
     except Exception:
         return "Kalender-Sync nicht lesbar"
@@ -332,7 +332,7 @@ def fetch_mail_preview(store, *, limit: int = 10) -> Dict[str, Any]:
     if not graph_connected(store):
         return {"connected": False, "messages": [], "hinweis": "Microsoft 365 ist noch nicht verbunden."}
     try:
-        if not store.setting_holen("m365_postfach_readonly_aktiv"):
+        if not __import__("core.tenant_settings", fromlist=["tenant_bool"]).tenant_bool(store, "m365_postfach_readonly_aktiv", False):
             return {
                 "connected": True,
                 "sync_aktiv": False,
@@ -411,7 +411,7 @@ def m365_mail_heute_block(store) -> Dict[str, Any]:
     if not graph_connected(store):
         return {"aktiv": False, "verbunden": False}
     try:
-        mail_aktiv = bool(store.setting_holen("m365_postfach_readonly_aktiv"))
+        mail_aktiv = bool(__import__("core.tenant_settings", fromlist=["tenant_bool"]).tenant_bool(store, "m365_postfach_readonly_aktiv", False))
     except Exception:
         mail_aktiv = False
     if not mail_aktiv:
@@ -435,7 +435,7 @@ def run_m365_postfach_workflow_action(store, mandant: str, params: Dict[str, Any
     if not graph_connected(store):
         return "M365 nicht verbunden — übersprungen"
     try:
-        if not store.setting_holen("m365_postfach_readonly_aktiv"):
+        if not __import__("core.tenant_settings", fromlist=["tenant_bool"]).tenant_bool(store, "m365_postfach_readonly_aktiv", False):
             return "Postfach-Sync deaktiviert — übersprungen"
     except Exception:
         return "Postfach-Sync nicht lesbar"
@@ -627,8 +627,8 @@ def m365_status(store=None, user: Optional[Dict[str, Any]] = None) -> Dict[str, 
     graph_tokens = {}
     if store is not None:
         try:
-            kalender_aktiv = bool(store.setting_holen("m365_kalender_sync_aktiv"))
-            mail_aktiv = bool(store.setting_holen("m365_postfach_readonly_aktiv"))
+            kalender_aktiv = bool(__import__("core.tenant_settings", fromlist=["tenant_bool"]).tenant_bool(store, "m365_kalender_sync_aktiv", False))
+            mail_aktiv = bool(__import__("core.tenant_settings", fromlist=["tenant_bool"]).tenant_bool(store, "m365_postfach_readonly_aktiv", False))
             graph_tokens = load_m365_tokens(store)
         except Exception:
             pass

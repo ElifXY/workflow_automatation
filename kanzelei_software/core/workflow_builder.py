@@ -139,6 +139,10 @@ class WorkflowBaukasten:
                 log.error(f"Workflow '{regel['name']}' Fehler: {e}")
 
         gesamt_aktionen = sum(r.get("aktionen_ausgefuehrt", 0) for r in alle_runs)
+        if gesamt_aktionen:
+            from core.usage_events import track_usage
+
+            track_usage(self.ds, "workflow.aktionen", gesamt_aktionen)
         self.ds.log_eintrag(
             f"WORKFLOW_BATCH | {len(regeln)} Regeln | {len(alle_runs)} Runs | "
             f"{gesamt_aktionen} Aktionen"

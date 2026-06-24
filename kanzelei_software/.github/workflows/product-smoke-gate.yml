@@ -49,3 +49,4 @@ jobs:
           python scripts/test_pass13_smoke.py
           python scripts/test_pass13_api_smoke.py
           python scripts/test_pass14_api_smoke.py
+          python scripts/test_pass15_calculations_settings.py

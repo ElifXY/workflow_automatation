@@ -102,7 +102,7 @@ export default function FocusDashboard({ onTab, onEmail, onRefresh, isMobile = f
   const kritisch = kpis.filter((x) => x.status === "KRITISCH" || x.health_ampel === "rot");
   const blockiert = (block?.eintraege || []).slice(0, 12);
   const offeneAntworten = kpis
-    .filter((x) => (x.tage_ohne_antwort || 0) >= 3)
+    .filter((x) => (x.tage_ohne_antwort || 0) >= 7)
     .sort((a, b) => (b.tage_ohne_antwort || 0) - (a.tage_ohne_antwort || 0))
     .slice(0, 8);
   const heute = auto?.heute || {};

@@ -176,9 +176,8 @@ class Engine:
         self.ds = ds or DatenSpeicher()
 
     def _setting(self, key: str, default: Any) -> Any:
-        """Tenant-scoped settings from datastore."""
-        val = self.ds.setting_holen(key, default)
-        return default if val is None else val
+        from core.tenant_settings import tenant_setting
+        return tenant_setting(self.ds, key, default)
 
     # ────────────────────────────────────────────────────────
     # HAUPT-EINSTIEGSPUNKTE

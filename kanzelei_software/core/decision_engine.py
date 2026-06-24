@@ -141,6 +141,12 @@ def _berechne_risiko_daten(name: str, m: Dict, ds) -> Dict:
     except Exception:
         tage = 0
 
+    from core.tenant_settings import tenant_int
+
+    warn_tage = tenant_int(ds, "antwort_warnung_tage", 7)
+    stufe1 = tenant_int(ds, "eskalation_stufe_1_tage", 14)
+    stufe2 = max(tenant_int(ds, "eskalation_stufe_2_tage", 21), stufe1 + 1)
+
     from core.aufgabe_erledigt import aufgabe_ist_offen
     from core.frist_utils import tage_bis_frist
 
@@ -171,14 +177,15 @@ def _berechne_risiko_daten(name: str, m: Dict, ds) -> Dict:
             raw_score += punkte
             bald.append(_safe(a, "beschreibung", default="Aufgabe")[:40])
 
-    if tage >= 21:
+    if tage >= stufe2:
         p = min(tage * 150, 4500); raw_score += p
         score_items.append({"text": f"{tage} Tage ohne Antwort — kritisch", "punkte": p})
-    elif tage >= 14:
+    elif tage >= stufe1:
         p = min(tage * 120, 3600); raw_score += p
         score_items.append({"text": f"{tage} Tage ohne Rückmeldung", "punkte": p})
-    elif tage >= 7:
+    elif tage >= warn_tage:
         p = tage * 60; raw_score += p
+        score_items.append({"text": f"{tage} Tage ohne Rückmeldung (Warnung)", "punkte": p})
 
     if fehlende:
         p = len(fehlende) * 800; raw_score += p

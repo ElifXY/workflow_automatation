@@ -32,10 +32,8 @@ class ProfitMonitor:
         self.ds = ds
 
     def _stundensatz(self) -> float:
-        try:
-            return float(self.ds.setting_holen("stundensatz", STANDARD_STUNDENSATZ))
-        except Exception:
-            return STANDARD_STUNDENSATZ
+        from core.tenant_settings import tenant_float
+        return tenant_float(self.ds, "stundensatz", STANDARD_STUNDENSATZ)
 
     # ── Profit für einen Mandant ─────────────────────────────
     def berechne_profit(
@@ -82,36 +80,49 @@ class ProfitMonitor:
         aufwand_std    = round(aufwand_min / 60, 2)
         aufwand_euro   = round(aufwand_std * stundensatz, 2)
 
-        # ── Wenn keine Zeiteinträge: schätzen aus Mandant-Daten ─
+        # ── Wenn keine Zeiteinträge: Pauschalstunden aus Mandant oder 0 ─
+        aufwand_geschaetzt = False
         if aufwand_std == 0:
-            # Schätzung: 1h pro 200€ Jahresumsatz/12
-            monatsumsatz = m.get("umsatz", 0) / 12
-            aufwand_std  = max(0.5, monatsumsatz / 200)
+            pauschal_std = float(m.get("schaetz_stunden_monat") or m.get("bearbeitungsstunden_monat") or 0)
+            if pauschal_std > 0:
+                aufwand_std = round(pauschal_std, 2)
+                aufwand_geschaetzt = True
             aufwand_euro = round(aufwand_std * stundensatz, 2)
 
-        # ── Wenn kein Honorar: aus Jahresumsatz schätzen ──────
+        honorar_geschaetzt = False
+        # ── Honorar: Rechnungen > Pauschalhonorar > Soll aus Aufwand ─────
         if honorar_netto == 0:
-            honorar_netto  = round(m.get("umsatz", 0) / 12, 2)
-            honorar_brutto = round(honorar_netto * 1.19, 2)
+            pauschal = float(m.get("honorar_monat") or m.get("pauschal_honorar") or 0)
+            if pauschal > 0:
+                honorar_netto = round(pauschal, 2)
+                honorar_brutto = round(pauschal * 1.19, 2)
+            elif aufwand_euro > 0:
+                honorar_netto = round(aufwand_euro / (1 - ZIEL_MARGE_PROZENT / 100), 2)
+                honorar_brutto = round(honorar_netto * 1.19, 2)
+                honorar_geschaetzt = True
 
         # ── Profit-Berechnung ─────────────────────────────────
-        profit_euro  = round(honorar_netto - aufwand_euro, 2)
-        marge_prozent = round(profit_euro / honorar_netto * 100, 1) if honorar_netto > 0 else 0.0
-
-        # ── Status ────────────────────────────────────────────
-        if marge_prozent >= ZIEL_MARGE_PROZENT:
-            status = "profitabel"
-        elif marge_prozent >= WARNUNG_MARGE:
-            status = "ok"
-        elif marge_prozent >= KRITISCH_MARGE:
-            status = "warnung"
+        if honorar_netto <= 0 and aufwand_euro <= 0:
+            profit_euro = 0.0
+            marge_prozent = 0.0
+            status = "keine_daten"
         else:
-            status = "verlust"
+            profit_euro  = round(honorar_netto - aufwand_euro, 2)
+            marge_prozent = round(profit_euro / honorar_netto * 100, 1) if honorar_netto > 0 else -100.0
+            if marge_prozent >= ZIEL_MARGE_PROZENT:
+                status = "profitabel"
+            elif marge_prozent >= WARNUNG_MARGE:
+                status = "ok"
+            elif marge_prozent >= KRITISCH_MARGE:
+                status = "warnung"
+            else:
+                status = "verlust"
 
-        # ── Honoraranpassungsvorschlag ─────────────────────────
-        anpassung = self._honoraranpassung_vorschlag(
-            mandant, m, honorar_netto, aufwand_euro, marge_prozent, aufwand_std
-        )
+        anpassung = None
+        if status not in ("keine_daten",):
+            anpassung = self._honoraranpassung_vorschlag(
+                mandant, m, honorar_netto, aufwand_euro, marge_prozent, aufwand_std
+            )
 
         # ── Tatsächlicher Stundensatz (was verdiene ich wirklich?) ─
         effektiver_stundensatz = round(honorar_netto / aufwand_std, 2) if aufwand_std > 0 else stundensatz
@@ -135,6 +146,13 @@ class ProfitMonitor:
             "honoraranpassung":         anpassung,
             "berechnet_am":             datetime.now().isoformat(),
             "daten_vollstaendig":       len(zeiteintraege) > 0 and len(rechnungen) > 0,
+            "honorar_geschaetzt":       honorar_geschaetzt,
+            "aufwand_geschaetzt":       aufwand_geschaetzt,
+            "hinweis": (
+                "Honorar/Aufwand geschätzt — Zeiterfassung und Rechnungen erfassen für belastbare Marge."
+                if (honorar_geschaetzt or aufwand_geschaetzt or not len(rechnungen))
+                else ""
+            ),
         }
 
     def _honoraranpassung_vorschlag(

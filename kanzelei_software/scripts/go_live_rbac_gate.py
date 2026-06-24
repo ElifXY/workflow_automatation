@@ -48,7 +48,7 @@ def main() -> int:
     errors: List[str] = []
     c = TestClient(api.app)
     tag = uuid.uuid4().hex[:10]
-    pw = "StrongPass8"
+    pw = "StrongPass9!"
 
     # Public user flow
     user_email = f"gate_user_{tag}@example.com"
@@ -132,7 +132,7 @@ def main() -> int:
 
     # Mandanten-Isolation: User A legt Mandanten an, User B sieht ihn nicht
     iso = uuid.uuid4().hex[:10]
-    pw_iso = "StrongPass8"
+    pw_iso = "StrongPass9!"
     em_a = f"iso_a_{iso}@example.com"
     em_b = f"iso_b_{iso}@example.com"
     mandant_name = f"IsoMandant_{iso}"

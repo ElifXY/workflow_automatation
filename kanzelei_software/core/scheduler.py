@@ -50,9 +50,12 @@ REVENUE_OPS_MIN_VIEW_TO_PAID_PCT = float(os.getenv("REVENUE_OPS_MIN_VIEW_TO_PAID
 _heute_gelaufen: set = set()
 
 
-def _setting(key: str, default):
-    val = ds.setting_holen(key, default)
-    return default if val is None else val
+def _setting(key: str, default, store=None):
+    from core.tenant_settings import tenant_setting
+    from core.daten_speicher import DatenSpeicher
+
+    st = store if store is not None else ds
+    return tenant_setting(st, key, default)
 
 
 def uhrzeit_erreicht(uhrzeit_str: str) -> bool:
@@ -94,7 +97,7 @@ def run_workflow_batch():
         total_regeln = 0
         total_aktionen = 0
         for kid, store in _iter_tenant_stores():
-            if not bool(store.setting_holen("auto_workflow_monatsabschluss", True)):
+            if not bool(_setting("auto_workflow_monatsabschluss", True, store=store)):
                 continue
             bot = ProaktiverBot(store)
             builder = WorkflowBaukasten(store, bot=bot)
@@ -152,7 +155,7 @@ def run_roi_email_batch():
 
         total = 0
         for kid, store in _iter_tenant_stores():
-            if not bool(store.setting_holen("auto_roi_email_aktiv", True)):
+            if not bool(_setting("auto_roi_email_aktiv", True, store=store)):
                 continue
             r = send_roi_monatsbericht_email(store)
             total += int(r.get("gesendet") or 0)
@@ -189,24 +192,28 @@ def run_frist_rettung_batch():
 
 
 def run_bot_analyse():
-    """Proaktive Bot-Analyse aller Mandanten."""
+    """Proaktive Bot-Analyse aller Mandanten (je Kanzlei)."""
     jid = job_id("bot")
     if jid in _heute_gelaufen:
         return
     try:
         from core.proaktiver_bot import ProaktiverBot
-        bot    = ProaktiverBot(ds)
-        fragen, _pruefung = bot.analysiere_alle_mandanten()
-        log.info(f"Bot-Analyse: {len(fragen)} neue Fragen erstellt")
-        if fragen:
-            try:
-                from core.bot_notifications import notify_kanzlei_bot_analyse
+        from core.bot_notifications import notify_kanzlei_bot_analyse
 
-                notify_kanzlei_bot_analyse(ds, fragen)
-            except Exception as mail_e:
-                log.warning("Bot-Analyse Kanzlei-Mail: %s", mail_e)
+        total_fragen = 0
+        for kid, store in _iter_tenant_stores():
+            bot = ProaktiverBot(store)
+            fragen, _pruefung = bot.analysiere_alle_mandanten()
+            total_fragen += len(fragen)
+            if fragen:
+                log.info("Bot-Analyse kanzlei=%s: %s neue Fragen", kid, len(fragen))
+                try:
+                    notify_kanzlei_bot_analyse(store, fragen)
+                except Exception as mail_e:
+                    log.warning("Bot-Analyse Kanzlei-Mail kanzlei=%s: %s", kid, mail_e)
+        log.info("Bot-Analyse gesamt: %s neue Fragen", total_fragen)
         _heute_gelaufen.add(jid)
-        ds.log_eintrag(f"SCHEDULER_BOT | {len(fragen)} neue Fragen")
+        ds.log_eintrag(f"SCHEDULER_BOT | {total_fragen} neue Fragen")
     except Exception as e:
         log.error(f"Bot-Analyse Fehler: {e}")
 

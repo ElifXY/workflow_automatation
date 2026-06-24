@@ -177,23 +177,20 @@ def _heute_iso() -> str:
     return datetime.now().date().isoformat()
 
 
-def _events_heute(store, metric_prefix: str = "") -> int:
-    try:
-        events = store.setting_holen("__usage_events_v1", []) or []
-    except Exception:
-        events = []
+def _events_in_range(store, von_datum: str, bis_datum: str, metric_prefix: str = "") -> int:
+    from core.usage_events import count_events_in_range
+
+    return count_events_in_range(store, von_datum, bis_datum, metric_prefix)
+
+
+def _workflow_aktionen_heute(store) -> int:
+    """Workflow-Aktionen nur vom heutigen Lauf (nicht Lifetime)."""
     heute = _heute_iso()
-    n = 0
-    for ev in events:
-        if not isinstance(ev, dict):
-            continue
-        ts = str(ev.get("ts") or ev.get("timestamp") or "")[:10]
-        if ts != heute:
-            continue
-        m = str(ev.get("metric") or "")
-        if not metric_prefix or m.startswith(metric_prefix):
-            n += int(ev.get("delta") or ev.get("count") or 1)
-    return n
+    return _events_in_range(store, heute, heute, "workflow")
+
+
+def _events_heute(store, metric_prefix: str = "") -> int:
+    return _events_in_range(store, _heute_iso(), _heute_iso(), metric_prefix)
 
 
 def autopilot_stats(store) -> Dict[str, Any]:
@@ -241,13 +238,22 @@ def autopilot_stats(store) -> Dict[str, Any]:
     docs_eingesammelt = uploads_heute
     eskalationen = _events_heute(store, "eskalation")
     auto_aufgaben = _events_heute(store, "auto_")
+    wf_aktionen_heute = _workflow_aktionen_heute(store)
+
+    from core.tenant_settings import tenant_float
+
+    min_pro_aktion = 8.0
+    min_pro_doc = 12.0
+    min_pro_wf = 3.0
+    stundensatz = tenant_float(store, "stundensatz", 150.0)
 
     geschaetzte_minuten = (
-        erinnerungen_heute * 8
-        + docs_eingesammelt * 12
-        + int(wf.get("aktionen_gesamt") or 0) * 3
+        erinnerungen_heute * min_pro_aktion
+        + docs_eingesammelt * min_pro_doc
+        + wf_aktionen_heute * min_pro_wf
     )
     stunden_gespart = round(geschaetzte_minuten / 60.0, 1)
+    euro_gespart = round(stunden_gespart * stundensatz, 2)
 
     return {
         "referenz_datum": heute.isoformat(),
@@ -256,36 +262,78 @@ def autopilot_stats(store) -> Dict[str, Any]:
             "dokumente_eingesammelt": docs_eingesammelt,
             "eskalationen": eskalationen,
             "automationen_ausgefuehrt": ausfuehrungen,
-            "aktionen_gesamt": aktionen,
+            "aktionen_gesamt": wf_aktionen_heute,
             "emails_versendet": mails_heute,
             "geschaetzte_stunden_gespart": stunden_gespart,
+            "geschaetzte_euro_gespart": euro_gespart,
         },
         "woche": {
-            "automationen_ausgefuehrt": ausfuehrungen,
-            "aktionen_gesamt": aktionen,
+            "automationen_ausgefuehrt": _events_in_range(
+                store,
+                (jetzt.date() - __import__("datetime").timedelta(days=6)).isoformat(),
+                heute.isoformat(),
+                "workflow",
+            ),
+            "aktionen_gesamt": _events_in_range(
+                store,
+                (jetzt.date() - __import__("datetime").timedelta(days=6)).isoformat(),
+                heute.isoformat(),
+                "workflow",
+            ),
         },
         "headline": (
             f"Heute: {erinnerungen_heute} Erinnerungen, "
             f"{docs_eingesammelt} Dokumente eingesammelt"
         ),
-        "roi_hinweis": f"Geschätzt {stunden_gespart} Std. Arbeit heute automatisch unterstützt.",
+        "roi_hinweis": (
+            f"Geschätzt {stunden_gespart} Std. ({euro_gespart:.0f} €) Arbeit heute "
+            "durch Automationen unterstützt (8/12/3 Min. pro Aktion, Stundensatz aus Einstellungen)."
+        ),
     }
 
 
 def roi_monatsbericht(store) -> Dict[str, Any]:
-    """ROI-Center — monatliche Zusammenfassung für Kanzleiinhaber."""
-    stats = autopilot_stats(store)
-    h = stats.get("heute") or {}
+    """ROI-Center — monatliche Zusammenfassung (Events im laufenden Monat)."""
+    jetzt = datetime.now()
+    monat_start = jetzt.replace(day=1).date().isoformat()
+    heute = jetzt.date().isoformat()
+
+    erinnerungen = _events_in_range(store, monat_start, heute, "email")
+    erinnerungen += _events_in_range(store, monat_start, heute, "bot")
+    dokumente = _events_in_range(store, monat_start, heute, "upload")
+    if dokumente == 0:
+        try:
+            for row in store.portal_liste("upload"):
+                ts = str(row.get("hochgeladen_am") or "")[:10]
+                if monat_start <= ts <= heute:
+                    dokumente += 1
+        except Exception:
+            pass
+    automationen = _events_in_range(store, monat_start, heute, "workflow")
+    eskalationen = _events_in_range(store, monat_start, heute, "eskalation")
+
+    from core.tenant_settings import tenant_float
+
+    stundensatz = tenant_float(store, "stundensatz", 150.0)
+    geschaetzte_minuten = (
+        erinnerungen * 8 + dokumente * 12 + automationen * 3 + eskalationen * 5
+    )
+    stunden = round(geschaetzte_minuten / 60.0, 1)
+    euro = round(stunden * stundensatz, 2)
+
     return {
-        "monat": datetime.now().strftime("%Y-%m"),
-        "erinnerungen": h.get("erinnerungen_gesendet", 0),
-        "dokumente_eingesammelt": h.get("dokumente_eingesammelt", 0),
-        "automationen": h.get("automationen_ausgefuehrt", 0),
-        "geschaetzte_stunden_gespart": h.get("geschaetzte_stunden_gespart", 0),
+        "monat": jetzt.strftime("%Y-%m"),
+        "erinnerungen": erinnerungen,
+        "dokumente_eingesammelt": dokumente,
+        "automationen": automationen,
+        "eskalationen": eskalationen,
+        "geschaetzte_stunden_gespart": stunden,
+        "geschaetzte_euro_gespart": euro,
         "text": (
-            f"Diesen Monat (Stand heute): ca. {h.get('geschaetzte_stunden_gespart', 0)} Stunden "
-            "durch Automationen unterstützt."
+            f"Monat {jetzt.strftime('%m/%Y')} (Stand {heute}): ca. {stunden} Stunden "
+            f"({euro:.0f} €) durch Automationen unterstützt."
         ),
+        "hinweis": "Schätzung aus Monats-Events; Stundensatz aus Einstellungen.",
     }
 
 

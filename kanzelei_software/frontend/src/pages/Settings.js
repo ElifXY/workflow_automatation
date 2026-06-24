@@ -2257,7 +2257,7 @@ export default function Settings() {
       const res = await updateSetting(key, wert);
       const bestaetigt = res?.bestaetigt ?? res?.data?.bestaetigt ?? res?.wert ?? wert;
       const fresh = await getSettings();
-      setSettings(fresh);
+      setSettings(unwrapSettingsPayload(fresh));
       setFormEpoch((e) => e + 1);
       if (
         String(key).startsWith("rollen_nav")
