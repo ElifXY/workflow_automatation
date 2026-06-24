@@ -115,6 +115,79 @@ def run_workflow_batch():
         log.error(f"Workflow-Batch Fehler: {e}")
 
 
+def run_escalation_batch():
+    """Automatische Eskalations-Stufen je Kanzlei (täglich nach Workflow)."""
+    jid = job_id("eskalation")
+    if jid in _heute_gelaufen:
+        return
+    try:
+        from core.escalation_engine import run_escalation_for_store
+
+        total = 0
+        for kid, store in _iter_tenant_stores():
+            r = run_escalation_for_store(store)
+            n = int(r.get("aktionen") or 0)
+            total += n
+            if n:
+                log.info("Eskalation kanzlei=%s: %s Aktionen", kid, n)
+        _heute_gelaufen.add(jid)
+        if total:
+            log.info("Eskalation gesamt: %s Aktionen", total)
+            ds.log_eintrag(f"SCHEDULER_ESKALATION | {total} Aktionen")
+    except Exception as e:
+        log.error("Eskalation-Batch Fehler: %s", e)
+
+
+def run_roi_email_batch():
+    """Am 1. des Monats: ROI-Bericht an Kanzlei-E-Mail."""
+    heute = datetime.now()
+    roi_tag = int(_setting("roi_email_tag", 1) or 1)
+    if heute.day != max(1, min(28, roi_tag)):
+        return
+    jid = job_id("roi_email")
+    if jid in _heute_gelaufen:
+        return
+    try:
+        from core.roi_email import send_roi_monatsbericht_email
+
+        total = 0
+        for kid, store in _iter_tenant_stores():
+            if not bool(store.setting_holen("auto_roi_email_aktiv", True)):
+                continue
+            r = send_roi_monatsbericht_email(store)
+            total += int(r.get("gesendet") or 0)
+            if r.get("gesendet"):
+                log.info("ROI-Mail kanzlei=%s: %s Empfänger", kid, r.get("gesendet"))
+        _heute_gelaufen.add(jid)
+        if total:
+            log.info("ROI-Mail gesamt: %s Enqueues", total)
+            ds.log_eintrag(f"SCHEDULER_ROI_EMAIL | {total} Empfänger")
+    except Exception as e:
+        log.error("ROI-Mail Batch Fehler: %s", e)
+
+
+def run_frist_rettung_batch():
+    """Täglich: Frist naht + fehlende Docs → interne Warnung."""
+    jid = job_id("frist_rettung")
+    if jid in _heute_gelaufen:
+        return
+    try:
+        from core.frist_rettung import run_frist_rettung_for_store
+
+        total = 0
+        for kid, store in _iter_tenant_stores():
+            r = run_frist_rettung_for_store(store)
+            n = int(r.get("aktionen") or 0)
+            total += n
+            if n:
+                log.info("Frist-Rettung kanzlei=%s: %s Aktionen", kid, n)
+        _heute_gelaufen.add(jid)
+        if total:
+            ds.log_eintrag(f"SCHEDULER_FRIST_RETTUNG | {total} Warnungen")
+    except Exception as e:
+        log.error("Frist-Rettung Batch Fehler: %s", e)
+
+
 def run_bot_analyse():
     """Proaktive Bot-Analyse aller Mandanten."""
     jid = job_id("bot")
@@ -361,6 +434,8 @@ def main():
             workflow_time = str(_setting("workflow_batch_uhrzeit", WORKFLOW_UHRZEIT))[:5]
             if uhrzeit_erreicht(workflow_time):
                 run_workflow_batch()
+                run_escalation_batch()
+                run_frist_rettung_batch()
 
             # Bot-Analyse (30 Min nach Workflow)
             bot_time = str(_setting("ki_bot_analyse_uhrzeit", BOT_UHRZEIT))[:5]
@@ -374,6 +449,10 @@ def main():
             # Lohnabrechnung (08:00)
             if uhrzeit_erreicht("08:00"):
                 run_lohnabrechnung()
+
+            # ROI-Monatsbericht (09:00 am konfigurierten Tag)
+            if uhrzeit_erreicht("09:00"):
+                run_roi_email_batch()
 
             # Backup (Nachts)
             if uhrzeit_erreicht(BACKUP_UHRZEIT):

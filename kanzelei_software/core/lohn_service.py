@@ -511,7 +511,7 @@ td{{padding:7px 10px;border-bottom:1px solid #eee}}
 </table>
 
 <div style="margin-top:20px;font-size:10px;color:#888">
-Erstellt: {datetime.now().strftime('%d.%m.%Y %H:%M')} | Kanzlei AI v2.0 | Steuerjahr 2026
+Erstellt: {datetime.now().strftime('%d.%m.%Y %H:%M')} | Kanzlei Automation v2.0 | Steuerjahr 2026
 </div></body></html>"""
 
     def abrechnungen_laden(self, mandant: str = None, monat: str = None) -> List[Dict]:

@@ -1,0 +1,77 @@
+name: Settings Safety Nightly
+
+on:
+  pull_request:
+  schedule:
+    # Every night at 02:15 UTC
+    - cron: "15 2 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: settings-safety-nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  settings-safety-sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Prepare diagnostics folders
+        run: |
+          mkdir -p artifacts/logs
+          mkdir -p artifacts/data-dirs
+
+      - name: Settings integrity
+        run: |
+          set -o pipefail
+          python scripts/test_settings_integrity.py 2>&1 | tee artifacts/logs/test_settings_integrity.log
+
+      - name: Workflow and billing runtime
+        run: |
+          set -o pipefail
+          python scripts/test_workflow_billing_runtime.py 2>&1 | tee artifacts/logs/test_workflow_billing_runtime.log
+
+      - name: Security and portal runtime
+        run: |
+          set -o pipefail
+          python scripts/test_security_portal_runtime.py 2>&1 | tee artifacts/logs/test_security_portal_runtime.log
+
+      - name: Schnittstellen and compliance runtime
+        run: |
+          set -o pipefail
+          python scripts/test_schnittstellen_compliance_runtime.py 2>&1 | tee artifacts/logs/test_schnittstellen_compliance_runtime.log
+
+      - name: Chaos and edge settings runtime
+        run: |
+          set -o pipefail
+          python scripts/test_settings_chaos_edge.py 2>&1 | tee artifacts/logs/test_settings_chaos_edge.log
+
+      - name: Collect temp data dirs on failure
+        if: failure()
+        run: |
+          cp -r .tmp_workflow_billing_* artifacts/data-dirs/ 2>/dev/null || true
+          cp -r .tmp_security_portal_* artifacts/data-dirs/ 2>/dev/null || true
+          cp -r .tmp_schnittstellen_compliance_* artifacts/data-dirs/ 2>/dev/null || true
+          cp -r .tmp_settings_chaos_edge_* artifacts/data-dirs/ 2>/dev/null || true
+
+      - name: Upload settings safety diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: settings-safety-diagnostics
+          path: artifacts
+          if-no-files-found: warn

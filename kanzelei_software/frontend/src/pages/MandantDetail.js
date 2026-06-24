@@ -17,6 +17,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import KiEmailComposer from "../components/KiEmailComposer";
+import { useAppToast } from "../AppToast";
 
 import {
   getMandant,
@@ -45,6 +46,9 @@ import {
   exportElster,
   exportKomplett,
   generierePortalToken,
+  getMandantEskalation,
+  getMandantM365Mails,
+  syncM365MailsToTimeline,
 } from "../api";
 
 // ─── Design Tokens (konsistent mit App.js) ──────────────────
@@ -604,8 +608,257 @@ const PortalSection = ({ name, showToast }) => {
 };
 
 // ═══════════════════════════════════════════════════════════
-// EMAIL SECTION
+// ESKALATION TIMELINE
 // ═══════════════════════════════════════════════════════════
+
+const EscalationSection = ({ name }) => {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const d = await getMandantEskalation(name);
+        if (!cancelled) setData(d);
+      } catch {
+        if (!cancelled) setData(null);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [name]);
+
+  if (loading) {
+    return (
+      <Card>
+        <SectionTitle>Eskalation</SectionTitle>
+        <div style={{ fontSize: 12, color: "var(--text3)" }}>Lade Eskalationsplan…</div>
+      </Card>
+    );
+  }
+
+  if (!data) return null;
+
+  const timeline = data.timeline || [];
+  const naechste = data.naechste_stufe;
+  const tageBis = data.tage_bis_naechste;
+
+  return (
+    <Card>
+      <SectionTitle>Eskalation</SectionTitle>
+      <div style={{ fontSize: 12, color: "var(--text3)", marginBottom: 12, lineHeight: 1.55 }}>
+        {data.auto_eskalation_aktiv
+          ? "Automatischer Ablauf bei fehlenden Unterlagen oder fehlender Antwort."
+          : "Automatische Eskalation ist deaktiviert (Einstellungen → Automation)."}
+        {data.tage_ohne_antwort > 0 ? (
+          <span style={{ display: "block", marginTop: 6, color: "var(--orange)" }}>
+            {data.tage_ohne_antwort} Tage ohne Antwort
+            {naechste && tageBis != null ? ` · Nächste Stufe in ${tageBis} Tag(en)` : ""}
+          </span>
+        ) : null}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
+        {timeline.map((st, i) => {
+          const done = st.ausgefuehrt || st.erreicht;
+          const current = st.aktuell;
+          const color = st.ausgefuehrt ? "var(--green)" : current ? "var(--accent)" : done ? "var(--orange)" : "var(--text3)";
+          return (
+            <div key={st.aktion || i} style={{
+              display: "flex", gap: 12, padding: "10px 0",
+              borderBottom: i < timeline.length - 1 ? "1px solid var(--border)" : "none",
+            }}>
+              <div style={{
+                width: 10, height: 10, borderRadius: "50%", marginTop: 4, flexShrink: 0,
+                background: color,
+                boxShadow: current ? "0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent)" : "none",
+              }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: current ? 600 : 500, color: "var(--text)" }}>
+                  Tag {st.tag} — {st.label}
+                </div>
+                {st.ausgefuehrt_am ? (
+                  <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 2 }}>
+                    Ausgeführt · {new Date(st.ausgefuehrt_am).toLocaleDateString("de-DE")}
+                  </div>
+                ) : current ? (
+                  <div style={{ fontSize: 11, color: "var(--accent)", marginTop: 2 }}>Aktuelle Stufe</div>
+                ) : null}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+};
+
+// ═══════════════════════════════════════════════════════════
+// EMAIL / M365 SECTION
+// ═══════════════════════════════════════════════════════════
+
+const M365MailSection = ({ name, onTimelineRefresh }) => {
+  const [mails, setMails] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [syncMsg, setSyncMsg] = useState("");
+
+  const reload = useCallback(() => {
+    setLoading(true);
+    getMandantM365Mails(name)
+      .then((r) => setMails(r?.data ?? r))
+      .catch(() => setMails(null))
+      .finally(() => setLoading(false));
+  }, [name]);
+
+  useEffect(() => { reload(); }, [reload]);
+
+  const handleSyncTimeline = async () => {
+    setSyncBusy(true);
+    setSyncMsg("");
+    try {
+      const res = await syncM365MailsToTimeline(name, 10);
+      const data = res?.data ?? res;
+      setSyncMsg(data?.hinweis || "Timeline aktualisiert");
+      onTimelineRefresh?.();
+    } catch (e) {
+      setSyncMsg(e.message || "Import fehlgeschlagen");
+    } finally {
+      setSyncBusy(false);
+    }
+  };
+
+  if (loading) return null;
+
+  const connected = mails?.connected;
+  const syncAktiv = mails?.sync_aktiv !== false;
+
+  if (!connected) {
+    return (
+      <Card>
+        <SectionTitle>Outlook (M365)</SectionTitle>
+        <div style={{ fontSize: 12, color: "var(--text3)", lineHeight: 1.55 }}>
+          Microsoft 365 nicht verbunden — E-Mails erscheinen hier nach Verbindung unter Einstellungen → Integrationen.
+        </div>
+      </Card>
+    );
+  }
+
+  if (connected && syncAktiv === false) {
+    return (
+      <Card>
+        <SectionTitle>Outlook (M365)</SectionTitle>
+        <div style={{ fontSize: 12, color: "var(--text3)", lineHeight: 1.55 }}>
+          Postfach-Sync ist deaktiviert. Unter Einstellungen → Integrationen „Postfach read-only“ aktivieren.
+        </div>
+      </Card>
+    );
+  }
+
+  const items = mails?.messages || [];
+
+  return (
+    <Card>
+      <SectionTitle>Outlook — Eingehend (Pilot)</SectionTitle>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+        <button
+          type="button"
+          disabled={syncBusy || items.length === 0}
+          onClick={handleSyncTimeline}
+          style={{
+            padding: "6px 12px", borderRadius: 8, border: "none", cursor: "pointer",
+            background: "var(--accent)", color: "#fff", fontSize: 12, fontWeight: 600,
+            opacity: items.length === 0 ? 0.5 : 1,
+          }}
+        >
+          {syncBusy ? "Import…" : "In Timeline übernehmen"}
+        </button>
+      </div>
+      {syncMsg ? (
+        <div style={{ fontSize: 11, color: "var(--text3)", marginBottom: 8 }}>{syncMsg}</div>
+      ) : null}
+      <div style={{ fontSize: 12, color: "var(--text3)", marginBottom: 10, lineHeight: 1.55 }}>
+        {mails?.hinweis || "Read-only Vorschau aus verbundenem Postfach."}
+      </div>
+      {items.length === 0 ? (
+        <div style={{ fontSize: 12, color: "var(--text3)" }}>Keine Mails von {name} in der aktuellen Vorschau.</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {items.map((msg, i) => (
+            <div key={i} style={{
+              padding: "10px 12px", borderRadius: 10, background: "var(--bg3)",
+              border: "1px solid var(--border2)",
+            }}>
+              <div style={{ fontWeight: 600, fontSize: 13, color: "var(--text)" }}>{msg.subject}</div>
+              <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 4 }}>
+                {msg.from || "—"} · {String(msg.received || "").slice(0, 16)}
+                {!msg.is_read ? " · ungelesen" : ""}
+              </div>
+              {msg.preview ? (
+                <div style={{ fontSize: 11, color: "var(--text2)", marginTop: 6, lineHeight: 1.45 }}>
+                  {msg.preview}
+                </div>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+};
+
+const KommunikationSection = ({ name, refreshKey = 0 }) => {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    getKommunikation(name, 40)
+      .then((r) => {
+        const list = r?.kommunikation ?? r?.data?.kommunikation ?? (Array.isArray(r) ? r : []);
+        setRows(Array.isArray(list) ? list : []);
+      })
+      .catch(() => setRows([]))
+      .finally(() => setLoading(false));
+  }, [name, refreshKey]);
+
+  const typLabel = (typ) => {
+    if (typ === "m365_email") return "Outlook";
+    if (typ === "workflow_email") return "Automation";
+    return typ || "Notiz";
+  };
+
+  return (
+    <Card>
+      <SectionTitle>Kommunikation</SectionTitle>
+      {loading ? (
+        <div style={{ fontSize: 12, color: "var(--text3)" }}>Lade Verlauf…</div>
+      ) : rows.length === 0 ? (
+        <div style={{ fontSize: 12, color: "var(--text3)" }}>Noch keine Einträge — M365-Mails können importiert werden.</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 320, overflowY: "auto" }}>
+          {rows.slice(0, 20).map((row, i) => (
+            <div key={row.id || i} style={{
+              padding: "10px 12px", borderRadius: 10, background: "var(--bg3)",
+              border: "1px solid var(--border2)",
+              borderLeft: row.typ === "m365_email" ? "3px solid var(--blue)" : "3px solid var(--border)",
+            }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 11, color: "var(--text3)" }}>
+                <span>{typLabel(row.typ)}</span>
+                <span>{String(row.timestamp || row.erstellt_am || "").slice(0, 16)}</span>
+              </div>
+              <div style={{ fontSize: 12, color: "var(--text2)", marginTop: 6, lineHeight: 1.45, whiteSpace: "pre-wrap" }}>
+                {row.text || "—"}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+};
 
 const EmailSection = ({ name, email }) => (
   <Card>
@@ -816,6 +1069,7 @@ export default function MandantDetail() {
   const name     = decodeURIComponent(encodedName || "");
   const navigate = useNavigate();
 
+  const { toastUndo } = useAppToast();
   const [mandant,   setMandant]   = useState(null);
   const [aufgaben,       setAufgaben]       = useState([]);
   const [historieAufgaben, setHistorieAufgaben] = useState([]);
@@ -824,6 +1078,7 @@ export default function MandantDetail() {
   const [loading,   setLoading]   = useState(true);
   const [toast,     setToast]     = useState(null);
   const [antwortLoading, setAntwortLoading] = useState(false);
+  const [kommRefresh, setKommRefresh] = useState(0);
 
   const showToast = useCallback((text, type = "success") => {
     setToast({ text, type });
@@ -893,10 +1148,27 @@ export default function MandantDetail() {
 
   const handleDelete = async (id) => {
     if (!window.confirm("Aufgabe wirklich löschen?")) return;
+    const deleted = aufgaben.find((a) => String(a.id) === String(id));
     try {
       await deleteAufgabeAPI(id);
-      showToast("Aufgabe gelöscht", "warn");
       await ladeAufgaben();
+      if (deleted) {
+        toastUndo("Aufgabe gelöscht", async () => {
+          await addAufgabeAPI(name, {
+            beschreibung: deleted.beschreibung,
+            frist: deleted.frist,
+            frist_uhrzeit: deleted.frist_uhrzeit || undefined,
+            prioritaet: deleted.prioritaet || "normal",
+            kategorie: deleted.kategorie || undefined,
+            notiz: deleted.notiz || undefined,
+            portal_sichtbar: deleted.portal_sichtbar || false,
+          });
+          showToast("Aufgabe wiederhergestellt");
+          await ladeAufgaben();
+        });
+      } else {
+        showToast("Aufgabe gelöscht", "warn");
+      }
     } catch (e) {
       showToast(e.message, "error");
       await ladeAufgaben();
@@ -996,11 +1268,13 @@ export default function MandantDetail() {
     </div>
   );
 
-  // ── Score & Status ─────────────────────────────────────
-  const score    = mandant.score_details?.score ?? mandant.score ?? 0;
-  const status   = score >= 12000 ? "KRITISCH" : score >= 5000 ? "WICHTIG" : "OK";
-  const statusC  = { KRITISCH: "var(--red)", WICHTIG: "var(--orange)", OK: "var(--green)" }[status];
-  const tage     = mandant.score_details?.tage ?? mandant.tage_ohne_antwort ?? 0;
+  // ── Gesundheit & Status ─────────────────────────────────
+  const healthScore = mandant.health_score ?? null;
+  const healthAmpel = mandant.health_ampel || (mandant.status === "KRITISCH" ? "rot" : mandant.status === "WICHTIG" ? "gelb" : "gruen");
+  const healthLabel = mandant.health_label || (healthAmpel === "rot" ? "Rot" : healthAmpel === "gelb" ? "Gelb" : "Grün");
+  const healthGruende = mandant.health_gruende || [];
+  const ampelColor = healthAmpel === "rot" ? "var(--red)" : healthAmpel === "gelb" ? "var(--orange)" : "var(--green)";
+  const tage = mandant.tage_ohne_antwort ?? mandant.score_details?.tage ?? 0;
 
   return (
     <div
@@ -1045,12 +1319,15 @@ export default function MandantDetail() {
           </div>
         </div>
 
-        {/* Status + Aktionen */}
+        {/* Gesundheit + Aktionen */}
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{ textAlign: "right" }}>
-            <Badge color={statusC} style={{ fontSize: 11 }}>{status}</Badge>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "flex-end" }}>
+              <span style={{ width: 10, height: 10, borderRadius: "50%", background: ampelColor }} />
+              <Badge color={ampelColor} style={{ fontSize: 11 }}>{healthLabel}</Badge>
+            </div>
             <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 4 }}>
-              Score: {Math.round(score).toLocaleString("de")}
+              Gesundheit {healthScore ?? "—"}/100
             </div>
           </div>
 
@@ -1065,6 +1342,23 @@ export default function MandantDetail() {
 
       {/* ── CONTENT ── */}
       <div style={{ padding: "28px 36px" }}>
+
+        {/* Warum rot/gelb? */}
+        {healthGruende.length > 0 ? (
+          <div style={{
+            background: "var(--bg2)", border: `1px solid ${ampelColor}33`, borderLeft: `3px solid ${ampelColor}`,
+            borderRadius: 12, padding: "14px 18px", marginBottom: 20,
+          }}>
+            <div style={{ fontWeight: 600, fontSize: 13, color: ampelColor, marginBottom: 8 }}>
+              Warum {healthLabel}? — Gesundheit {healthScore ?? "—"}/100
+            </div>
+            <ul style={{ margin: 0, paddingLeft: 18, color: "var(--text2)", fontSize: 13, lineHeight: 1.55 }}>
+              {healthGruende.slice(0, 5).map((g, i) => (
+                <li key={i}>{g}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
 
         {/* Warnung wenn kein Kontakt seit 7+ Tagen */}
         {tage >= 7 && (
@@ -1121,6 +1415,7 @@ export default function MandantDetail() {
                 ["Telefon",      mandant.telefon || "—", null],
                 ["Branche",      mandant.branche || "—", null],
                 ["Steuer-ID",    mandant.steuer_id || "—", null],
+                ["Betreuer",     mandant.betreuer_email || "— alle —", null],
                 ["Aufgaben offen",    mandant.aufgaben_offen ?? aufgaben.filter((a)=>!istErledigt(a)).length, null],
                 ["Aufgaben erledigt (Historie)", mandant.aufgaben_erledigt ?? historieAufgaben.length, "var(--green)"],
                 ["Letzter Kontakt",   tage > 0 ? `vor ${tage} Tagen` : "Heute", tage >= 7 ? "var(--orange)" : null],
@@ -1153,6 +1448,12 @@ export default function MandantDetail() {
             <DokumenteSection
               name={name} dokumente={dokumente} onRefresh={ladeDokumente}
             />
+
+            <EscalationSection name={name} />
+
+            <M365MailSection name={name} onTimelineRefresh={() => setKommRefresh((k) => k + 1)} />
+
+            <KommunikationSection name={name} refreshKey={kommRefresh} />
 
             <EmailSection name={name} email={mandant.email} />
 

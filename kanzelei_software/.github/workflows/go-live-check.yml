@@ -28,8 +28,14 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run repository policy check
+        env:
+          ENABLE_ADVANCED_FEATURES: "1"
+          SECURITY_BASELINE_MAX_AGE_HOURS: "24"
         run: |
           python scripts/repo_policy_check.py
+
+      - name: Full stack static check (Compose/Nginx/API)
+        run: python scripts/full_stack_check.py
 
       - name: Start API (background)
         env:
@@ -46,7 +52,7 @@ jobs:
           FORCE_HTTPS: "0"
           SECURITY_HEADERS: "1"
         run: |
-          nohup python -m uvicorn backend.api:app --host 127.0.0.1 --port 8000 > api.log 2>&1 &
+          nohup python -m uvicorn backend.application:app --host 127.0.0.1 --port 8000 > api.log 2>&1 &
           sleep 6
 
       - name: Run go-live check
@@ -58,6 +64,17 @@ jobs:
           DATABASE_URL: postgresql://kanzlei:kanzlei_passwort@localhost:5432/kanzlei_ai
         run: |
           python scripts/go_live_check.py --base-url http://127.0.0.1:8000
+
+      - name: Run RBAC/Auth deploy gate
+        env:
+          JWT_SECRET: ci-jwt-secret-very-long-value-1234567890
+          SAAS_MASTER_KEY: ci-saas-master-key-1234567890
+          STRIPE_SECRET_KEY: sk_test_ci_dummy_key_1234567890
+          STRIPE_WEBHOOK_SECRET: whsec_ci_dummy_key_1234567890
+          DATABASE_URL: postgresql://kanzlei:kanzlei_passwort@localhost:5432/kanzlei_ai
+        run: |
+          python scripts/go_live_rbac_gate.py
+          python scripts/test_phase5_tenant_admin.py
 
       - name: Upload API log on failure
         if: failure()

@@ -26,9 +26,12 @@ from core.datev_export_utils import (
     DATEV_BUCHUNG_SPALTEN,
     DATEV_CATEGORY_BUCHUNGSSTAPEL,
     DATEV_ENCODING,
+    DATEV_FORMAT_VERSION_BUCHUNGSSTAPEL,
     DATEV_VERSION,
+    assess_datev_export_relevance,
     build_datev_buchungen,
     buchung_to_row,
+    mandanten_in_stammdaten_reihenfolge,
     normalize_berater_nr,
     normalize_mandanten_nr,
     sanitize_datev_text,
@@ -50,6 +53,7 @@ def export_datev_buchungsstapel(
     berater_nr: str = "1234",
     mandanten_nr: str = "00000",
     wirtschaftsjahr: int = None,
+    alle_mandanten: Optional[Dict[str, Dict]] = None,
 ) -> bytes:
     """
     Erstellt einen DATEV-kompatiblen Buchungsstapel (CSV).
@@ -67,18 +71,18 @@ def export_datev_buchungsstapel(
     output = io.StringIO()
     writer = csv.writer(output, delimiter=";", quoting=csv.QUOTE_MINIMAL, lineterminator="\r\n")
 
-    bezeichnung = sanitize_datev_text(f"Kanzlei AI Export {mandant}", 60)
+    bezeichnung = sanitize_datev_text(f"Kanzlei Automation Export {mandant}", 60)
 
     writer.writerow([
         "EXTF",
         DATEV_VERSION,
         DATEV_CATEGORY_BUCHUNGSSTAPEL,
         "Buchungsstapel",
-        "9",
+        DATEV_FORMAT_VERSION_BUCHUNGSSTAPEL,
         jetzt.strftime("%Y%m%d%H%M%S") + "000",
         "",
         "",
-        "Kanzlei AI",
+        "Kanzlei Automation",
         "",
         berater_nr,
         mandanten_nr,
@@ -97,12 +101,14 @@ def export_datev_buchungsstapel(
 
     writer.writerow(list(DATEV_BUCHUNG_SPALTEN))
 
-    buchungen = build_datev_buchungen(mandant, mandant_daten, aufgaben, jetzt)
+    buchungen = build_datev_buchungen(
+        mandant, mandant_daten, aufgaben, jetzt, alle_mandanten=alle_mandanten
+    )
     for b in buchungen:
         writer.writerow(buchung_to_row(b))
 
     csv_bytes = output.getvalue().encode(DATEV_ENCODING, errors="replace")
-    meta = validate_datev_buchungsstapel_csv(csv_bytes)
+    meta = validate_datev_buchungsstapel_csv(csv_bytes, strict=True)
     if meta.get("warnings"):
         log.info("DATEV Export %s: %s", mandant, "; ".join(meta["warnings"]))
     return csv_bytes
@@ -129,7 +135,7 @@ def export_datev_stammdaten(
     writer.writerow([
         "EXTF", "700", "16", "Debitoren/Kreditoren", "5",
         jetzt.strftime("%Y%m%d%H%M%S") + "000",
-        "", "", "Kanzlei AI", "",
+        "", "", "Kanzlei Automation", "",
         berater_nr, "", "", "4", "", "", "Mandanten-Stammdaten",
         "", "0", "0", "0", "EUR",
     ])
@@ -171,16 +177,13 @@ def export_datev_stammdaten(
         "Kunden-Typ", "Datev-Konto (OPOS)", "Leerfeld",
     ])
 
-    idx = 0
-    for name, m in mandanten.items():
-        if not name or not isinstance(m, dict):
-            continue
-        konto = f"{10000 + idx}"
-        idx += 1
+    for idx, name in enumerate(mandanten_in_stammdaten_reihenfolge(mandanten)):
+        m = mandanten[name]
+        konto = str(10001 + idx)
         writer.writerow([
             konto,
             sanitize_datev_text(name, 50),
-            m.get("branche", ""),            # Unternehmensgegenstand
+            sanitize_datev_text(m.get("branche", ""), 50),
             "", "",                          # Natürliche Person
             "",                              # Keine Angabe
             "2",                             # Adressattyp: Unternehmen
@@ -193,18 +196,18 @@ def export_datev_stammdaten(
             "", "", "",                      # Zusätze
             "", "", "",                      # Abw. Bezeichnungen
             "", "",                          # Gültig von/bis
-            m.get("telefon", ""),            # Telefon
+            sanitize_datev_text(m.get("telefon", ""), 30),
             "", "", "",                      # Telefon weitere
             "",                              # Telefax
             "",                              # Bemerkung Telefax
-            m.get("email", ""),              # E-Mail
+            sanitize_datev_text(m.get("email", ""), 80),
             "", "", "",                      # Bemerkung, Internet
             "", "", "", "", "", "", "",       # IBAN 1
             "", "", "", "", "",              # Bankverb 1 Gültig
             "", "", "", "", "", "", "", "", "", "",  # Bank 2
             "", "", "",                      # Leerfeld, Briefanrede, Gruß
             "",                              # Kundennummer
-            m.get("steuer_id", ""),          # Steuernummer
+            sanitize_datev_text(m.get("steuer_id", ""), 20),
             "1",                             # Sprache: Deutsch
             "", "", "",                      # Ansprechpartner etc.
             "", "1", "0",                    # Div-Konto, Ausgabe, Währung
@@ -220,10 +223,14 @@ def export_datev_stammdaten(
             "", "D", "", "",                # Typ, OPOS
         ])
 
-    if idx == 0:
+    n = len(mandanten_in_stammdaten_reihenfolge(mandanten))
+    if n == 0:
         raise ValueError("Keine gültigen Mandanten für DATEV-Stammdaten")
 
-    return output.getvalue().encode(DATEV_ENCODING, errors="replace")
+    raw = output.getvalue().encode(DATEV_ENCODING, errors="replace")
+    if b"EXTF" not in raw[:20]:
+        raise ValueError("DATEV-Stammdaten: EXTF-Header fehlt")
+    return raw
 
 
 # ============================================================
@@ -272,7 +279,7 @@ def export_elster_xml(
     hersteller = ET.SubElement(nutzerdaten, "HerstellerID")
     hersteller.text = "74931"  # Beispiel Hersteller-ID
 
-    ET.SubElement(nutzerdaten, "DatenLieferant").text = "Kanzlei AI"
+    ET.SubElement(nutzerdaten, "DatenLieferant").text = "Kanzlei Automation"
     ET.SubElement(nutzerdaten, "Erstellungsdatum").text = jetzt.strftime("%Y%m%d")
 
     # Datenteil
@@ -396,7 +403,7 @@ def export_excel_report(
     ws1.row_dimensions[1].height = 40
 
     ws1.merge_cells("A2:F2")
-    ws1["A2"] = f"Erstellt: {datetime.now().strftime('%d.%m.%Y %H:%M')} | Kanzlei AI v2.0"
+    ws1["A2"] = f"Erstellt: {datetime.now().strftime('%d.%m.%Y %H:%M')} | Kanzlei Automation v2.0"
     ws1["A2"].font = Font(name="Calibri", size=10, color=GRAU)
     ws1["A2"].fill = header_fill(MITTEL)
     ws1["A2"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
@@ -651,15 +658,20 @@ def export_komplettpaket(
     alle_aufgaben: Dict,
     kommunikation: List[Dict],
     berater_nr: str = "1234",
+    datev_aktiv: bool = True,
 ) -> Tuple[bytes, Dict[str, Any]]:
     """
     ZIP (ZIP_DEFLATED) mit DATEV, ELSTER, Excel, CSV, JSON + EXPORT_MANIFEST.json.
     Mindestens eine DATEV-Datei muss erfolgreich sein.
     """
     buffer = io.BytesIO()
+    relevance = assess_datev_export_relevance(
+        mandant, mandant_daten, aufgaben_list, berater_nr, alle_mandanten
+    )
     manifest: Dict[str, Any] = {
         "mandant": mandant,
         "exportiert_am": datetime.now().isoformat(),
+        "datev_relevanz": relevance,
         "dateien": {},
         "fehler": [],
     }
@@ -684,26 +696,32 @@ def export_komplettpaket(
             manifest["fehler"].append({key: msg})
             log.warning("Komplett-Export %s — %s: %s", mandant, key, msg)
 
-        # DATEV Buchungsstapel (Pflicht für sinnvolles Paket)
-        try:
-            datev_buch = export_datev_buchungsstapel(
-                mandant, mandant_daten, aufgaben_list, berater_nr=berater_nr
-            )
-            meta = validate_datev_buchungsstapel_csv(datev_buch)
-            _add(
-                f"DATEV/{prefix}_Buchungsstapel.csv",
-                datev_buch,
-                "datev_buchungsstapel",
-                {"buchungen": meta.get("buchungen"), "warnings": meta.get("warnings") or []},
-            )
-        except Exception as e:
-            _fail("datev_buchungsstapel", e)
+        if datev_aktiv:
+            try:
+                datev_buch = export_datev_buchungsstapel(
+                    mandant,
+                    mandant_daten,
+                    aufgaben_list,
+                    berater_nr=berater_nr,
+                    alle_mandanten=alle_mandanten,
+                )
+                meta = validate_datev_buchungsstapel_csv(datev_buch, strict=True)
+                _add(
+                    f"DATEV/{prefix}_Buchungsstapel.csv",
+                    datev_buch,
+                    "datev_buchungsstapel",
+                    {"buchungen": meta.get("buchungen"), "warnings": meta.get("warnings") or []},
+                )
+            except Exception as e:
+                _fail("datev_buchungsstapel", e)
 
-        try:
-            datev_stamm = export_datev_stammdaten(alle_mandanten, berater_nr)
-            _add(f"DATEV/{datum}_Stammdaten.csv", datev_stamm, "datev_stammdaten")
-        except Exception as e:
-            _fail("datev_stammdaten", e)
+            try:
+                datev_stamm = export_datev_stammdaten(alle_mandanten, berater_nr)
+                _add(f"DATEV/{datum}_Stammdaten.csv", datev_stamm, "datev_stammdaten")
+            except Exception as e:
+                _fail("datev_stammdaten", e)
+        else:
+            manifest["fehler"].append({"datev": "DATEV-Export in Einstellungen deaktiviert"})
 
         try:
             elster_xml = export_elster_xml(mandant, mandant_daten)
@@ -747,11 +765,40 @@ def export_komplettpaket(
         if files_written == 0:
             raise ValueError("Komplett-Paket leer — kein Exportbestandteil konnte erstellt werden")
 
-        if "datev_buchungsstapel" not in manifest["dateien"] and "datev_stammdaten" not in manifest["dateien"]:
+        if datev_aktiv and (
+            "datev_buchungsstapel" not in manifest["dateien"]
+            and "datev_stammdaten" not in manifest["dateien"]
+        ):
             raise ValueError(
                 "DATEV-Export fehlgeschlagen — ZIP ohne DATEV-Dateien. "
                 "Einstellungen und Mandantendaten prüfen."
             )
+
+        if datev_aktiv:
+            nutzen_txt = (
+            f"DATEV-NUTZEN: {relevance.get('nutzen', '?').upper()}\n"
+            f"Buchungen im Stapel: {relevance.get('buchungen_erwartet', 0)}\n"
+            f"Debitorenkonto: {relevance.get('debitoren_konto', '')}\n\n"
+            + "\n".join(f"- {h}" for h in relevance.get("hinweise") or [])
+            + "\n\nEmpfehlung:\n"
+            + "\n".join(f"- {e}" for e in relevance.get("empfehlungen") or [])
+            + "\n\n"
+            + (relevance.get("rechtlicher_hinweis") or "")
+            )
+            zf.writestr("DATEV/DATEV_NUTZEN.txt", nutzen_txt.encode("utf-8"))
+
+        datev_block = ""
+        if datev_aktiv:
+            datev_block = f"""
+DATEV-NUTZEN: {relevance.get('nutzen', '?')} — siehe DATEV/DATEV_NUTZEN.txt
+
+DATEV IMPORT:
+  1. Stammdaten importieren (Debitoren)
+  2. Buchungsstapel importieren (Gegenkonto = Debitorenkonto)
+  3. Buchungen in DATEV prüfen — Kanzlei Automation ersetzt keine Fibu
+"""
+        else:
+            datev_block = "\nDATEV: deaktiviert (Einstellungen → Schnittstellen)\n"
 
         readme = f"""KANZLEI AI — EXPORT-PAKET (ZIP)
 ================================
@@ -767,11 +814,7 @@ ORDNER:
   CSV/       Universal-Export
   Backup/    JSON Snapshot Mandant
 
-DATEV IMPORT:
-  1. Stammdaten importieren (Debitoren)
-  2. Buchungsstapel importieren
-  3. Buchungen in DATEV prüfen — Kanzlei AI ersetzt keine Fibu
-
+{datev_block}
 Details: EXPORT_MANIFEST.json
 """
         zf.writestr("README.txt", readme.encode("utf-8"))

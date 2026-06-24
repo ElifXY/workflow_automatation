@@ -6,7 +6,7 @@
 
 ## Gegenstand
 Verarbeitung personenbezogener Daten zur Bereitstellung der SaaS-Anwendung
-"Kanzlei AI" fuer Kanzlei-Prozesse.
+"Kanzlei Automation" fuer Kanzlei-Prozesse.
 
 ## Art und Zweck der Verarbeitung
 - Verwaltung von Kanzlei- und Mandantendaten

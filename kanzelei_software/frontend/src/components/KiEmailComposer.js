@@ -120,6 +120,9 @@ export default function KiEmailComposer({
           anzeige: d.from_header || d.display_name || "",
           name: d.display_name || "",
           email: d.from_email || "",
+          smtpOk: !!d.smtp_configured,
+          replyTo: d.reply_to || "",
+          hinweis: d.hinweis || "",
           build: d.build || "",
         });
       })
@@ -251,8 +254,8 @@ export default function KiEmailComposer({
     <div>
       <div style={{ fontSize: 12, color: "var(--text3)", lineHeight: 1.55, marginBottom: 12 }}>
         {kiGeneriert
-          ? "Anrede, Betreff und Formulierung wurden von der KI erstellt (OpenAI). Sie können alles vor dem Versand anpassen."
-          : "E-Mail wird für den Mandanten formuliert (Vorlage, falls keine KI konfiguriert ist). Unter „Text“ oder „HTML“ können Sie den Inhalt anpassen."}
+          ? "Anrede, Betreff und Text wurden automatisch formuliert — bitte vor dem Versand prüfen."
+          : "Erinnerung wird aus Vorlage oder automatisch formuliert. Unter „Text“ oder „HTML“ anpassbar."}
       </div>
 
       {gesendet && (
@@ -286,12 +289,24 @@ export default function KiEmailComposer({
         <div style={{ fontSize: 14, color: "var(--text)", fontWeight: 500 }}>
           {absenderInfo?.anzeige || absenderInfo?.name || "— wird geladen …"}
         </div>
-        {absenderInfo?.email ? (
-          <div style={{ fontSize: 12, color: "var(--text2)", marginTop: 4 }}>{absenderInfo.email}</div>
+        {absenderInfo?.smtpOk && absenderInfo?.email ? (
+          <div style={{ fontSize: 12, color: "var(--text2)", marginTop: 4 }}>
+            Versand von: <strong>{absenderInfo.email}</strong>
+          </div>
         ) : null}
-        <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 6, lineHeight: 1.5 }}>
-          Ändern unter Einstellungen → Kanzlei-Daten → „Name im Postfach des Empfängers“
-        </div>
+        {!absenderInfo?.smtpOk ? (
+          <div style={{
+            fontSize: 11, color: "var(--amber, #b45309)", marginTop: 8, lineHeight: 1.5,
+            background: "color-mix(in srgb, #f59e0b 12%, transparent)",
+            borderRadius: 8, padding: "8px 10px",
+          }}>
+            {absenderInfo?.hinweis || "Einstellungen → E-Mail-Versand: SMTP der Kanzlei hinterlegen."}
+          </div>
+        ) : (
+          <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 6, lineHeight: 1.5 }}>
+            Anzeigename unter Kanzlei-Daten · SMTP unter E-Mail-Versand
+          </div>
+        )}
       </div>
 
       {!preview ? (
@@ -305,7 +320,7 @@ export default function KiEmailComposer({
             fontSize: 13,
           }}
         >
-          {loading ? "Wird erstellt…" : "KI-E-Mail generieren"}
+          {loading ? "Wird formuliert…" : "Erinnerung vorschlagen"}
         </button>
       ) : (
         <>
@@ -371,7 +386,7 @@ export default function KiEmailComposer({
                     background: "color-mix(in srgb, var(--accent) 14%, transparent)",
                     color: "var(--accent)",
                   }}>
-                    KI
+                    Auto
                   </span>
                 )}
                 {geaendert && (
@@ -399,7 +414,7 @@ export default function KiEmailComposer({
                       color: "var(--orange)",
                     }}
                   >
-                    KI-Text wiederherstellen
+                    Standardtext wiederherstellen
                   </button>
                 )}
               </div>

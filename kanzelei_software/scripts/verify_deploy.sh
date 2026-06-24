@@ -5,8 +5,8 @@ cd "$(dirname "$0")/.."
 
 DOMAIN="${DOMAIN:-kanzlei-automation.com}"
 BASE="${VERIFY_BASE:-https://${DOMAIN}}"
-EXPECTED_UI="${EXPECTED_UI_BUILD:-deploy-20260519b}"
-EXPECTED_API="${EXPECTED_API_BUILD:-api-deploy-20260519b}"
+EXPECTED_UI="${EXPECTED_UI_BUILD:-deploy-20260520o}"
+EXPECTED_API="${EXPECTED_API_BUILD:-api-deploy-20260520o}"
 
 echo "==> Git lokal: $(git rev-parse --short HEAD 2>/dev/null || echo '?')"
 echo "==> Prüfe ${BASE}"
@@ -34,7 +34,7 @@ check_json() {
 
 check_json "${BASE}/build-info.json" build "$EXPECTED_UI" "UI (nginx static)"
 check_json "${BASE}/api/system/build" api_build "$EXPECTED_API" "API system/build"
-check_json "${BASE}/portal/health" build "portal-deploy-20260519b" "Portal health"
+check_json "${BASE}/portal/health" build "portal-deploy-20260520o" "Portal health"
 
 echo ""
 echo "==> Docker (lokal auf Server)"

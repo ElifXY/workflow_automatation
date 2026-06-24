@@ -1,8 +1,8 @@
 # ============================================================
-# Produktfokus — was wir verkaufen vs. was noch nicht reif ist
+# Produktfokus — Kanzlei Automation
 # ============================================================
 """
-Kanzlei AI = Mandanten-Orchestrierung + Portal + proaktiver Bot + Aufgaben.
+Kern: Mandanten liefern rechtzeitig — Dokumente, Erinnerungen, keine liegengebliebenen Fälle.
 DATEV bleibt System of Record (Buchführung).
 """
 
@@ -10,56 +10,81 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+PRODUCT_NAME = "Kanzlei Automation"
+
 PRODUCT_TAGLINE = (
-    "Mandanten steuern, Nachfassen automatisieren — Buchführung bleibt in DATEV."
+    "Mandanten liefern rechtzeitig — keine liegengebliebenen Fälle."
+)
+
+PRODUCT_HEADLINE = "Mandanten liefern Unterlagen nicht rechtzeitig?"
+
+PRODUCT_SUBLINE = (
+    "Kanzlei Automation fordert Dokumente automatisch an, erinnert Mandanten "
+    "selbstständig und verhindert liegengebliebene Fälle."
 )
 
 VALUE_PILLARS: List[Dict[str, str]] = [
     {
+        "id": "workflow",
+        "title": "Automatische Erinnerungen",
+        "desc": "E-Mail, Portal, Eskalation — ohne manuelles Nachfassen.",
+    },
+    {
+        "id": "dokumente",
+        "title": "Fehlende Unterlagen",
+        "desc": "Wer liefert nicht? Was fehlt? Grün, Gelb, Rot.",
+    },
+    {
         "id": "portal",
-        "title": "Mandanten-Portal & Chat",
-        "desc": "Unterlagen, Unterschrift, Chat — weniger Telefonate.",
-    },
-    {
-        "id": "bot",
-        "title": "Proaktiver Bot",
-        "desc": "System stellt Fragen, bevor die Kanzlei anruft.",
-    },
-    {
-        "id": "aufgaben",
-        "title": "Aufgaben & Überblick",
-        "desc": "Wer ist überfällig, was fehlt — ein Dashboard.",
+        "title": "Mandantenportal",
+        "desc": "Upload, Unterschrift, Chat — Werkzeug, nicht Hauptprodukt.",
     },
     {
         "id": "datev_export",
         "title": "DATEV-Export",
-        "desc": "EXTF v700 CSV — Übergabe an DATEV, kein Ersatz.",
+        "desc": "EXTF v700 — Übergabe an DATEV, kein Ersatz.",
     },
 ]
 
-# Sidebar-Tabs: Kern vs. Erweitert (Beta)
-NAV_CORE = [
+NAV_MAIN = [
     "dashboard",
     "mandanten",
-    "portalchat",
-    "aufgaben",
-    "automation",
-    "ki",
-    "neu",
-    "settings",
-]
-
-NAV_EXTENDED = [
-    "profit",
-    "steuerbot",
     "dokumente",
-    "belege",
-    "rechnungen",
-    "empfehlungen",
-    "analytics",
+    "automation",
+    "aufgaben",
 ]
 
-# Schnittstellen: produktiv vs. Roadmap (keine irreführenden Toggles)
+NAV_MORE = [
+    "portalchat",
+    "analytics",
+    "profit",
+    "rechnungen",
+    "steuerbot",
+    "empfehlungen",
+    "neu",
+]
+
+NAV_EXTENDED = NAV_MORE + ["belege"]
+
+NAV_HIDDEN_FROM_MARKETING = [
+    "ki",
+    "analytics",
+    "profit",
+    "empfehlungen",
+    "steuerbot",
+]
+
+SETTINGS_TABS = [
+    "email",
+    "workflow",
+    "portal",
+    "kanzlei",
+    "compliance",
+    "schnittstellen",
+    "ki",
+    "billing",
+]
+
 INTEGRATION_LIVE = [
     {
         "key": "datev_export",
@@ -79,47 +104,7 @@ INTEGRATION_LIVE = [
         "key": "bank_csv",
         "label": "Kontoauszug-Import",
         "icon": "🏦",
-        "desc": "CSV/Kontoauszug hochladen (POST /bank/import).",
-        "always_on": True,
+        "setting": "bank_csv_import",
+        "desc": "CSV-Import von Kontoauszügen.",
     },
 ]
-
-INTEGRATION_ROADMAP = [
-    {"key": "datev_api", "label": "DATEV Live-Sync", "icon": "🏛", "eta": "Roadmap"},
-    {"key": "bank_live", "label": "FinTS / EBICS", "icon": "🏦", "eta": "Roadmap"},
-    {"key": "elster_eric", "label": "ELSTER Direktversand", "icon": "⚖", "eta": "Roadmap"},
-    {"key": "lexoffice", "label": "Lexoffice", "icon": "📊", "eta": "Roadmap"},
-    {"key": "personio", "label": "Personio", "icon": "👥", "eta": "Roadmap"},
-    {"key": "shopify", "label": "Shopify / Amazon", "icon": "🛍", "eta": "Roadmap"},
-]
-
-DATEV_EXPORT_HINWEIS = (
-    "Export im DATEV-Format (EXTF v700). Buchungen basieren auf Mandantendaten und Aufgaben — "
-    "für die Fibu bitte in DATEV prüfen und ggf. anpassen. DATEV bleibt führend."
-)
-
-DATEV_IMPORT_UNAVAILABLE = (
-    "DATEV-Import (Live-Sync) ist in Entwicklung. Nutzen Sie den Export zu DATEV; "
-    "Mandanten- und Prozessdaten liegen in Kanzlei AI."
-)
-
-
-def default_nav_for_role(role: str, fokus: bool = True) -> List[str]:
-    """Fokus-Modus: nur Kern-Navigation (weniger Ablenkung beim Verkauf/Pilot)."""
-    if not fokus:
-        return list(NAV_CORE) + list(NAV_EXTENDED)
-    if role == "mitarbeiter":
-        return ["dashboard", "mandanten", "portalchat", "aufgaben", "ki", "settings"]
-    return list(NAV_CORE)
-
-
-def product_summary() -> Dict[str, Any]:
-    return {
-        "tagline": PRODUCT_TAGLINE,
-        "pillars": VALUE_PILLARS,
-        "nav_core": NAV_CORE,
-        "nav_extended": NAV_EXTENDED,
-        "integrations_live": INTEGRATION_LIVE,
-        "integrations_roadmap": INTEGRATION_ROADMAP,
-        "datev_hinweis": DATEV_EXPORT_HINWEIS,
-    }

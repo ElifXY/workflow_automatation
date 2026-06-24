@@ -13,6 +13,7 @@ import {
   pickBearerFromAuthBody,
 } from "../api";
 import { ThemeQuickSwitch } from "../theme";
+import { PRODUCT_HEADLINE, PRODUCT_SUBLINE } from "../navAccess";
 
 const apiBase = (process.env.REACT_APP_API_URL || "/api").replace(/\/$/, "");
 const LOGIN_TIMEOUT_MS = 30000;
@@ -178,15 +179,38 @@ export default function Login({ onLogin }) {
       `}</style>
 
       <div style={{
-        background:"var(--bg2)", border:"1px solid var(--border2)",
-        borderRadius:20, padding:"48px 44px", width:"100%", maxWidth:420,
-        boxShadow:"var(--shadow-modal)", animation:"fadeUp 0.5s ease",
+        display:"flex", flexWrap:"wrap", gap:40, width:"100%", maxWidth:960,
+        alignItems:"center", justifyContent:"center",
       }}>
-        <div style={{marginBottom:36}}>
-          <div style={{fontFamily:"var(--font-head)",fontSize:30,color:"var(--accent)",lineHeight:1.1,marginBottom:6}}>
-            Kanzlei AI
+        <div style={{ flex:"1 1 300px", maxWidth:420, animation:"fadeUp 0.5s ease" }}>
+          <div style={{ fontFamily:"var(--font-head)", fontSize:34, color:"var(--accent)", lineHeight:1.15, marginBottom:12 }}>
+            Kanzlei Automation
           </div>
-          <div style={{fontSize:13,color:"var(--text3)"}}>Steuerberater Suite — Anmelden</div>
+          <div style={{ fontSize:16, color:"var(--text)", fontWeight:600, marginBottom:10, lineHeight:1.4 }}>
+            {PRODUCT_HEADLINE}
+          </div>
+          <div style={{ fontSize:14, color:"var(--text2)", lineHeight:1.65, marginBottom:20 }}>
+            {PRODUCT_SUBLINE}
+          </div>
+          <ul style={{ margin:0, paddingLeft:18, color:"var(--text2)", fontSize:13, lineHeight:1.8 }}>
+            <li>Automatische Erinnerungen an Mandanten</li>
+            <li>Dokumente einsammeln — ohne Telefon-Marathon</li>
+            <li>Dashboard: Was brennt heute?</li>
+            <li>Mandanten-Portal inklusive</li>
+          </ul>
+        </div>
+
+      <div style={{
+        background:"var(--bg2)", border:"1px solid var(--border2)",
+        borderRadius:20, padding:"40px 36px", width:"100%", maxWidth:420,
+        boxShadow:"var(--shadow-modal)", animation:"fadeUp 0.5s ease",
+        flex:"1 1 300px",
+      }}>
+        <div style={{marginBottom:28}}>
+          <div style={{fontFamily:"var(--font-head)",fontSize:22,color:"var(--text)",lineHeight:1.2,marginBottom:6}}>
+            Anmelden
+          </div>
+          <div style={{fontSize:13,color:"var(--text3)"}}>Zugang für Ihre Kanzlei</div>
         </div>
 
         {error && (
@@ -325,10 +349,15 @@ export default function Login({ onLogin }) {
           </div>
         </div>
 
+        <div style={{ marginTop: 14, fontSize: 12, textAlign: "center" }}>
+          <a href="/produkt" style={{ color: "var(--accent)", fontWeight: 600 }}>Mehr über das Produkt →</a>
+        </div>
+
         <div style={{ marginTop: 20, display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
           <span style={{ fontSize: 11, color: "var(--text3)" }}>Erscheinungsbild</span>
           <ThemeQuickSwitch compact />
         </div>
+      </div>
       </div>
     </div>
   );

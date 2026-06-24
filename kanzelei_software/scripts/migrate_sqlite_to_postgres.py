@@ -8,7 +8,7 @@ Usage:
 
 Hinweis:
 - Erwartet Zieltabellen laut scripts/postgres_bootstrap.sql
-- Führt idempotente upserts aus (wo möglich)
+- Führt idempotente Inserts/Upserts aus (einstellungen + portal_records: Konflikt → SQLite-Werte übernehmen)
 """
 
 from __future__ import annotations
@@ -28,6 +28,8 @@ TABLES = [
     "aufgaben",
     "kommunikation",
     "audit_log",
+    "einstellungen",
+    "portal_records",
     "email_outbox",
 ]
 
@@ -50,6 +52,27 @@ def copy_table(pg_conn, table: str, cols: Sequence[str], rows: Iterable[tuple]) 
         sql = f"""
             INSERT INTO {table} ({col_list})
             VALUES ({placeholders})
+        """
+    elif table == "einstellungen":
+        sql = f"""
+            INSERT INTO {table} ({col_list})
+            VALUES ({placeholders})
+            ON CONFLICT (kanzlei_id, key) DO UPDATE SET
+                value = EXCLUDED.value,
+                geaendert_am = EXCLUDED.geaendert_am
+        """
+    elif table == "portal_records":
+        sql = f"""
+            INSERT INTO {table} ({col_list})
+            VALUES ({placeholders})
+            ON CONFLICT (id) DO UPDATE SET
+                kanzlei_id = EXCLUDED.kanzlei_id,
+                typ = EXCLUDED.typ,
+                mandant = EXCLUDED.mandant,
+                status = EXCLUDED.status,
+                data_json = EXCLUDED.data_json,
+                erstellt_am = EXCLUDED.erstellt_am,
+                geaendert_am = EXCLUDED.geaendert_am
         """
     elif "id" in cols:
         sql = f"""

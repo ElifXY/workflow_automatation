@@ -97,7 +97,7 @@ function erstelleSystemPrompt(kontext, memoryText = "") {
   const wichtigCount  = (kpis || []).filter(k => k.status === "WICHTIG").length;
   const totalUmsatz   = Object.values(mandanten || {}).reduce((s, m) => s + (m.umsatz || 0), 0);
 
-  return `Du bist der KI-Assistent von Kanzlei AI — ein hochspezialisierter Steuerberater-Assistent.
+  return `Du bist der KI-Assistent von Kanzlei Automation — ein hochspezialisierter Steuerberater-Assistent.
 Du hast Zugriff auf alle aktuellen Kanzlei-Daten und hilfst dem Steuerberater bei:
 - Mandanten-Analyse und Priorisierung
 - Steueroptimierung und Beratung

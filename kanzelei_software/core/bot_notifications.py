@@ -33,10 +33,13 @@ def _bool_setting(key: str, default: bool = True) -> bool:
 
 
 def _kanzlei_notify_emails(store) -> List[str]:
+    from modules.settings_manager import load_settings_for_store
+
+    cfg = load_settings_for_store(store)
     raw = (
-        (store.setting_holen("bot_analyse_benachrichtigung_email") or "")
-        or (setting_holen("eskalation_stufe_1_empfaenger") or "")
-        or (setting_holen("kanzlei_email") or "")
+        (cfg.get("bot_analyse_benachrichtigung_email") or "")
+        or (cfg.get("eskalation_stufe_1_empfaenger") or "")
+        or (cfg.get("kanzlei_email") or "")
         or (os.getenv("EMAIL_FROM") or "")
     )
     if isinstance(raw, list):

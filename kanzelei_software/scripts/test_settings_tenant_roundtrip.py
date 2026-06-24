@@ -48,8 +48,16 @@ def main() -> int:
     if "Beta" not in rb["display_name"]:
         print("FAIL absender B", rb)
         return 1
-    if ra["from_email"] != "alpha@example.com":
-        print("FAIL email A", ra["from_email"])
+    save_setting_for_store(store_a, "smtp_aktiv", True)
+    save_setting_for_store(store_a, "smtp_user", "kanzlei@alpha.example.com")
+    save_setting_for_store(store_a, "smtp_pass", "secret-test")
+    save_setting_for_store(store_a, "smtp_host", "smtp.example.com")
+    rc = resolve_email_from(kid_a, store_a)
+    if not rc.get("smtp_configured"):
+        print("FAIL smtp_configured", rc)
+        return 1
+    if rc["from_email"] != "kanzlei@alpha.example.com":
+        print("FAIL smtp from A", rc["from_email"])
         return 1
 
     print("PASS: settings tenant roundtrip + email absender")

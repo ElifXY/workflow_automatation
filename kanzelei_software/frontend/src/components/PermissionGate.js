@@ -19,6 +19,7 @@
 const ROLE_ALIASES = {
   owner: "owner",
   admin: "admin",
+  teamleiter: "teamleiter",
   steuerberater: "steuerberater",
   selbststaendig: "steuerberater",
   mitarbeiter: "mitarbeiter",
@@ -84,8 +85,8 @@ function _canPreviewAsOther() {
 
 function _allowedPreviewTargets() {
   const r = getRealRole();
-  if (r === "owner") return new Set(["steuerberater", "mitarbeiter", "admin"]);
-  if (r === "admin") return new Set(["steuerberater", "mitarbeiter"]);
+  if (r === "owner") return new Set(["teamleiter", "steuerberater", "mitarbeiter", "admin"]);
+  if (r === "admin") return new Set(["teamleiter", "steuerberater", "mitarbeiter"]);
   return new Set();
 }
 

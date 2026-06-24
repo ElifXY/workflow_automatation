@@ -47,6 +47,9 @@ AKTION_TYPEN = {
     "monatsabschluss":       {"label": "Monatsabschluss starten",         "parameter": []},
     "datev_export":          {"label": "DATEV-Export erstellen",          "parameter": []},
     "lohnabrechnung":        {"label": "Lohnabrechnung erstellen",        "parameter": []},
+    "m365_kalender_pruefen": {"label": "M365 Kalender prüfen (intern)",   "parameter": ["text", "aufgabe_bei_termine", "frist_tage"]},
+    "m365_postfach_pruefen": {"label": "M365 Postfach prüfen (intern)",   "parameter": ["text", "aufgabe_bei_mail", "frist_tage", "timeline_sync", "limit"]},
+    "m365_timeline_import":  {"label": "M365-Mails in Timeline importieren", "parameter": ["limit"]},
 }
 
 
@@ -435,6 +438,21 @@ class WorkflowBaukasten:
                 ls.batch_abrechnung(mandant, monat)
             except Exception as e:
                 log.warning(f"Lohnabrechnung-Aktion für {mandant}: {e}")
+
+        elif typ == "m365_kalender_pruefen":
+            from core.m365_integration import run_m365_kalender_workflow_action
+
+            run_m365_kalender_workflow_action(self.ds, mandant, params)
+
+        elif typ == "m365_postfach_pruefen":
+            from core.m365_integration import run_m365_postfach_workflow_action
+
+            run_m365_postfach_workflow_action(self.ds, mandant, params)
+
+        elif typ == "m365_timeline_import":
+            from core.m365_integration import run_m365_timeline_workflow_action
+
+            run_m365_timeline_workflow_action(self.ds, mandant, params)
 
         # Weitere Aktionen (honorar_anpassen, datev_export etc.) werden
         # als Aufgaben angelegt, nicht direkt ausgeführt

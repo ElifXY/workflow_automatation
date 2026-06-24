@@ -30,10 +30,14 @@ def main() -> int:
 
     # 3) backend structure
     required_paths = [
-        "backend/api.py",
+        "backend/api/__init__.py",
         "backend/services/__init__.py",
         "backend/models/sqlalchemy_models.py",
         "backend/db/init_postgres.py",
+        "core/ai_service.py",
+        "core/ai_guardrails.py",
+        "core/ai_schemas.py",
+        "core/ai_metrics.py",
     ]
     for rel in required_paths:
         p = root / rel

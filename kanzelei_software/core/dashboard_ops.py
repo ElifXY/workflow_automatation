@@ -87,7 +87,27 @@ def heute_operations(store) -> Dict[str, Any]:
         "ueberfaellig_preview": ueberfaellig_liste,
         "referenz_datum": heute_datum.isoformat(),
         "timestamp": jetzt.isoformat(),
+        "m365": _m365_heute_snapshot(store),
+        "m365_mail": _m365_mail_snapshot(store),
     }
+
+
+def _m365_mail_snapshot(store) -> Dict[str, Any]:
+    try:
+        from core.m365_integration import m365_mail_heute_block
+
+        return m365_mail_heute_block(store)
+    except Exception:
+        return {"aktiv": False, "verbunden": False}
+
+
+def _m365_heute_snapshot(store) -> Dict[str, Any]:
+    try:
+        from core.m365_integration import m365_heute_block
+
+        return m365_heute_block(store)
+    except Exception:
+        return {"aktiv": False, "verbunden": False}
 
 
 def pilot_scorecard(store) -> Dict[str, Any]:
@@ -150,4 +170,134 @@ def pilot_scorecard(store) -> Dict[str, Any]:
             "Geschätzte Zeitersparnis: 8 Min. pro beantworteter Bot-Frage. "
             "Baseline unter Einstellungen zurücksetzbar."
         ),
+    }
+
+
+def _heute_iso() -> str:
+    return datetime.now().date().isoformat()
+
+
+def _events_heute(store, metric_prefix: str = "") -> int:
+    try:
+        events = store.setting_holen("__usage_events_v1", []) or []
+    except Exception:
+        events = []
+    heute = _heute_iso()
+    n = 0
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        ts = str(ev.get("ts") or ev.get("timestamp") or "")[:10]
+        if ts != heute:
+            continue
+        m = str(ev.get("metric") or "")
+        if not metric_prefix or m.startswith(metric_prefix):
+            n += int(ev.get("delta") or ev.get("count") or 1)
+    return n
+
+
+def autopilot_stats(store) -> Dict[str, Any]:
+    """Autopilot-Center: automatisch erledigte Arbeit (heute / Woche)."""
+    from core.workflow_builder import WorkflowBaukasten
+
+    jetzt = datetime.now()
+    heute = jetzt.date()
+
+    try:
+        from core.daten_speicher import email_outbox_recent
+
+        mails = email_outbox_recent(store.kanzlei_id, limit=200)
+        mails_heute = sum(
+            1 for r in mails
+            if str(r.get("sent_at") or r.get("updated_at") or "")[:10] == heute.isoformat()
+            and r.get("status") == "sent"
+        )
+    except Exception:
+        mails_heute = 0
+
+    uploads_heute = 0
+    try:
+        for row in store.portal_liste("upload"):
+            ts = str(row.get("hochgeladen_am") or "")[:10]
+            if ts == heute.isoformat():
+                uploads_heute += 1
+    except Exception:
+        pass
+
+    wb = WorkflowBaukasten(store)
+    wf = wb.statistiken()
+    ausfuehrungen = int(wf.get("ausfuehrungen") or 0)
+    aktionen = int(wf.get("aktionen_gesamt") or 0)
+
+    try:
+        from core.proaktiver_bot import ProaktiverBot
+
+        bot = ProaktiverBot(store).statistiken()
+        bot_fragen = int(bot.get("fragen_gestellt_heute") or bot.get("fragen_gesamt") or 0)
+    except Exception:
+        bot_fragen = 0
+
+    erinnerungen_heute = mails_heute + bot_fragen
+    docs_eingesammelt = uploads_heute
+    eskalationen = _events_heute(store, "eskalation")
+    auto_aufgaben = _events_heute(store, "auto_")
+
+    geschaetzte_minuten = (
+        erinnerungen_heute * 8
+        + docs_eingesammelt * 12
+        + int(wf.get("aktionen_gesamt") or 0) * 3
+    )
+    stunden_gespart = round(geschaetzte_minuten / 60.0, 1)
+
+    return {
+        "referenz_datum": heute.isoformat(),
+        "heute": {
+            "erinnerungen_gesendet": erinnerungen_heute,
+            "dokumente_eingesammelt": docs_eingesammelt,
+            "eskalationen": eskalationen,
+            "automationen_ausgefuehrt": ausfuehrungen,
+            "aktionen_gesamt": aktionen,
+            "emails_versendet": mails_heute,
+            "geschaetzte_stunden_gespart": stunden_gespart,
+        },
+        "woche": {
+            "automationen_ausgefuehrt": ausfuehrungen,
+            "aktionen_gesamt": aktionen,
+        },
+        "headline": (
+            f"Heute: {erinnerungen_heute} Erinnerungen, "
+            f"{docs_eingesammelt} Dokumente eingesammelt"
+        ),
+        "roi_hinweis": f"Geschätzt {stunden_gespart} Std. Arbeit heute automatisch unterstützt.",
+    }
+
+
+def roi_monatsbericht(store) -> Dict[str, Any]:
+    """ROI-Center — monatliche Zusammenfassung für Kanzleiinhaber."""
+    stats = autopilot_stats(store)
+    h = stats.get("heute") or {}
+    return {
+        "monat": datetime.now().strftime("%Y-%m"),
+        "erinnerungen": h.get("erinnerungen_gesendet", 0),
+        "dokumente_eingesammelt": h.get("dokumente_eingesammelt", 0),
+        "automationen": h.get("automationen_ausgefuehrt", 0),
+        "geschaetzte_stunden_gespart": h.get("geschaetzte_stunden_gespart", 0),
+        "text": (
+            f"Diesen Monat (Stand heute): ca. {h.get('geschaetzte_stunden_gespart', 0)} Stunden "
+            "durch Automationen unterstützt."
+        ),
+    }
+
+
+def blockierungszentrum(store, limit: int = 30) -> Dict[str, Any]:
+    from core.mandant_health import blockierungs_eintraege, top_nervfaktoren
+
+    eintraege = blockierungs_eintraege(store, limit=limit)
+    nerv = top_nervfaktoren(store, top_n=5)
+    return {
+        "eintraege": eintraege,
+        "anzahl": len(eintraege),
+        "nervfaktoren": nerv,
+        "headline": nerv.get("headline") or "Keine Blockierungen.",
+        "timestamp": datetime.now().isoformat(),
     }

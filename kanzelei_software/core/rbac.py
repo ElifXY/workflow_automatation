@@ -24,6 +24,7 @@ from typing import Dict, Optional, Set
 CANONICAL_ROLES: tuple[str, ...] = (
     "owner",
     "admin",
+    "teamleiter",
     "steuerberater",
     "mitarbeiter",
 )
@@ -33,6 +34,8 @@ ROLE_ALIASES: Dict[str, str] = {
     "owner": "owner",
     "admin": "admin",
     "ADMIN": "admin",
+    "teamleiter": "teamleiter",
+    "TEAMLEITER": "teamleiter",
     "steuerberater": "steuerberater",
     "STEUERBERATER": "steuerberater",
     "selbststaendig": "steuerberater",
@@ -105,6 +108,21 @@ _BASE_ROLE_PERMISSIONS: Dict[str, Set[str]] = {
         "email:send",
         "reports:read",
     },
+    "teamleiter": {
+        "users:read",
+        "mandanten:read", "mandanten:write",
+        "aufgaben:read", "aufgaben:write",
+        "kommunikation:read", "kommunikation:write",
+        "portal:read", "portal:write",
+        "belege:read", "belege:write",
+        "dokumente:read", "dokumente:write",
+        "rechnungen:read",
+        "export:read",
+        "settings:read",
+        "engine:run", "engine:read",
+        "email:send",
+        "reports:read",
+    },
     "mitarbeiter": {
         "mandanten:read",
         "aufgaben:read", "aufgaben:write",
@@ -150,11 +168,42 @@ def has_permission(role: str, permission: str, tenant_settings: Optional[Dict] =
         base = "*" in raw_perms or permission in raw_perms
     if not base:
         return False
+    if tenant_settings is not None and not _feature_matrix_allows(canonical, permission, tenant_settings):
+        return False
     if tenant_settings is None:
         return True
     from core.tenant_nav_policy import navigation_allows_permission
 
     return navigation_allows_permission(canonical, permission, tenant_settings)
+
+
+# Settings-Feature-Matrix (Team-Tab) → API-Permissions
+_FEATURE_SETTING_KEYS: Dict[str, str] = {
+    "mandanten:delete": "rollen_mandant_loeschen",
+    "export:datev": "rollen_export_datev",
+    "lohn:read": "rollen_lohn_sichtbar",
+    "lohn:approve": "rollen_lohn_sichtbar",
+    "payments:release": "rollen_zahlungen_freigabe",
+    "settings:write": "rollen_einstellungen",
+}
+
+
+def _feature_matrix_allows(canonical: str, permission: str, tenant_settings: Dict) -> bool:
+    """Zusätzliche Prüfung gegen rollen_*-Listen in den Tenant-Settings."""
+    if canonical in {"owner", "admin"}:
+        return True
+    setting_key = _FEATURE_SETTING_KEYS.get(permission)
+    if not setting_key:
+        return True
+    raw = tenant_settings.get(setting_key)
+    if not isinstance(raw, list):
+        try:
+            from modules.settings_manager import DEFAULT_SETTINGS
+            raw = DEFAULT_SETTINGS.get(setting_key, [])
+        except Exception:
+            raw = []
+    allowed = {canonical_role(str(r)) for r in raw if str(r).strip()}
+    return canonical in allowed
 
 
 def is_owner(role: str) -> bool:

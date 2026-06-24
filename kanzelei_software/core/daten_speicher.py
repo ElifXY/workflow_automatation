@@ -2136,6 +2136,60 @@ class DatenSpeicher(DatenSpeicher):
             log.error(f"mandant_loeschen({name}): {e}")
             return False
 
+    def mandant_wiederherstellen(self, name: str) -> bool:
+        if _pg_mandanten_mode():
+            try:
+                conn = _pg_conn()
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE mandanten SET aktiv = 1 WHERE kanzlei_id = %s AND name = %s AND aktiv = 0",
+                        (self.kanzlei_id, name),
+                    )
+                    ok = cur.rowcount > 0
+                conn.commit()
+                return ok
+            except Exception as e:
+                log.error(f"mandant_wiederherstellen({name}) [pg]: {e}")
+                try:
+                    _pg_conn().rollback()
+                except Exception:
+                    pass
+                return False
+        try:
+            with db_transaction(self.kanzlei_id) as conn:
+                cur = conn.execute(
+                    "UPDATE mandanten SET aktiv = 1 WHERE kanzlei_id = ? AND name = ? AND aktiv = 0",
+                    (self.kanzlei_id, name),
+                )
+                return cur.rowcount > 0
+        except Exception as e:
+            log.error(f"mandant_wiederherstellen({name}): {e}")
+            return False
+
+    def hole_mandanten_papierkorb(self) -> Dict[str, Dict]:
+        if _pg_mandanten_mode():
+            conn = _pg_conn()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM mandanten WHERE kanzlei_id = %s AND aktiv = 0 ORDER BY name",
+                    (self.kanzlei_id,),
+                )
+                rows = cur.fetchall()
+            result = {}
+            for row in rows:
+                m = _pg_normalize_row_dict(dict(row))
+                result[m["name"]] = self._mandant_record_anreichern(m)
+            return result
+        rows = self._conn().execute(
+            "SELECT * FROM mandanten WHERE kanzlei_id = ? AND aktiv = 0 ORDER BY name",
+            (self.kanzlei_id,),
+        ).fetchall()
+        result = {}
+        for row in rows:
+            m = dict(row)
+            result[m["name"]] = self._mandant_record_anreichern(m)
+        return result
+
     def _fehlende_dokumente(self, mandant: str) -> List[str]:
         if _pg_mandanten_mode():
             return _fehlende_dokumente_pg(self.kanzlei_id, mandant)

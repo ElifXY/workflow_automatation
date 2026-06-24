@@ -114,7 +114,7 @@ def erstelle_html_digest() -> str:
 
   <!-- HEADER -->
   <div style="background:#0b0d11;border-radius:16px 16px 0 0;padding:28px 32px">
-    <div style="font-size:22px;color:#c8a96e;font-weight:700">Kanzlei AI</div>
+    <div style="font-size:22px;color:#c8a96e;font-weight:700">Kanzlei Automation</div>
     <div style="font-size:14px;color:#8b91a0;margin-top:4px">
       Daily Digest — {jetzt.strftime("%A, %d. %B %Y")}
     </div>
@@ -195,10 +195,10 @@ def erstelle_html_digest() -> str:
     <!-- FOOTER -->
     <div style="padding:24px 32px;background:#f8f9fa;margin-top:24px">
       <div style="font-size:12px;color:#888;line-height:1.7">
-        Dieser Digest wird automatisch von Kanzlei AI generiert.<br>
+        Dieser Digest wird automatisch von Kanzlei Automation generiert.<br>
         Gesamtumsatz Kanzlei: <strong>€{total_umsatz:,.0f}</strong> | 
         Aufgaben erledigt: <strong>{erledigt_aufgaben}/{gesamt_aufgaben}</strong> ({completion_rate}%)<br>
-        <a href="http://localhost:3000" style="color:#c8a96e">→ Kanzlei AI öffnen</a>
+        <a href="http://localhost:3000" style="color:#c8a96e">→ Kanzlei Automation öffnen</a>
       </div>
     </div>
 
@@ -227,7 +227,7 @@ def sende_digest(empfaenger: str) -> bool:
     msg           = MIMEMultipart("alternative")
     msg["From"]   = sender
     msg["To"]     = empfaenger
-    msg["Subject"] = f"Kanzlei AI — Daily Digest {jetzt.strftime('%d.%m.%Y')}"
+    msg["Subject"] = f"Kanzlei Automation — Daily Digest {jetzt.strftime('%d.%m.%Y')}"
 
     msg.attach(MIMEText(html, "html", "utf-8"))
 

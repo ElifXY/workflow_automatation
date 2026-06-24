@@ -67,6 +67,11 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "max_email_pro_tag":           1,
     "auto_workflow_monatsabschluss": True,
     "auto_workflow_lohn":           True,
+    "auto_eskalation_aktiv":        True,
+    "auto_roi_email_aktiv":         True,
+    "auto_frist_rettung_aktiv":     True,
+    "roi_email_tag":                1,
+    "roi_email_empfaenger":         "",
     "workflow_batch_uhrzeit":       "06:00",
     "historie_erledigte_aufgaben_tage": 30,
     "historie_steuerfaelle_tage":       30,
@@ -124,15 +129,17 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "rollen_export_datev":         ["admin", "steuerberater"],
     "rollen_einstellungen":        ["admin"],
     # Produktfokus: optional schlanke Sidebar (Standard: volles Produkt sichtbar)
-    "produkt_fokus_aktiv":         False,
+    "produkt_fokus_aktiv":         True,
     "rollen_nav_steuerberater": [
-        "dashboard", "mandanten", "portalchat", "aufgaben", "ki", "profit", "steuerbot",
-        "dokumente", "belege", "rechnungen", "automation", "empfehlungen",
-        "analytics", "neu", "settings",
+        "dashboard", "mandanten", "dokumente", "automation", "settings",
+        "aufgaben", "portalchat",
+    ],
+    "rollen_nav_teamleiter": [
+        "dashboard", "mandanten", "dokumente", "automation", "settings",
+        "aufgaben", "portalchat",
     ],
     "rollen_nav_mitarbeiter": [
-        "dashboard", "mandanten", "portalchat", "aufgaben", "ki", "dokumente", "belege",
-        "rechnungen", "empfehlungen", "settings",
+        "dashboard", "mandanten", "dokumente", "settings", "aufgaben", "portalchat",
     ],
     "rollen_nav_erweitert": [
         "profit", "steuerbot", "dokumente", "belege", "rechnungen", "empfehlungen", "analytics",
@@ -162,6 +169,8 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "lexoffice_api_key":           "",
     "webhook_url":                 "",      # Outgoing Webhooks
     "api_rate_limit_pro_minute":   0,
+    "m365_kalender_sync_aktiv":  False,
+    "m365_postfach_readonly_aktiv": False,
 
     # ── KANZLEI-STAMMDATEN ────────────────────────────────────
     "kanzlei_name":                "Steuerkanzlei",
@@ -173,6 +182,13 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "kanzlei_telefon":             "",
     "kanzlei_website":             "",
     "email_absender_name":         "",
+    # E-Mail-Versand pro Kanzlei (SaaS — kein Betreiber-Postfach in .env nötig)
+    "smtp_aktiv":                  False,
+    "smtp_host":                   "",
+    "smtp_port":                   587,
+    "smtp_user":                   "",
+    "smtp_pass":                   "",
+    "smtp_tls":                    True,
     "email_signatur":              "Mit freundlichen Grüßen\nIhre Steuerkanzlei",
     "stundensatz":                 150.0,
     "waehrung":                    "EUR",
@@ -217,6 +233,7 @@ NUMERIC_RANGES = {
     "billing_zahlungsziel_tage": (1, 365),
     "session_timeout_minuten": (5, 1440),
     "api_rate_limit_pro_minute": (1, 100_000),
+    "smtp_port": (1, 65535),
     "stundensatz": (1, 10_000),
     "backup_interval_stunden": (1, 24 * 365),
     "backup_anzahl_aufbewahren": (1, 36500),
@@ -259,11 +276,12 @@ EMAIL_KEYS = {
     "datenschutz_beauftragter",
 }
 URL_KEYS = {"webhook_url", "kanzlei_website"}
-NAV_KEYS = {"rollen_nav_steuerberater", "rollen_nav_mitarbeiter"}
+NAV_KEYS = {"rollen_nav_steuerberater", "rollen_nav_teamleiter", "rollen_nav_mitarbeiter"}
 NAV_TABS_ALWAYS = ("dashboard", "portalchat")
 NAV_TAB_ORDER = [
-    "dashboard", "mandanten", "portalchat", "aufgaben", "ki", "profit", "steuerbot",
-    "dokumente", "belege", "rechnungen", "automation", "empfehlungen", "analytics", "neu", "settings",
+    "dashboard", "mandanten", "dokumente", "automation", "aufgaben",
+    "portalchat", "analytics", "profit", "steuerbot", "rechnungen",
+    "empfehlungen", "neu", "belege", "settings", "ki",
 ]
 
 
@@ -370,6 +388,11 @@ def save_setting_for_store(store: DatenSpeicher, key: str, wert: Any) -> bool:
     if key not in DEFAULT_SETTINGS and not key.startswith(("custom_", "ext_")):
         log.warning(f"Unbekannter Setting-Key: {key}")
         return False
+    if key == "smtp_pass":
+        from core.email_sender import is_smtp_pass_placeholder
+
+        if is_smtp_pass_placeholder(wert):
+            return True
     settings = load_settings_for_store(store)
     ok, normalized = _normalize_value(key, wert, settings)
     if not ok:
@@ -574,10 +597,12 @@ def settings_nach_kategorie(store: Optional[DatenSpeicher] = None) -> Dict[str, 
         "billing":      {},
         "compliance":   {},
         "schnittstellen":{},
+        "email":        {},
         "kanzlei":      {},
     }
     for key, wert in alle.items():
-        if key.startswith("ki_"):                kategorien["ki"][key] = wert
+        if key.startswith("smtp_"):              kategorien["email"][key] = wert
+        elif key.startswith("ki_"):                kategorien["ki"][key] = wert
         elif key.startswith(("frist_","eskalation_","antwort_","ustva_","jahres","est_","auto_","max_email","workflow_","historie_")): kategorien["workflow"][key] = wert
         elif key.startswith("portal_"):          kategorien["portal"][key] = wert
         elif key.startswith("billing_"):         kategorien["billing"][key] = wert

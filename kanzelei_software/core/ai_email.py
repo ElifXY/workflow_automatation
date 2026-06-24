@@ -19,7 +19,11 @@ def _kanzlei_meta(ds=None) -> Tuple[str, str, str]:
     kid = getattr(ds, "kanzlei_id", None) or "default"
     resolved = resolve_email_from(kid, ds)
     name = resolved["display_name"]
-    email = resolved["from_email"]
+    email = (
+        (resolved.get("reply_to") or "").strip()
+        or (resolved.get("configured_email") or "").strip()
+        or resolved["from_email"]
+    )
     telefon = ""
 
     if ds is not None:

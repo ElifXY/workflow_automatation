@@ -16,7 +16,7 @@ def attach_system_routes(app: FastAPI) -> None:
     def root():
         """Öffentlicher Status — keine Mandanten- oder Aufgaben-Zahlen (Datenschutz)."""
         return {
-            "name": "Kanzlei AI API",
+            "name": "Kanzlei Automation API",
             "version": "3.0.0",
             "status": "running",
             "docs": "/docs",
@@ -126,7 +126,7 @@ def attach_system_routes(app: FastAPI) -> None:
     def api_v1_introduction():
         return root.ok(
             {
-                "produkt": "Kanzlei AI",
+                "produkt": "Kanzlei Automation",
                 "kurzbeschreibung": (
                     "Multi-Tenant Steuerkanzlei-SaaS mit Automatisierung, Decision Engine und Self-Service APIs."
                 ),

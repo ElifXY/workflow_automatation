@@ -1,4 +1,4 @@
-# Kanzlei AI — Produktpositionierung
+# Kanzlei Automation — Produktpositionierung
 
 ## Was wir sind
 

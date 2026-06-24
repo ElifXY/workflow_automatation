@@ -132,6 +132,12 @@ def get_ds(user: dict = None) -> DatenSpeicher:
     return DatenSpeicher(kanzlei_id=kanzlei_id)
 
 
+def tenant_setting(store: DatenSpeicher, key: str, default=None):
+    """Setting der eingeloggten Kanzlei (nicht global ``default``-Tenant)."""
+    val = global_setting_holen(key, store=store)
+    return default if val is None and default is not None else val
+
+
 def _tenant_features_merged(user: dict) -> Dict[str, Any]:
     """Tenant-Feature-Flags (Defaults + Mandanten-Overrides in ``DatenSpeicher``)."""
     from core.tenant_features import FEATURE_SETTINGS_KEY, merged_features
@@ -602,6 +608,7 @@ class MandantCreate(BaseModel):
     steuer_id: Optional[str]  = None
     notizen:   Optional[str]  = None
     adresse:   Optional[str]  = None
+    betreuer_email: Optional[str] = None
 
 class MandantUpdate(BaseModel):
     umsatz:    Optional[float] = Field(None, ge=0)
@@ -611,6 +618,19 @@ class MandantUpdate(BaseModel):
     notizen:   Optional[str]  = None
     steuer_id: Optional[str]  = None
     adresse:   Optional[str]  = None
+    betreuer_email: Optional[str] = None
+
+
+class BetreuerZuweisung(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    betreuer_email: Optional[str] = None
+
+
+class BetreuerBulkUpdate(BaseModel):
+    assignments: Optional[List[BetreuerZuweisung]] = None
+    betreuer_email: Optional[str] = None
+    mandanten: Optional[List[str]] = None
+    nur_ohne_betreuer: bool = False
 
 class AufgabeCreate(BaseModel):
     beschreibung: str          = Field(..., min_length=1, max_length=500)
@@ -681,7 +701,7 @@ def _compliance_status() -> Dict[str, Any]:
 # HILFSFUNKTIONEN
 # ============================================================
 
-def get_mandant_or_404(name: str, ds_instance=None) -> Dict:
+def get_mandant_or_404(name: str, ds_instance=None, user: Optional[dict] = None) -> Dict:
     store = ds_instance or ds
     m = store.hole_mandant(name)
     if not m:
@@ -689,6 +709,10 @@ def get_mandant_or_404(name: str, ds_instance=None) -> Dict:
             status_code=404,
             detail=f"Mandant '{name}' nicht gefunden"
         )
+    if user is not None:
+        from core.mandant_access import assert_mandant_access
+
+        assert_mandant_access(user, m, name)
     return m
 
 
@@ -745,53 +769,38 @@ def send_email_smtp(
     body: str,
     html_body: str = None,
     from_header: Optional[str] = None,
+    reply_to: Optional[str] = None,
+    store: Optional[DatenSpeicher] = None,
+    *,
+    allow_global_smtp: bool = False,
 ) -> bool:
     """
-    Sendet Email via SMTP.
-    FIX: Sendet HTML wenn html_body angegeben — nicht mehr als Plain Text.
-    Fallback: Plain Text wenn kein HTML.
-    from_header: z. B. „Steuerkanzlei Müller <mail@…>“ (pro Kanzlei aus Einstellungen).
+    Sendet E-Mail via SMTP (pro Kanzlei aus Einstellungen → E-Mail-Versand).
+    ``allow_global_smtp``: nur System-Mails (Einladung/Verify) dürfen .env nutzen.
     """
-    sender   = os.getenv("EMAIL_USER")
-    password = os.getenv("EMAIL_PASS")
-    smtp_host = os.getenv("EMAIL_HOST", os.getenv("SMTP_HOST", "smtp.gmail.com"))
-    smtp_port = int(os.getenv("EMAIL_PORT", os.getenv("SMTP_PORT", "587")))
+    from core.email_sender import (
+        resolve_smtp_transport,
+        send_email_via_transport,
+        global_smtp_transport,
+    )
 
-    if not sender or not password:
-        log.warning("EMAIL_USER / EMAIL_PASS fehlen in .env — Email nicht gesendet")
+    transport = resolve_smtp_transport(store, allow_global=allow_global_smtp)
+    if not transport and allow_global_smtp:
+        transport = global_smtp_transport()
+    if not transport:
+        log.warning(
+            "SMTP nicht konfiguriert — Kanzlei: Einstellungen → E-Mail-Versand aktivieren"
+        )
         return False
-
-    try:
-        msg = MIMEMultipart("alternative")
-        msg["From"]    = (from_header or "").strip() or os.getenv("EMAIL_FROM", sender)
-        msg["To"]      = to_email
-        msg["Subject"] = subject
-
-        # Immer Plain Text anhängen (Fallback)
-        msg.attach(MIMEText(body or "", "plain", "utf-8"))
-
-        # HTML als bevorzugte Version (wird von modernen Clients genutzt)
-        if html_body:
-            msg.attach(MIMEText(html_body, "html", "utf-8"))
-
-        with smtplib.SMTP(smtp_host, smtp_port) as server:
-            server.ehlo()
-            server.starttls()
-            server.login(sender, password)
-            server.send_message(msg)
-
-        log.info(f"Email gesendet → {to_email} | Betreff: {subject[:40]}")
-        return True
-
-    except smtplib.SMTPAuthenticationError:
-        log.error("SMTP Auth-Fehler — EMAIL_USER / EMAIL_PASS in .env prüfen")
-        return False
-    except smtplib.SMTPException as e:
-        log.error(f"SMTP Fehler: {e}")
-        return False
-    except Exception as e:
-        log.error(f"Email-Fehler: {e}")
-        return False
+    return send_email_via_transport(
+        transport,
+        to_email,
+        subject,
+        body,
+        html_body,
+        from_header=from_header,
+        reply_to=reply_to,
+    )
 
 
 def _invite_registration_url(invite_token: str) -> str:
@@ -869,13 +878,16 @@ def _process_email_outbox_once(limit: int = 10) -> Dict[str, int]:
             from core.email_sender import resolve_email_from
 
             st_out = DatenSpeicher(kanzlei_id=kid)
-            from_hdr = resolve_email_from(kid, st_out)["from_header"]
+            resolved = resolve_email_from(kid, st_out)
             ok_send = send_email_smtp(
                 row.get("to_email", ""),
                 row.get("subject", ""),
                 row.get("body_text", ""),
                 row.get("body_html") or None,
-                from_header=from_hdr,
+                from_header=resolved["from_header"],
+                reply_to=resolved.get("reply_to") or None,
+                store=st_out,
+                allow_global_smtp=False,
             )
             if not ok_send:
                 raise RuntimeError("SMTP send fehlgeschlagen")
@@ -1124,7 +1136,7 @@ def _settings_suggestions(store: DatenSpeicher) -> List[Dict[str, Any]]:
 @app.on_event("startup")
 async def startup_event():
     log.info("=" * 60)
-    log.info("Kanzlei AI API v3.0 — Start")
+    log.info("Kanzlei Automation API v3.0 — Start")
     log.info("=" * 60)
 
     os.makedirs("data", exist_ok=True)
@@ -1270,7 +1282,7 @@ async def shutdown_event():
 def root():
     """Öffentlicher Status — keine Mandanten- oder Aufgaben-Zahlen (Datenschutz)."""
     return {
-        "name": "Kanzlei AI API",
+        "name": "Kanzlei Automation API",
         "version": "3.0.0",
         "status": "running",
         "docs": "/docs",
@@ -1295,7 +1307,7 @@ def ready():
     """Readiness für Load-Balancer / go_live_check (ohne DB-Schreiblast)."""
     return {
         "status": "ready",
-        "build": "api-deploy-20260519b",
+        "build": "api-deploy-20260520o",
         "timestamp": datetime.now().isoformat(),
     }
 
@@ -1305,10 +1317,10 @@ def ready():
 def system_build():
     """Öffentlicher Deploy-Marker (ohne Auth) — zum Prüfen ob die API-Image-Version live ist."""
     return {
-        "api_build": "api-deploy-20260519b",
-        "ui_build_expected": "deploy-20260519b",
-        "portal_build": "portal-deploy-20260519b",
-        "email_absender_build": "email-absender-20260519b",
+        "api_build": "api-deploy-20260520o",
+        "ui_build_expected": "deploy-20260520o",
+        "portal_build": "portal-deploy-20260520o",
+        "email_absender_build": "email-absender-20260519c",
         "check_ui": "/build-info.json",
         "check_portal": "/portal/health",
     }
@@ -1412,7 +1424,7 @@ def product_focus(_user: dict = Depends(get_current_user)):
 def api_v1_introduction():
     from core.product_focus import PRODUCT_TAGLINE
     return ok({
-        "produkt": "Kanzlei AI",
+        "produkt": "Kanzlei Automation",
         "kurzbeschreibung": PRODUCT_TAGLINE,
         "wie_es_funktioniert": [
             "1) Auth: Benutzer oder API-Key identifiziert eine Kanzlei (tenant).",
@@ -1672,9 +1684,13 @@ def get_mandanten(
     branche:    Optional[str]   = Query(None),
     min_umsatz: Optional[float] = Query(None, ge=0),
     sortierung: Optional[str]   = Query("name"),
-    _user: dict = Depends(get_current_user),
+    betreuer_email: Optional[str] = Query(None, description="Nur Mandanten dieses Betreuers"),
+    nur_ohne_betreuer: bool = Query(False),
+    nur_meine: bool = Query(False, description="Nur Mandanten des eingeloggten Users"),
+    _user: dict = Depends(require_permission("mandanten:read")),
 ):
     from core.decision_engine import berechne_mandant_score
+    from core.mandant_access import user_may_access_mandant
     store = get_ds(_user)
     svc = MandantenService(store)
     daten = svc.list_mandanten(suche=suche, branche=branche, min_umsatz=min_umsatz)
@@ -1683,6 +1699,19 @@ def get_mandanten(
     for row in daten:
         name = row.get("name", "")
         m = row
+        if not user_may_access_mandant(_user, m):
+            continue
+        betr = str(m.get("betreuer_email") or "").strip().lower()
+        if nur_ohne_betreuer and betr:
+            continue
+        if nur_meine:
+            user_em = str(_user.get("email") or "").strip().lower()
+            if betr and user_em and betr != user_em:
+                continue
+        if betreuer_email:
+            want = str(betreuer_email or "").strip().lower()
+            if betr != want:
+                continue
         try:
             sd = berechne_mandant_score(name, m, store)
         except Exception:
@@ -1701,6 +1730,7 @@ def get_mandanten(
             "aufgaben_offen":        sd.get("aufgaben_offen",0),
             "aufgaben_ueberfaellig": sd.get("aufgaben_ueberfaellig",0),
             "tage_ohne_antwort":     sd.get("tage_ohne_antwort",0),
+            "betreuer_email":        m.get("betreuer_email", "") or "",
         })
 
     if   sortierung == "umsatz": result.sort(key=lambda x: x["umsatz"], reverse=True)
@@ -1710,11 +1740,195 @@ def get_mandanten(
     return ok(result, count=len(result))
 
 
+@app.get("/suche", tags=["System"], summary="Globale Suche (Mandanten & Aufgaben)")
+def globale_suche(
+    q: str = Query(..., min_length=1, max_length=80),
+    limit: int = Query(20, ge=1, le=40),
+    _user: dict = Depends(require_permission("mandanten:read")),
+):
+    from core.mandant_access import user_may_access_mandant
+
+    store = get_ds(_user)
+    svc = MandantenService(store)
+    needle = q.strip().lower()
+    ergebnisse = []
+
+    for row in svc.list_mandanten(suche=q):
+        if not user_may_access_mandant(_user, row):
+            continue
+        name = str(row.get("name") or "").strip()
+        if not name:
+            continue
+        ergebnisse.append({
+            "typ": "mandant",
+            "titel": name,
+            "untertitel": row.get("email") or row.get("betreuer_email") or "",
+            "pfad": f"/mandant/{name}",
+            "tab": None,
+        })
+        if len(ergebnisse) >= limit:
+            break
+
+    if len(ergebnisse) < limit:
+        try:
+            from core.aufgabe_erledigt import aufgabe_ist_offen
+            for a in store.hole_fristen().values():
+                if not isinstance(a, dict) or not aufgabe_ist_offen(a):
+                    continue
+                mandant = str(a.get("mandant") or "").strip()
+                text = str(a.get("beschreibung") or "").strip()
+                if needle not in text.lower() and needle not in mandant.lower():
+                    continue
+                m = store.hole_mandant(mandant) or {}
+                if mandant and not user_may_access_mandant(_user, m):
+                    continue
+                ergebnisse.append({
+                    "typ": "aufgabe",
+                    "titel": text[:120] or "Aufgabe",
+                    "untertitel": mandant,
+                    "pfad": f"/mandant/{mandant}",
+                    "tab": "aufgaben",
+                })
+                if len(ergebnisse) >= limit:
+                    break
+        except Exception:
+            pass
+
+    return ok({"q": q, "ergebnisse": ergebnisse, "count": len(ergebnisse)})
+
+
+@app.get("/mandanten/betreuer-matrix", tags=["Mandanten"],
+         summary="Mandanten ↔ Betreuer Zuordnung (Team-Matrix)")
+def mandanten_betreuer_matrix(_user: dict = Depends(require_permission("mandanten:read"))):
+    from core.mandant_access import user_may_access_mandant
+
+    store = get_ds(_user)
+    svc = MandantenService(store)
+    mandanten_rows = []
+    for row in svc.list_mandanten():
+        if not user_may_access_mandant(_user, row):
+            continue
+        mandanten_rows.append({
+            "name": row.get("name", ""),
+            "email": row.get("email", "") or "",
+            "betreuer_email": row.get("betreuer_email", "") or "",
+        })
+    mandanten_rows.sort(key=lambda x: str(x.get("name") or "").lower())
+
+    team_rows = []
+    try:
+        from backend.auth import liste_benutzer
+
+        kid = str(_user.get("kanzlei_id") or _user.get("tenant_id") or "default")
+        for u in liste_benutzer(kid) or []:
+            if not isinstance(u, dict):
+                continue
+            em = str(u.get("email") or "").strip().lower()
+            if not em or "@" not in em:
+                continue
+            team_rows.append({
+                "email": em,
+                "rolle": str(u.get("rolle") or "mitarbeiter"),
+                "name": str(u.get("benutzername") or em),
+            })
+    except Exception:
+        pass
+    team_rows.sort(key=lambda x: x["email"])
+
+    return ok({
+        "mandanten": mandanten_rows,
+        "team": team_rows,
+        "count": len(mandanten_rows),
+    })
+
+
+@app.patch("/mandanten/betreuer-matrix/bulk", tags=["Mandanten"],
+           summary="Betreuer bulk zuweisen")
+def mandanten_betreuer_bulk(
+    data: BetreuerBulkUpdate,
+    _user: dict = Depends(require_permission("mandanten:write")),
+):
+    from core.mandant_access import user_may_access_mandant
+
+    store = get_ds(_user)
+    svc = MandantenService(store)
+    updated = 0
+    errors: List[str] = []
+
+    targets: List[Dict[str, str]] = []
+    if data.assignments:
+        for row in data.assignments:
+            targets.append({
+                "name": row.name.strip(),
+                "betreuer_email": (row.betreuer_email or "").strip().lower(),
+            })
+    else:
+        names = [str(n).strip() for n in (data.mandanten or []) if str(n).strip()]
+        betreuer = (data.betreuer_email or "").strip().lower()
+        if not names and data.nur_ohne_betreuer:
+            for row in svc.list_mandanten():
+                if not user_may_access_mandant(_user, row):
+                    continue
+                if str(row.get("betreuer_email") or "").strip():
+                    continue
+                nm = str(row.get("name") or "").strip()
+                if nm:
+                    names.append(nm)
+        for nm in names:
+            targets.append({"name": nm, "betreuer_email": betreuer})
+
+    for t in targets:
+        nm = t["name"]
+        try:
+            m = store.hole_mandant(nm)
+            if not m:
+                errors.append(f"{nm}: nicht gefunden")
+                continue
+            if not user_may_access_mandant(_user, m):
+                errors.append(f"{nm}: kein Zugriff")
+                continue
+            svc.update_mandant(nm, {"betreuer_email": t.get("betreuer_email") or ""})
+            updated += 1
+        except Exception as exc:
+            errors.append(f"{nm}: {exc}")
+
+    return ok({
+        "updated": updated,
+        "errors": errors[:20],
+        "message": f"{updated} Mandant(en) aktualisiert",
+    })
+
+
+@app.get("/mandanten/papierkorb", tags=["Mandanten"],
+         summary="Gelöschte Mandanten (Papierkorb)")
+def get_mandanten_papierkorb(_user: dict = Depends(require_permission("mandanten:read"))):
+    from core.mandant_access import user_may_access_mandant
+
+    store = get_ds(_user)
+    svc = MandantenService(store)
+    rows = svc.list_papierkorb()
+    rows = [r for r in rows if user_may_access_mandant(_user, r)]
+    return ok(rows, count=len(rows))
+
+
+@app.post("/mandanten/{name}/wiederherstellen", tags=["Mandanten"],
+           summary="Mandant aus Papierkorb wiederherstellen")
+def restore_mandant(name: str, _user: dict = Depends(require_permission("mandanten:write"))):
+    svc = MandantenService(get_ds(_user))
+    try:
+        payload = svc.restore_mandant(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return ok_compat(payload, "Mandant wiederhergestellt")
+
+
 @app.get("/mandanten/{name}", tags=["Mandanten"])
 def get_mandant(name: str, _user: dict = Depends(get_current_user)):
     from core.decision_engine import berechne_mandant_score
     store    = get_ds(_user)
-    m        = get_mandant_or_404(name, store)
+    m        = get_mandant_or_404(name, store, _user)
     aufgaben = store.hole_aufgaben_fuer_mandant(name)
 
     try:
@@ -1724,16 +1938,53 @@ def get_mandant(name: str, _user: dict = Depends(get_current_user)):
 
     return ok({
         **m,
-        "score_details":     sd.get("score_details", []),
-        "aufgaben":          aufgaben,
-        "aufgaben_gesamt":   len(aufgaben),
-        "aufgaben_offen":    sum(1 for a in aufgaben if aufgabe_ist_offen(a)),
-        "aufgaben_erledigt": sum(1 for a in aufgaben if aufgabe_ist_erledigt(a)),
+        "score":               sd.get("score", 0),
+        "status":              sd.get("status", "OK"),
+        "score_details":       sd.get("score_details", []),
+        "health_score":        sd.get("health_score"),
+        "health_ampel":        sd.get("health_ampel"),
+        "health_label":        sd.get("health_label"),
+        "health_gruende":      sd.get("health_gruende") or [],
+        "tage_ohne_antwort":   sd.get("tage_ohne_antwort", 0),
+        "aufgaben_offen":      sd.get("aufgaben_offen", sum(1 for a in aufgaben if aufgabe_ist_offen(a))),
+        "aufgaben_ueberfaellig": sd.get("aufgaben_ueberfaellig", 0),
+        "fehlende_dokumente":  sd.get("fehlende_dokumente", 0),
+        "aufgaben":            aufgaben,
+        "aufgaben_gesamt":     len(aufgaben),
+        "aufgaben_erledigt":   sum(1 for a in aufgaben if aufgabe_ist_erledigt(a)),
     })
 
 
+@app.get("/mandanten/{name}/m365-mails", tags=["Mandanten", "Integrationen"],
+         summary="Outlook-Mails für Mandant (Graph Pilot)")
+def mandant_m365_mails(
+    name: str,
+    limit: int = Query(8, ge=1, le=20),
+    _user: dict = Depends(get_current_user),
+):
+    from core.m365_integration import fetch_mails_for_mandant
+
+    store = get_ds(_user)
+    get_mandant_or_404(name, store, _user)
+    return ok(fetch_mails_for_mandant(store, name, limit=limit))
+
+
+@app.post("/mandanten/{name}/m365-mails/sync-timeline", tags=["Mandanten", "Integrationen"],
+          summary="M365-Mails in Kommunikations-Timeline importieren")
+def mandant_m365_sync_timeline(
+    name: str,
+    limit: int = Query(10, ge=1, le=20),
+    _user: dict = Depends(get_current_user),
+):
+    from core.m365_integration import sync_m365_mails_to_timeline
+
+    store = get_ds(_user)
+    get_mandant_or_404(name, store, _user)
+    return ok(sync_m365_mails_to_timeline(store, name, limit=limit))
+
+
 @app.post("/mandanten", tags=["Mandanten"], status_code=201)
-def create_mandant(data: MandantCreate, _user: dict = Depends(get_current_user)):
+def create_mandant(data: MandantCreate, _user: dict = Depends(require_permission("mandanten:write"))):
     svc = MandantenService(get_ds(_user))
     try:
         payload = svc.create_mandant(data)
@@ -1746,7 +1997,7 @@ def create_mandant(data: MandantCreate, _user: dict = Depends(get_current_user))
 
 
 @app.put("/mandanten/{name}", tags=["Mandanten"])
-def update_mandant(name: str, data: MandantUpdate, _user: dict = Depends(get_current_user)):
+def update_mandant(name: str, data: MandantUpdate, _user: dict = Depends(require_permission("mandanten:write"))):
     update_felder = data.dict(exclude_none=True)
     svc = MandantenService(get_ds(_user))
     try:
@@ -1762,7 +2013,7 @@ def update_mandant(name: str, data: MandantUpdate, _user: dict = Depends(get_cur
 
 
 @app.delete("/mandanten/{name}", tags=["Mandanten"])
-def delete_mandant(name: str, _user: dict = Depends(get_current_user)):
+def delete_mandant(name: str, _user: dict = Depends(require_permission("mandanten:delete"))):
     svc = MandantenService(get_ds(_user))
     try:
         payload = svc.delete_mandant(name)
@@ -1770,7 +2021,81 @@ def delete_mandant(name: str, _user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=404, detail=str(exc))
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
-    return ok_compat(payload, "Mandant gelöscht")
+    return ok_compat(payload, "Mandant in Papierkorb gelegt")
+
+
+@app.get("/integrationen/m365/status", tags=["Integrationen"],
+         summary="Microsoft 365 Integrationsstatus")
+def integration_m365_status(_user: dict = Depends(require_permission("settings:read"))):
+    from core.m365_integration import m365_status as m365_status_fn
+    store = get_ds(_user)
+    return ok(m365_status_fn(store, _user))
+
+
+@app.post("/integrationen/m365/connect/start", tags=["Integrationen"],
+          summary="Microsoft 365 Graph-Verbindung starten")
+def integration_m365_connect_start(
+    redirect_to: Optional[str] = Query("/settings"),
+    _user: dict = Depends(require_permission("settings:write")),
+):
+    from core.m365_integration import build_m365_connect_auth_url
+
+    client_id = _oauth_env("microsoft", "CLIENT_ID")
+    client_secret = _oauth_env("microsoft", "CLIENT_SECRET")
+    if not client_id or not client_secret:
+        raise HTTPException(503, "Microsoft OAuth ist nicht konfiguriert")
+
+    state = secrets.token_urlsafe(24)
+    nonce = secrets.token_urlsafe(24)
+    kid = str(_user.get("kanzlei_id") or _user.get("tenant_id") or "default")
+    rows = _oauth_state_rows()
+    rows.append(
+        {
+            "state": state,
+            "nonce": nonce,
+            "provider": "microsoft",
+            "mode": "m365_connect",
+            "kanzlei_id": kid,
+            "redirect_to": _oauth_normalize_redirect_target(redirect_to),
+            "expires_at": (datetime.now() + timedelta(minutes=10)).isoformat(),
+        }
+    )
+    _oauth_state_save(rows)
+    auth_url = build_m365_connect_auth_url(state, nonce)
+    if not auth_url:
+        raise HTTPException(503, "Microsoft OAuth ist nicht konfiguriert")
+    return ok({"url": auth_url})
+
+
+@app.post("/integrationen/m365/disconnect", tags=["Integrationen"],
+          summary="Microsoft 365 Graph-Verbindung trennen")
+def integration_m365_disconnect(_user: dict = Depends(require_permission("settings:write"))):
+    from core.m365_integration import clear_m365_tokens
+
+    store = get_ds(_user)
+    clear_m365_tokens(store)
+    return ok({"status": "disconnected", "message": "Microsoft 365 Verbindung getrennt"})
+
+
+@app.get("/integrationen/m365/calendar-preview", tags=["Integrationen"],
+         summary="Kalender-Vorschau (Microsoft Graph Pilot)")
+def integration_m365_calendar_preview(_user: dict = Depends(require_permission("settings:read"))):
+    from core.m365_integration import fetch_calendar_preview
+
+    store = get_ds(_user)
+    return ok(fetch_calendar_preview(store))
+
+
+@app.get("/integrationen/m365/mail-preview", tags=["Integrationen"],
+         summary="Postfach-Vorschau mit Mandanten-Zuordnung (Pilot)")
+def integration_m365_mail_preview(
+    limit: int = Query(10, ge=1, le=25),
+    _user: dict = Depends(require_permission("settings:read")),
+):
+    from core.m365_integration import fetch_mail_preview
+
+    store = get_ds(_user)
+    return ok(fetch_mail_preview(store, limit=limit))
 
 
 @app.post("/mandanten/{name}/antwort", tags=["Mandanten"])
@@ -1801,7 +2126,7 @@ def get_aufgaben(
     _user: dict = Depends(get_current_user),
 ):
     store = get_ds(_user)
-    get_mandant_or_404(name, store)
+    get_mandant_or_404(name, store, _user)
     svc = AufgabenService(store)
     b_raw = bereich if isinstance(bereich, str) else "alle"
     b = (b_raw or "alle").strip().lower()
@@ -1814,7 +2139,7 @@ def get_aufgaben(
 def create_aufgabe(name: str, data: AufgabeCreate,
     _user: dict = Depends(get_current_user)):
     store = get_ds(_user)
-    get_mandant_or_404(name, store)
+    get_mandant_or_404(name, store, _user)
     svc = AufgabenService(store)
     return ok_compat(svc.create(name, data), "Aufgabe erstellt")
 
@@ -1823,7 +2148,7 @@ def create_aufgabe(name: str, data: AufgabeCreate,
 def create_aufgaben_bulk(name: str, data: BulkAufgabeCreate,
     _user: dict = Depends(get_current_user)):
     store = get_ds(_user)
-    get_mandant_or_404(name, store)
+    get_mandant_or_404(name, store, _user)
     svc = AufgabenService(store)
     payload = svc.create_bulk(name, data.aufgaben)
     return ok_compat(
@@ -1875,7 +2200,7 @@ def delete_aufgabe(aufgabe_id: str,
 @app.get("/mandanten/{name}/dokumente", tags=["Dokumente"])
 def get_dokumente(name: str, _user: dict = Depends(get_current_user)):
     store = get_ds(_user)
-    m = get_mandant_or_404(name, store)
+    m = get_mandant_or_404(name, store, _user)
     return ok_compat({
         "name": name,
         "fehlende_dokumente": m.get("fehlende_dokumente_liste", []),
@@ -1883,11 +2208,21 @@ def get_dokumente(name: str, _user: dict = Depends(get_current_user)):
     })
 
 
+@app.get("/mandanten/{name}/eskalation", tags=["Mandanten"],
+         summary="Eskalations-Timeline für Mandantenakte")
+def mandant_eskalation(name: str, _user: dict = Depends(get_current_user)):
+    from core.escalation_policy import mandant_eskalation_timeline
+
+    store = get_ds(_user)
+    m = get_mandant_or_404(name, store, _user)
+    return ok_compat(mandant_eskalation_timeline(name, m, store))
+
+
 @app.post("/mandanten/{name}/dokumente/anfordern", tags=["Dokumente"])
 def dokument_anfordern(name: str, data: DokumentAnforderung, background_tasks: BackgroundTasks,
     _user: dict = Depends(get_current_user)):
     store = get_ds(_user)
-    m = get_mandant_or_404(name)
+    m = get_mandant_or_404(name, store, _user)
     fehlende = m.get("fehlende_dokumente_liste", [])
     if data.dokument_name not in fehlende:
         fehlende.append(data.dokument_name)
@@ -1903,7 +2238,7 @@ def dokument_anfordern(name: str, data: DokumentAnforderung, background_tasks: B
 def dokument_erhalten(name: str, dokument_name: str = Query(...),
     _user: dict = Depends(get_current_user)):
     store = get_ds(_user)
-    m = get_mandant_or_404(name)
+    m = get_mandant_or_404(name, store, _user)
     fehlende = m.get("fehlende_dokumente_liste", [])
     if dokument_name in fehlende:
         fehlende.remove(dokument_name)
@@ -1931,22 +2266,69 @@ def email_absender(_user: dict = Depends(get_current_user)):
     from core.email_sender import resolve_email_from
 
     r = resolve_email_from(store.kanzlei_id, store)
+    if r.get("smtp_configured"):
+        hinweis = (
+            "Versand über Ihr Kanzlei-Postfach (Einstellungen → E-Mail-Versand). "
+            "Anzeigename unter Kanzlei-Daten."
+        )
+    else:
+        hinweis = (
+            "Noch kein SMTP hinterlegt. Unter Einstellungen → E-Mail-Versand "
+            "Server, Benutzer und App-Passwort Ihrer Kanzlei eintragen."
+        )
     return ok_compat({
-        "build": "email-absender-20260519b",
+        "build": "email-tenant-smtp-20260520",
         "display_name": r["display_name"],
         "from_email": r["from_email"],
         "from_header": r["from_header"],
-        "hinweis": (
-            "Absender unter Einstellungen → Kanzlei-Daten → „Name im Postfach des Empfängers“ "
-            "und „E-Mail-Adresse der Kanzlei“ anpassen."
-        ),
+        "configured_email": r.get("configured_email") or "",
+        "smtp_account": r.get("smtp_account") or "",
+        "smtp_configured": bool(r.get("smtp_configured")),
+        "reply_to": r.get("reply_to") or "",
+        "address_mismatch": bool(r.get("address_mismatch")),
+        "hinweis": hinweis,
     })
+
+
+@app.post("/email/smtp/test", tags=["Email"], summary="SMTP-Verbindung der Kanzlei testen")
+def email_smtp_test(
+    data: Optional[dict] = Body(None),
+    _user: dict = Depends(require_permission("settings:write")),
+):
+    store = get_ds(_user)
+    from core.email_sender import resolve_email_from, send_tenant_email
+
+    cfg = (data or {}) if isinstance(data, dict) else {}
+    to_email = (cfg.get("to") or _user.get("email") or "").strip()
+    if not to_email or "@" not in to_email:
+        raise HTTPException(400, "Keine Ziel-Adresse — Benutzer-E-Mail oder 'to' angeben")
+
+    resolved = resolve_email_from(store.kanzlei_id, store)
+    if not resolved.get("smtp_configured"):
+        raise HTTPException(
+            400,
+            "E-Mail-Versand nicht aktiv. Tab „E-Mail-Versand“: aktivieren, SMTP-Daten speichern.",
+        )
+
+    ok = send_tenant_email(
+        store,
+        to_email,
+        "Kanzlei Automation — SMTP-Test",
+        (
+            f"SMTP-Test für Kanzlei {store.kanzlei_id}.\n"
+            f"Absender: {resolved['from_header']}\n"
+            "Wenn diese Mail ankommt, ist der Versand korrekt konfiguriert."
+        ),
+    )
+    if not ok:
+        raise HTTPException(502, "SMTP-Test fehlgeschlagen — Host, Port, Benutzer oder Passwort prüfen")
+    return ok_compat({"status": "ok", "gesendet_an": to_email}, "Test-E-Mail gesendet")
 
 
 @app.get("/email/{name}/vorschau", tags=["Email"])
 def email_vorschau(name: str, _user: dict = Depends(get_current_user)):
     store    = get_ds(_user)
-    m        = get_mandant_or_404(name, store)
+    m        = get_mandant_or_404(name, store, _user)
     aufgaben = store.hole_fristen()
     from core.ai_email import erstelle_email_vorschau
     from core.email_sender import resolve_email_from
@@ -1972,7 +2354,7 @@ def email_senden(name: str, background_tasks: BackgroundTasks,
                  data: Optional[EmailSendRequest] = None,
     _user: dict = Depends(get_current_user)):
     store = get_ds(_user)
-    m = get_mandant_or_404(name, store)
+    m = get_mandant_or_404(name, store, _user)
 
     to_email = (data.empfaenger if data and data.empfaenger else m.get("email") or "").strip()
     if not to_email or "@" not in to_email:
@@ -1982,6 +2364,13 @@ def email_senden(name: str, background_tasks: BackgroundTasks,
         )
 
     force = data.force if data else True
+    from core.email_sender import resolve_email_from as _resolve_from
+
+    if not _resolve_from(store.kanzlei_id, store).get("smtp_configured"):
+        raise HTTPException(
+            400,
+            "E-Mail-Versand nicht konfiguriert. Einstellungen → E-Mail-Versand: aktivieren und SMTP speichern.",
+        )
     if not force and not darf_email_senden(name, store=store):
         raise HTTPException(429, "Email bereits in den letzten 24h gesendet. Nutze force=true zum Überschreiben.")
 
@@ -3012,6 +3401,103 @@ def dashboard_heute_ops(_user: dict = Depends(get_current_user)):
     return ok_compat(heute_operations(store))
 
 
+@app.get("/dashboard/blockierung", tags=["Dashboard"],
+         summary="Blockierungszentrum — was hält die Kanzlei auf")
+def dashboard_blockierung(
+    limit: int = Query(30, ge=1, le=100),
+    _user: dict = Depends(get_current_user),
+):
+    from core.dashboard_ops import blockierungszentrum
+
+    store = get_ds(_user)
+    return ok_compat(blockierungszentrum(store, limit=limit))
+
+
+@app.get("/dashboard/autopilot", tags=["Dashboard"],
+         summary="Autopilot-Center — heute automatisch erledigt")
+def dashboard_autopilot(_user: dict = Depends(get_current_user)):
+    from core.dashboard_ops import autopilot_stats
+
+    store = get_ds(_user)
+    return ok_compat(autopilot_stats(store))
+
+
+@app.get("/dashboard/roi", tags=["Dashboard"],
+         summary="ROI-Zusammenfassung (Zeitersparnis)")
+def dashboard_roi(_user: dict = Depends(get_current_user)):
+    from core.dashboard_ops import roi_monatsbericht
+
+    store = get_ds(_user)
+    return ok_compat(roi_monatsbericht(store))
+
+
+@app.get("/dashboard/automation-audit", tags=["Dashboard"],
+         summary="Audit-Trail der Automationen (Workflow, Eskalation, Bot)")
+def dashboard_automation_audit(
+    limit: int = Query(50, ge=1, le=200),
+    _user: dict = Depends(require_permission("engine:read")),
+):
+    from core.automation_audit import automation_audit
+
+    store = get_ds(_user)
+    return ok_compat(automation_audit(store, limit=limit))
+
+
+@app.post("/dashboard/roi/email", tags=["Dashboard"],
+          summary="ROI-Monatsbericht per E-Mail senden (manuell oder Scheduler)")
+def dashboard_roi_email_senden(_user: dict = Depends(require_permission("settings:write"))):
+    from core.roi_email import send_roi_monatsbericht_email
+
+    store = get_ds(_user)
+    result = send_roi_monatsbericht_email(store)
+    return ok_compat(result)
+
+
+@app.get("/regeln/vorlagen", tags=["Automation"],
+         summary="Vorinstallierte Workflow-Vorlagen (Marktplatz)")
+def regeln_vorlagen_liste(_user: dict = Depends(get_current_user)):
+    from core.workflow_templates import liste_vorlagen, zaehle_betroffene_mandanten, vorlage_by_id
+
+    store = get_ds(_user)
+    out = []
+    for meta in liste_vorlagen():
+        tpl = vorlage_by_id(meta["id"])
+        betroffen = 0
+        if tpl:
+            betroffen = zaehle_betroffene_mandanten(store, tpl["regel"])
+        out.append({**meta, "betroffene_mandanten": betroffen})
+    return ok_compat({"vorlagen": out, "anzahl": len(out)})
+
+
+@app.post("/regeln/vorlagen/{template_id}/aktivieren", tags=["Automation"],
+          summary="Workflow-Vorlage mit einem Klick aktivieren")
+def regeln_vorlage_aktivieren(
+    template_id: str,
+    bestaetigen: bool = Query(False, description="True nach Vorschau-Bestätigung"),
+    _user: dict = Depends(require_permission("engine:run")),
+):
+    from core.workflow_templates import aktiviere_vorlage, vorlage_by_id, zaehle_betroffene_mandanten
+
+    store = get_ds(_user)
+    tpl = vorlage_by_id(template_id)
+    if not tpl:
+        raise HTTPException(404, f"Vorlage '{template_id}' nicht gefunden")
+    betroffen = zaehle_betroffene_mandanten(store, tpl["regel"])
+    if not bestaetigen:
+        return ok_compat({
+            "status": "vorschau",
+            "vorlage": template_id,
+            "betroffene_mandanten": betroffen,
+            "hinweis": f"Diese Regel würde aktuell ca. {betroffen} Mandanten betreffen. "
+                       "Erneut mit ?bestaetigen=true aufrufen zum Aktivieren.",
+        })
+    try:
+        result = aktiviere_vorlage(store, template_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return ok_compat(result, "Vorlage aktiviert")
+
+
 @app.get("/dashboard/pilot-scorecard", tags=["Dashboard"],
           summary="Pilot-Scorecard (Woche, Vorher/Nachher)")
 def dashboard_pilot_scorecard(_user: dict = Depends(get_current_user)):
@@ -3096,7 +3582,7 @@ def get_empfehlungen(_user: dict = Depends(get_current_user)):
 def steuersimulation(name: str, data: SimulationRequest,
     _user: dict = Depends(get_current_user)):
     store = get_ds(_user)
-    m = get_mandant_or_404(name, store)
+    m = get_mandant_or_404(name, store, _user)
     ergebnis = berechne_steuersimulation(m, data)
     store.log_eintrag(f"SIMULATION | {name} | Ersparnis: {ergebnis['steuerersparnis']}EUR")
     return {"mandant": name, "simulation": ergebnis, "eingaben": data.dict()}
@@ -3147,7 +3633,7 @@ def benchmarking(branche: Optional[str] = Query(None), _user: dict = Depends(get
 @app.get("/mandanten/{name}/report", tags=["Reporting"])
 def mandant_report(name: str, _user: dict = Depends(get_current_user)):
     store = get_ds(_user)
-    m = get_mandant_or_404(name, store)
+    m = get_mandant_or_404(name, store, _user)
     aufgaben_alle = [a for a in store.hole_fristen().values() if a.get("mandant") == name]
     aufgaben_offen = [a for a in aufgaben_alle if not a.get("erledigt")]
     aufgaben_erledigt = [a for a in aufgaben_alle if a.get("erledigt")]
@@ -3505,7 +3991,7 @@ def workflow_monatsabschluss(
     Spart 20-30 Minuten manuelle Aufgaben-Erstellung.
     """
     store = get_ds(_user)
-    get_mandant_or_404(name, store)
+    get_mandant_or_404(name, store, _user)
     from core.engine import Engine
 
     jetzt = datetime.now()
@@ -3531,7 +4017,7 @@ def workflow_jahresabschluss(
     Inklusive Bilanz, GuV, Steuererklärung — komplett vorbereitet.
     """
     store = get_ds(_user)
-    get_mandant_or_404(name, store)
+    get_mandant_or_404(name, store, _user)
     from core.engine import Engine
 
     engine = Engine(store)
@@ -3548,7 +4034,7 @@ def workflow_onboarding(name: str, _user: dict = Depends(get_current_user)):
     Legt alle Erstaufgaben an + bereitet Willkommens-Email vor.
     """
     store = get_ds(_user)
-    get_mandant_or_404(name, store)
+    get_mandant_or_404(name, store, _user)
     from core.engine import Engine
 
     engine = Engine(store)
@@ -3692,7 +4178,7 @@ def get_timeline(name: str, limit: int = Query(50, ge=1, le=500),
     Revisionssicher — jede Interaktion wird erfasst.
     """
     store = get_ds(_user)
-    get_mandant_or_404(name, store)
+    get_mandant_or_404(name, store, _user)
     timeline = store.timeline_laden(name)
     sortiert = sorted(timeline, key=lambda x: x.get("timestamp", ""), reverse=True)
     return ok_compat({
@@ -3710,9 +4196,13 @@ def get_kommunikation(name: str, limit: int = Query(50, ge=1, le=200),
     Alle Kommunikationseinträge (Emails, Notizen, Anrufe) für einen Mandanten.
     """
     store = get_ds(_user)
-    get_mandant_or_404(name, store)
+    get_mandant_or_404(name, store, _user)
     komm     = store.hole_kommunikation(name)
-    sortiert = sorted(komm, key=lambda x: x.get("timestamp", x.get("zeit", "")), reverse=True)
+    sortiert = sorted(
+        komm,
+        key=lambda x: x.get("timestamp") or x.get("erstellt_am") or x.get("zeit") or "",
+        reverse=True,
+    )
     return ok_compat({
         "mandant":        name,
         "anzahl":         len(sortiert),
@@ -3729,7 +4219,7 @@ def add_kommunikation(name: str, data: dict,
     """
 
     store = get_ds(_user)
-    get_mandant_or_404(name, store)
+    get_mandant_or_404(name, store, _user)
 
     eintrag = {
         "typ":       data.get("typ", "manuell"),
@@ -3790,10 +4280,17 @@ def update_setting(data: dict,
     except ValueError as exc:
         raise HTTPException(400, str(exc))
 
+    from modules.settings_manager import load_settings_for_store
+
+    bestaetigt = load_settings_for_store(store).get(key)
     usage_increment(store.kanzlei_id, "settings_changes_day", 1)
     _emit_webhook_event(store.kanzlei_id, "settings.changed", {"key": key, "wert": wert})
     _track_action_for_suggestions(store, "settings_change")
-    return ok_compat(payload)
+    return ok_compat({
+        **payload,
+        "kanzlei_id": store.kanzlei_id,
+        "bestaetigt": bestaetigt,
+    })
 
 
 @app.put("/settings/batch", tags=["System"],
@@ -4418,7 +4915,7 @@ def _email_verify_send(email: str) -> None:
     if not base:
         base = "https://kanzlei-automation.com"
     verify_url = f"{base}/verify-email?token={quote(token_plain, safe='')}"
-    subject = "E-Mail bestätigen — Kanzlei AI"
+    subject = "E-Mail bestätigen — Kanzlei Automation"
     plain = (
         "Bitte bestätigen Sie Ihre E-Mail-Adresse.\n\n"
         f"Bestätigungslink (24h gültig): {verify_url}\n\n"
@@ -4429,7 +4926,7 @@ def _email_verify_send(email: str) -> None:
         f'<p><a href="{html_module.escape(verify_url)}">E-Mail jetzt bestätigen</a></p>'
         "<p>Der Link ist 24 Stunden gültig.</p>"
     )
-    send_email_smtp(e, subject, plain, html)
+    send_email_smtp(e, subject, plain, html, allow_global_smtp=True)
 
 
 OAUTH_PROVIDERS: Dict[str, Dict[str, str]] = {
@@ -4766,7 +5263,7 @@ def auth_password_forgot(data: PasswortForgotRequest, request: Request):
         if not base:
             base = "https://kanzlei-automation.com"
         reset_url = f"{base}/reset-password?token={quote(token_plain, safe='')}"
-        subject = "Passwort zurücksetzen — Kanzlei AI"
+        subject = "Passwort zurücksetzen — Kanzlei Automation"
         plain = (
             "Sie haben eine Passwort-Zurücksetzung angefordert.\n\n"
             f"Link (45 Minuten gültig): {reset_url}\n\n"
@@ -4777,7 +5274,7 @@ def auth_password_forgot(data: PasswortForgotRequest, request: Request):
             f'<p><a href="{html_module.escape(reset_url)}">Passwort jetzt zurücksetzen</a></p>'
             "<p>Der Link ist 45 Minuten gültig. Wenn Sie das nicht waren, ignorieren Sie diese E-Mail.</p>"
         )
-        send_email_smtp(email, subject, plain, html)
+        send_email_smtp(email, subject, plain, html, allow_global_smtp=True)
         _pwreset_store().log_eintrag(f"PASSWORT_RESET_LINK_GESENDET | {row.get('benutzername')} | {row.get('kanzlei_id')}")
 
     return {"status": "ok", "message": "Falls die E-Mail existiert, wurde ein Reset-Link versendet."}
@@ -4974,6 +5471,26 @@ async def auth_oauth_callback(provider: str, code: str = Query(...), state: str 
             email = str(claims.get("email") or "").strip().lower()
         if not email:
             raise HTTPException(400, "OAuth lieferte keine E-Mail-Adresse")
+
+    if st.get("mode") == "m365_connect":
+        if p != "microsoft":
+            raise HTTPException(400, "M365 Connect nur für Microsoft")
+        kid = str(st.get("kanzlei_id") or "default")
+        tenant_store = get_ds({"kanzlei_id": kid, "tenant_id": kid})
+        from core.m365_integration import save_m365_tokens
+
+        save_m365_tokens(tenant_store, token_data, email=email)
+        target = _oauth_normalize_redirect_target(st.get("redirect_to"))
+        sep = "&" if "?" in target else "?"
+        redirect_url = f"{target}{sep}m365=connected"
+        html = (
+            "<!doctype html><html><body>"
+            "<script>window.location.href="
+            + json.dumps(redirect_url)
+            + ";</script>"
+            "</body></html>"
+        )
+        return HTMLResponse(content=html, status_code=200)
 
     try:
         from backend.auth import finde_benutzer_nach_email, registriere_per_email
@@ -6228,7 +6745,7 @@ def export_excel(name: str,
     from fastapi.responses import StreamingResponse
     from core.export_service import export_excel_report
     import io
-    m             = get_mandant_or_404(name, store)
+    m             = get_mandant_or_404(name, store, _user)
     aufgaben      = [a for a in store.hole_fristen().values() if a.get("mandant") == name]
     kommunikation = store.hole_kommunikation(name)
     try:
@@ -6258,7 +6775,7 @@ def export_datev_info(
         raise HTTPException(503, "DATEV Export ist deaktiviert")
     from core.datev_export_utils import assess_datev_export_relevance, normalize_berater_nr
     store = get_ds(_user)
-    m = get_mandant_or_404(name, store)
+    m = get_mandant_or_404(name, store, _user)
     aufgaben = [a for a in store.hole_fristen().values() if a.get("mandant") == name]
     alle_mandanten = store.hole_mandanten()
     bnr = normalize_berater_nr(berater_nr or global_setting_holen("datev_berater_nr") or "12345")
@@ -6286,7 +6803,7 @@ def export_datev(
     )
     import io
     store = get_ds(_user)
-    m        = get_mandant_or_404(name, store)
+    m        = get_mandant_or_404(name, store, _user)
     alle_mandanten = store.hole_mandanten()
     aufgaben = [a for a in store.hole_fristen().values() if a.get("mandant") == name]
     bnr = normalize_berater_nr(berater_nr or global_setting_holen("datev_berater_nr") or "12345")
@@ -6371,7 +6888,7 @@ def export_elster(
     from core.export_service import export_elster_xml
     import io
     store = get_ds(_user)
-    m = get_mandant_or_404(name, store)
+    m = get_mandant_or_404(name, store, _user)
     try:
         xml_bytes = export_elster_xml(name, m, steuerart, jahr, quartal)
         datum     = datetime.now().strftime("%Y%m%d")
@@ -6432,7 +6949,7 @@ def export_komplett(name: str, _user: dict = Depends(require_permission("export:
     from core.export_service import export_komplettpaket
     import io
     store = get_ds(_user)
-    m              = get_mandant_or_404(name, store)
+    m              = get_mandant_or_404(name, store, _user)
     alle_mandanten = store.hole_mandanten()
     alle_aufgaben  = store.hole_fristen()
     aufgaben_list  = [a for a in alle_aufgaben.values() if a.get("mandant") == name]
@@ -6491,11 +7008,10 @@ def generiere_portal_token(
     Link ist 7 Tage gültig und kann per E-Mail an den Mandanten gesendet werden.
     """
     import os
-    from modules.settings_manager import setting_holen
-    if not bool(setting_holen("portal_aktiv")):
-        raise HTTPException(503, "Mandantenportal ist deaktiviert")
     store = get_ds(_user)
-    get_mandant_or_404(mandant, store)
+    if not bool(tenant_setting(store, "portal_aktiv")):
+        raise HTTPException(503, "Mandantenportal ist deaktiviert")
+    get_mandant_or_404(mandant, store, _user)
     try:
         import sys
         sys.path.insert(0, ".")
@@ -6890,7 +7406,7 @@ def rechnung_erstellen(data: RechnungCreate, _user: dict = Depends(get_current_u
     Positionen aus StBVV-Gebührentabelle wählbar.
     """
     store = get_ds(_user)
-    get_mandant_or_404(data.mandant, store)
+    get_mandant_or_404(data.mandant, store, _user)
     from core.rechnungs_service import erstelle_rechnung
     try:
         r = erstelle_rechnung(
@@ -6960,7 +7476,14 @@ def rechnung_mahnung_ep(rechnung_id: str, background_tasks: BackgroundTasks,
             text = mahnungs_text(r, len(r.get("mahnungen", [])))
             subject = f"Mahnung — {r['rechnungsnummer']} — {r['mandant']}"
             background_tasks.add_task(
-                send_email_smtp, r["mandant_email"], subject, text
+                send_email_smtp,
+                r["mandant_email"],
+                subject,
+                text,
+                None,
+                None,
+                None,
+                store,
             )
         return r
     except ValueError as e:
@@ -6980,9 +7503,14 @@ def rechnung_email_senden(rechnung_id: str, background_tasks: BackgroundTasks,
         raise HTTPException(400, "Mandant hat keine Email-Adresse")
     html = erstelle_rechnungstext(r)
     background_tasks.add_task(
-        send_email_smtp, r["mandant_email"],
+        send_email_smtp,
+        r["mandant_email"],
         f"Honorarrechnung {r['rechnungsnummer']} — {r.get('kanzlei', {}).get('name', 'Kanzlei')}",
-        html
+        "",
+        html,
+        None,
+        None,
+        store,
     )
     return {"status": "gesendet", "empfaenger": r["mandant_email"]}
 
@@ -7202,7 +7730,7 @@ async def ki_mandant_analyse(name: str, _user: dict = Depends(get_current_user))
     Gibt strukturierte Empfehlung mit Begründung zurück.
     """
     store = get_ds(_user)
-    m = get_mandant_or_404(name, store)
+    m = get_mandant_or_404(name, store, _user)
     from core.decision_engine import analysiere_mandant_komplett
     result = await analysiere_mandant_komplett(name, m, store)
     store.log_eintrag(f"AI_ANALYSE | {name} | ai_genutzt={result.get('ai_genutzt')}")
@@ -8200,7 +8728,7 @@ def _portal_dokument_baum(dateien: List[Dict[str, Any]]) -> List[Dict[str, Any]]
          summary="Dokument-Explorer für Unterschrift (Archiv + Portal-Uploads)")
 def portal_mandant_dokument_quellen(name: str, _user: dict = Depends(get_current_user)):
     store = get_ds(_user)
-    get_mandant_or_404(name, store)
+    get_mandant_or_404(name, store, _user)
     dateien: List[Dict[str, Any]] = []
 
     for d in _dokument_archiv_liste(store):
@@ -8255,7 +8783,7 @@ def portal_mandant_dokument_quelle_inhalt(
     _user: dict = Depends(get_current_user),
 ):
     store = get_ds(_user)
-    get_mandant_or_404(name, store)
+    get_mandant_or_404(name, store, _user)
     quelle = (quelle or "").strip().lower()
     if quelle == "archiv":
         archiv = _dokument_archiv_holen(store)
@@ -8311,11 +8839,10 @@ def portal_mandant_unterschrift_detail(
     uid: str,
     _user: dict = Depends(get_current_user),
 ):
-    from modules.settings_manager import setting_holen
-    if not bool(setting_holen("portal_unterschrift_aktiv")):
-        raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
     store = get_ds(_user)
-    get_mandant_or_404(name, store)
+    if not bool(tenant_setting(store, "portal_unterschrift_aktiv")):
+        raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
+    get_mandant_or_404(name, store, _user)
     u = store.portal_holen("unterschrift", uid) or {}
     if not u or u.get("mandant") != name:
         raise HTTPException(404, "Unterschrift nicht gefunden")
@@ -8344,11 +8871,10 @@ def portal_mandant_unterschrift_bild(
     uid: str,
     _user: dict = Depends(get_current_user),
 ):
-    from modules.settings_manager import setting_holen
-    if not bool(setting_holen("portal_unterschrift_aktiv")):
-        raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
     store = get_ds(_user)
-    get_mandant_or_404(name, store)
+    if not bool(tenant_setting(store, "portal_unterschrift_aktiv")):
+        raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
+    get_mandant_or_404(name, store, _user)
     u = store.portal_holen("unterschrift", uid) or {}
     if not u or u.get("mandant") != name:
         raise HTTPException(404, "Unterschrift nicht gefunden")
@@ -8369,11 +8895,10 @@ def portal_mandant_unterschrift_dokument(
     uid: str,
     _user: dict = Depends(get_current_user),
 ):
-    from modules.settings_manager import setting_holen
-    if not bool(setting_holen("portal_unterschrift_aktiv")):
-        raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
     store = get_ds(_user)
-    get_mandant_or_404(name, store)
+    if not bool(tenant_setting(store, "portal_unterschrift_aktiv")):
+        raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
+    get_mandant_or_404(name, store, _user)
     u = store.portal_holen("unterschrift", uid) or {}
     if not u or u.get("mandant") != name:
         raise HTTPException(404, "Unterschrift nicht gefunden")
@@ -8400,11 +8925,10 @@ def portal_unterschriften_alle(
     _user: dict = Depends(get_current_user),
 ):
     """Kanzlei sieht Status aller Unterschriften direkt im Haupt-System (JWT)."""
-    from modules.settings_manager import setting_holen
-    if not bool(setting_holen("portal_unterschrift_aktiv")):
+    store = get_ds(_user)
+    if not bool(tenant_setting(store, "portal_unterschrift_aktiv")):
         raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
 
-    store = get_ds(_user)
     alle = store.portal_liste("unterschrift")
     if mandant:
         alle = [u for u in alle if u.get("mandant") == mandant]
@@ -8431,9 +8955,8 @@ def portal_unterschriften_alle(
          summary="Portal-Status eines Mandanten (Uploads, Fragen, Unterschriften)")
 def portal_mandant_status(name: str, _user: dict = Depends(get_current_user)):
     """Zeigt im Mandant-Detail: was hat der Mandant im Portal getan?"""
-    from modules.settings_manager import setting_holen
     store = get_ds(_user)
-    get_mandant_or_404(name, store)
+    get_mandant_or_404(name, store, _user)
     uploads = [u for u in store.portal_liste("upload") if u.get("mandant") == name]
     signs = [u for u in store.portal_liste("unterschrift") if u.get("mandant") == name]
     bot_fragen = store.bot_fragen_liste()
@@ -8451,10 +8974,10 @@ def portal_mandant_status(name: str, _user: dict = Depends(get_current_user)):
         "bot_fragen_offen":          sum(1 for f in fragen if f["status"]=="offen"),
         "bot_fragen_beantwortet":    sum(1 for f in fragen if f["status"]=="beantwortet"),
         "portal_link_generieren":    f"POST /portal/admin/token/{name}",
-        "portal_aktiv": bool(setting_holen("portal_aktiv")),
-        "portal_unterschrift_aktiv": bool(setting_holen("portal_unterschrift_aktiv")),
-        "portal_upload_max_mb": int(setting_holen("portal_upload_max_mb") or 20),
-        "portal_projektnummer_pflicht": bool(setting_holen("portal_projektnummer_pflicht")),
+        "portal_aktiv": bool(tenant_setting(store, "portal_aktiv")),
+        "portal_unterschrift_aktiv": bool(tenant_setting(store, "portal_unterschrift_aktiv")),
+        "portal_upload_max_mb": int(tenant_setting(store, "portal_upload_max_mb", 20) or 20),
+        "portal_projektnummer_pflicht": bool(tenant_setting(store, "portal_projektnummer_pflicht")),
     }
 
 
@@ -8480,7 +9003,7 @@ class PortalAntwortBody(BaseModel):
          summary="Portal-Uploads eines Mandanten (Kanzlei-Ansicht)")
 def portal_mandant_uploads(name: str, _user: dict = Depends(get_current_user)):
     store = get_ds(_user)
-    get_mandant_or_404(name, store)
+    get_mandant_or_404(name, store, _user)
     uploads = sorted(
         store.portal_liste("upload", mandant=name),
         key=lambda x: x.get("hochgeladen_am", ""),
@@ -8499,7 +9022,7 @@ def portal_mandant_unterschrift_anfragen(
     from portal_api import erstelle_unterschrift_anfrage
 
     store = get_ds(_user)
-    get_mandant_or_404(name, store)
+    get_mandant_or_404(name, store, _user)
     result = erstelle_unterschrift_anfrage(
         store,
         name,
@@ -8522,7 +9045,7 @@ def kommunikation_portal_antwort(
     _user: dict = Depends(get_current_user),
 ):
     store = get_ds(_user)
-    get_mandant_or_404(name, store)
+    get_mandant_or_404(name, store, _user)
     text_voll = f"Betreff: {data.betreff.strip()}\n\n{data.text.strip()}"
     from modules import portal_chat as pc
 
@@ -8591,7 +9114,7 @@ def portal_mandant_chat_read(
     from modules import portal_chat as pc
 
     store = get_ds(_user)
-    get_mandant_or_404(name, store)
+    get_mandant_or_404(name, store, _user)
     n = pc.mark_chat_gelesen(store, name, "kanzlei")
     return ok_compat({
         "status": "ok",
@@ -8611,7 +9134,7 @@ def portal_mandant_chat(
     from modules import portal_chat as pc
 
     store = get_ds(_user)
-    get_mandant_or_404(name, store)
+    get_mandant_or_404(name, store, _user)
     pc.mark_chat_gelesen(store, name, "kanzlei")
     nachrichten = pc.list_chat(store, name, limit=limit, seit_id=seit)
     ungelesen = pc.zaehle_ungelesen(store, name, "kanzlei")
@@ -8633,7 +9156,7 @@ def portal_mandant_chat_senden(
     from modules import portal_chat as pc
 
     store = get_ds(_user)
-    get_mandant_or_404(name, store)
+    get_mandant_or_404(name, store, _user)
     msg = pc.chat_text_nachricht(store, name, data.text.strip(), "kanzlei")
     store.log_eintrag(f"PORTAL_CHAT_KANZLEI | {name}")
     return ok_compat({"status": "gesendet", "nachricht": msg})
@@ -8654,7 +9177,7 @@ def portal_mandant_chat_bearbeiten(
     from modules import portal_chat as pc
 
     store = get_ds(_user)
-    get_mandant_or_404(name, store)
+    get_mandant_or_404(name, store, _user)
     try:
         msg = pc.bearbeite_nachricht(store, name, msg_id, data.text.strip(), "kanzlei")
     except ValueError as e:
@@ -8672,7 +9195,7 @@ def portal_mandant_chat_loeschen(
     from modules import portal_chat as pc
 
     store = get_ds(_user)
-    get_mandant_or_404(name, store)
+    get_mandant_or_404(name, store, _user)
     try:
         pc.loesche_nachricht(store, name, msg_id, "kanzlei")
     except ValueError as e:
@@ -8690,7 +9213,7 @@ def portal_mandant_chat_aufgabe(
     from modules import portal_chat as pc
 
     store = get_ds(_user)
-    get_mandant_or_404(name, store)
+    get_mandant_or_404(name, store, _user)
     svc = AufgabenService(store)
     sichtbar = bool(data.portal_sichtbar)
     created = svc.create(
@@ -8726,7 +9249,7 @@ def portal_mandant_chat_dokument(
     from modules import portal_chat as pc
 
     store = get_ds(_user)
-    m = get_mandant_or_404(name, store)
+    m = get_mandant_or_404(name, store, _user)
     fehlende = list(m.get("fehlende_dokumente_liste") or [])
     if data.dokument_name not in fehlende:
         fehlende.append(data.dokument_name)
@@ -8755,7 +9278,7 @@ def portal_mandant_chat_unterschrift(
     from modules import portal_chat as pc
 
     store = get_ds(_user)
-    get_mandant_or_404(name, store)
+    get_mandant_or_404(name, store, _user)
     result = erstelle_unterschrift_anfrage(
         store,
         name,
@@ -8793,7 +9316,7 @@ def portal_mandant_chat_dok_upload(
     from portal_api import DokumentUpload, _verarbeite_upload
 
     store = get_ds(_user)
-    get_mandant_or_404(name, store)
+    get_mandant_or_404(name, store, _user)
     result = _verarbeite_upload(
         name,
         DokumentUpload(
@@ -8820,7 +9343,7 @@ def portal_mandant_chat_upload(
     from portal_api import DokumentUpload, _verarbeite_upload
 
     store = get_ds(_user)
-    get_mandant_or_404(name, store)
+    get_mandant_or_404(name, store, _user)
     result = _verarbeite_upload(
         name,
         DokumentUpload(
@@ -8864,7 +9387,7 @@ def _get_bot(store: DatenSpeicher):
 def bot_frage_stellen(data: BotFrageCreate, _user: dict = Depends(get_current_user)):
     """Stellt eine proaktive Frage im Mandantenportal."""
     store = get_ds(_user)
-    get_mandant_or_404(data.mandant, store)
+    get_mandant_or_404(data.mandant, store, _user)
     bot = _get_bot(store)
     return bot.frage_stellen(
         data.mandant, data.frage_text, data.frage_typ,
@@ -8945,7 +9468,7 @@ def _get_profit(store: DatenSpeicher):
 def profit_mandant(mandant: str, tage: int = Query(30, ge=1, le=365),
     _user: dict = Depends(get_current_user)):
     store = get_ds(_user)
-    get_mandant_or_404(mandant, store)
+    get_mandant_or_404(mandant, store, _user)
     return _get_profit(store).berechne_profit(mandant, tage)
 
 @app.get("/profit/ranking/alle", tags=["Profit"],
@@ -8962,7 +9485,7 @@ def profit_kanzlei(tage: int = Query(30), _user: dict = Depends(get_current_user
          summary="Mandant mit Branchendurchschnitt vergleichen")
 def profit_benchmarking(mandant: str, _user: dict = Depends(get_current_user)):
     store = get_ds(_user)
-    get_mandant_or_404(mandant, store)
+    get_mandant_or_404(mandant, store, _user)
     return _get_profit(store).branchen_benchmarking(mandant)
 
 
@@ -9018,7 +9541,7 @@ def _get_lohn(store: DatenSpeicher):
           summary="Neuen Mitarbeiter für Lohnabrechnung anlegen")
 def lohn_mitarbeiter_neu(data: LohnMitarbeiterCreate, _user: dict = Depends(get_current_user)):
     store = get_ds(_user)
-    get_mandant_or_404(data.mandant, store)
+    get_mandant_or_404(data.mandant, store, _user)
     return _get_lohn(store).mitarbeiter_anlegen(**data.dict())
 
 @app.get("/lohn/mitarbeiter", tags=["Lohn"], summary="Alle Mitarbeiter")
@@ -9044,10 +9567,10 @@ def lohn_mitarbeiter_update(
     store = get_ds(_user)
     patch = data.dict(exclude_unset=True)
     if patch.get("mandant"):
-        get_mandant_or_404(patch["mandant"], store)
+        get_mandant_or_404(patch["mandant"], store, _user)
     if patch.get("mandanten"):
         for m in patch["mandanten"]:
-            get_mandant_or_404(m, store)
+            get_mandant_or_404(m, store, _user)
     try:
         return _get_lohn(store).mitarbeiter_aktualisieren(ma_id, **patch)
     except ValueError as e:
@@ -9084,7 +9607,7 @@ def lohn_abrechnung(ma_id: str, monat: str, _user: dict = Depends(get_current_us
           summary="Alle Mitarbeiter eines Mandanten abrechnen")
 def lohn_batch(mandant: str, monat: str, _user: dict = Depends(get_current_user)):
     store = get_ds(_user)
-    get_mandant_or_404(mandant, store)
+    get_mandant_or_404(mandant, store, _user)
     abrechnungen = _get_lohn(store).batch_abrechnung(mandant, monat)
     return {"abrechnungen": abrechnungen, "anzahl": len(abrechnungen)}
 
@@ -9205,7 +9728,7 @@ async def steuer_verarbeiten(data: SteuerFallRequest, background_tasks: Backgrou
     Reduziert Aufwand von 10h auf 15 Minuten.
     """
     store = get_ds(_user)
-    get_mandant_or_404(data.mandant, store)
+    get_mandant_or_404(data.mandant, store, _user)
     from core.autonomer_steuerfall import AutononerSteuerfall
     autopilot = AutononerSteuerfall(store)
     api_key   = os.getenv("OPENAI_API_KEY","")
@@ -9222,7 +9745,7 @@ async def steuer_verarbeiten(data: SteuerFallRequest, background_tasks: Backgrou
          summary="Mandantendaten für Steuerfall sammeln (Vollständigkeits-Check)")
 def steuer_daten_sammeln(mandant: str, jahr: int, _user: dict = Depends(get_current_user)):
     store = get_ds(_user)
-    get_mandant_or_404(mandant, store)
+    get_mandant_or_404(mandant, store, _user)
     from core.autonomer_steuerfall import AutononerSteuerfall
     return AutononerSteuerfall(store).sammle_mandanten_daten(mandant, jahr)
 
@@ -9394,7 +9917,7 @@ def finanzierung_angebot(data: FinanzierungRequest, _user: dict = Depends(get_cu
     - Sofort-Maßnahmen je nach Dringlichkeit
     """
     store = get_ds(_user)
-    get_mandant_or_404(data.mandant, store)
+    get_mandant_or_404(data.mandant, store, _user)
     from core.finanzierung_service import FinanzierungService
     fs = FinanzierungService(store)
     return fs.erstelle_angebot(

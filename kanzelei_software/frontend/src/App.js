@@ -1,5 +1,5 @@
 // ============================================================
-// Kanzlei AI — Haupt-App
+// Kanzlei Automation — Haupt-App
 // Alle Bugs behoben:
 //   ✓ Dashboard zeigt echte KPIs + Heute + Empfehlungen
 //   ✓ Aufgaben-Tab: Erstellen funktioniert, alle Mandanten geladen
@@ -10,36 +10,34 @@
 // ============================================================
 
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
-import { BrowserRouter as Router, Routes, Route, Link, Navigate, useNavigate, useLocation } from "react-router-dom";
+import { BrowserRouter as Router, Routes, Route, Link, Navigate, useLocation } from "react-router-dom";
+import { AppToastProvider, useAppToast } from "./AppToast";
 
 import {
   getMandanten, getHeute, getEmpfehlungen, getKpis,
-  addMandantAPI, updateMandantAPI, deleteMandantAPI,
+  addMandantAPI, updateMandantAPI, deleteMandantAPI, getMandantenPapierkorb, restoreMandantAPI,
   addAufgabeAPI, toggleAufgabeAPI, updateAufgabeAPI, deleteAufgabeAPI,
   getSaasReadiness, getBillingUsage,
   createStripeCheckoutSession,
   trackBillingFunnelEvent,
   apiGet,
   getSettings,
+  unwrapSettingsPayload,
   clearAuthStorage,
   readAuthed,
   extrahiereAufgabenArray,
   extrahiereHeuteEintraege,
   istAufgabeErledigt,
-  tageBisFristClient,
   aufgabeIstUeberfaellig,
   zaehleUeberfaelligeAufgaben,
   getPortalChatUnread,
   getHeuteOps,
-  getPilotScorecard,
 } from "./api";
 
 import Analytics         from "./pages/Analytics";
 import Settings          from "./pages/Settings";
 import KIAssistent       from "./pages/KIAssistent";
-import BelegScanner      from "./pages/BelegScanner";
 import Rechnungen        from "./pages/Rechnungen";
-import DokumentScanner   from "./pages/DokumentScanner";
 import ProfitMonitor     from "./pages/ProfitMonitor";
 import WorkflowBaukasten from "./pages/WorkflowBaukasten";
 import SteuerAutopilot   from "./pages/SteuerAutopilot";
@@ -56,7 +54,13 @@ import MandantDetail     from "./pages/MandantDetail";
 import KiEmailComposer   from "./components/KiEmailComposer";
 import PortalChatSuite from "./components/PortalChatSuite";
 import { hasRoleReal, getEffectiveRole } from "./components/PermissionGate";
-import { hasNavTab, readNavExtended, writeNavExtended } from "./navAccess";
+import { hasNavTab, readNavExtended, writeNavExtended, sidebarSections, NAV_TAB_LABELS, NAV_TAB_ICONS, PRODUCT_TAGLINE, PRODUCT_NAME, featureAllowed } from "./navAccess";
+import { getRealRole } from "./components/PermissionGate";
+import ProduktLanding from "./pages/ProduktLanding";
+import FocusDashboard from "./pages/FocusDashboard";
+import DokumenteHub from "./pages/DokumenteHub";
+import KiAskDrawer from "./components/KiAskDrawer";
+import GlobalSearch from "./components/GlobalSearch";
 import { useContentLayoutWidth, readContentLayoutWidth } from "./useContentLayoutWidth";
 import ViewAsControls from "./components/ViewAsControls";
 import { ThemeProvider, ThemeQuickSwitch } from "./theme";
@@ -81,6 +85,8 @@ function normalisiereMandanten(raw) {
 
 function normalisiereKpis(raw) {
   if (Array.isArray(raw)) return raw;
+  if (raw?.eintraege && Array.isArray(raw.eintraege)) return raw.eintraege;
+  if (raw?.data?.eintraege && Array.isArray(raw.data.eintraege)) return raw.data.eintraege;
   if (raw?.data && Array.isArray(raw.data)) return raw.data;
   return [];
 }
@@ -102,6 +108,11 @@ function mergeMandantenMitKpis(mandantenRows, kpiRows) {
       aufgaben_offen: 0,
       aufgaben_ueberfaellig: 0,
       tage_ohne_antwort: 0,
+      health_score: null,
+      health_ampel: "gruen",
+      health_label: "Grün",
+      health_gruende: [],
+      betreuer_email: m?.betreuer_email || "",
     });
   });
   (kpiRows || []).forEach((k) => {
@@ -119,6 +130,10 @@ function mergeMandantenMitKpis(mandantenRows, kpiRows) {
       aufgaben_offen: 0,
       aufgaben_ueberfaellig: 0,
       tage_ohne_antwort: 0,
+      health_score: null,
+      health_ampel: "gruen",
+      health_label: "Grün",
+      health_gruende: [],
     };
     byName.set(name, {
       ...prev,
@@ -131,6 +146,7 @@ function mergeMandantenMitKpis(mandantenRows, kpiRows) {
       aufgaben_offen: Number(k?.aufgaben_offen ?? prev.aufgaben_offen ?? 0),
       aufgaben_ueberfaellig: Number(k?.aufgaben_ueberfaellig ?? prev.aufgaben_ueberfaellig ?? 0),
       tage_ohne_antwort: Number(k?.tage_ohne_antwort ?? prev.tage_ohne_antwort ?? 0),
+      betreuer_email: String(k?.betreuer_email ?? prev.betreuer_email ?? ""),
     });
   });
 
@@ -153,7 +169,7 @@ function mergeMandantenMitKpis(mandantenRows, kpiRows) {
 // ─── Google Fonts + CSS Variablen ───────────────────────────
 const FontLoader = () => (
   <style>{`
-    @import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@300;400;500;600&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -180,8 +196,9 @@ const FontLoader = () => (
       --text:       #e8eaf0;
       --text2:      #8b91a0;
       --text3:      #555d6e;
-      --accent:     #c8a96e;
-      --on-accent:  #1a1200;
+      --accent:     #2B6CB0;
+      --brand:      #1E3A5F;
+      --on-accent:  #ffffff;
       --on-blue:    #f4f6fb;
       --red:        #e05555;
       --orange:     #e08c45;
@@ -190,8 +207,8 @@ const FontLoader = () => (
       --purple:     #9b72e8;
       --radius:     12px;
       --radius-lg:  18px;
-      --font-head:  'DM Serif Display', Georgia, serif;
-      --font-body:  'DM Sans', system-ui, sans-serif;
+      --font-head:  'Inter', system-ui, sans-serif;
+      --font-body:  'Inter', system-ui, sans-serif;
       --transition: 0.18s ease;
       --header-bg:  rgba(11,13,17,0.92);
       --overlay-scrim: color-mix(in srgb, black 62%, transparent);
@@ -200,16 +217,17 @@ const FontLoader = () => (
     }
 
     :root[data-theme="light"] {
-      --bg:         #f4f1ea;
-      --bg2:        #ebe6dc;
-      --bg3:        #e0d9cc;
+      --bg:         #F8F9FA;
+      --bg2:        #ffffff;
+      --bg3:        #F4F6F8;
       --border:     rgba(0,0,0,0.08);
       --border2:    rgba(0,0,0,0.12);
       --text:       #1a1d24;
       --text2:      #4b5260;
       --text3:      #7a8292;
-      --accent:     #9a7b3c;
-      --on-accent:  #1a1200;
+      --accent:     #1F4E79;
+      --brand:      #1E3A5F;
+      --on-accent:  #ffffff;
       --on-blue:    #f4f6fb;
       --red:        #c43d3d;
       --orange:     #b86a24;
@@ -352,34 +370,6 @@ const StatusDot = ({ status }) => {
 };
 
 // ═══════════════════════════════════════════════════════════
-// TOAST NOTIFICATIONS
-// ═══════════════════════════════════════════════════════════
-
-const ToastContainer = ({ toasts }) => (
-  <div style={{ position:"fixed", top:20, right:12, zIndex:9999,
-                display:"flex", flexDirection:"column", gap:10, alignItems:"flex-end",
-                maxWidth:"calc(100vw - 24px)", pointerEvents:"none" }}>
-    {toasts.map(t => {
-      const colors = { success:"var(--green)", error:"var(--red)", info:"var(--blue)", warn:"var(--orange)" };
-      const c = colors[t.type] || "var(--accent)";
-      return (
-        <div key={t.id} style={{
-          background:"var(--bg3)", border:`1px solid color-mix(in srgb, ${c} 32%, transparent)`,
-          borderLeft:`3px solid ${c}`, color:"var(--text)",
-          borderRadius:"var(--radius)", padding:"12px 16px",
-          width:"min(340px, calc(100vw - 24px))", minWidth:0, maxWidth:"100%",
-          fontSize:13, fontWeight:500,
-          pointerEvents:"auto",
-          animation:"slideIn 0.25s ease both",
-        }}>
-          {t.text}
-        </div>
-      );
-    })}
-  </div>
-);
-
-// ═══════════════════════════════════════════════════════════
 // SIDEBAR
 // ═══════════════════════════════════════════════════════════
 
@@ -413,7 +403,7 @@ const MOBILE_TAB_TITLE = {
   portalchat: "Mandanten-Portal",
   aufgaben: "Aufgaben",
   ki: "KI-Assistent",
-  profit: "Profit",
+  profit: "Honorar",
   steuerbot: "Steuer-Autopilot",
   dokumente: "Dokumente",
   belege: "Belege",
@@ -455,25 +445,56 @@ const Sidebar = ({
     (kpis || []).reduce((s, k) => s + Number(k.aufgaben_ueberfaellig || 0), 0),
   );
   const normalizedRole = (role || "").toLowerCase();
-  /** Auf dem Desktop: bei sehr schmaler Leiste Text kleiner statt komplett unsichtbar */
   const isCompact = !isMobile && width < 210;
-  const navItems = [
-    { id:"dashboard",    label:"Dashboard",        icon:"⬛" },
-    { id:"mandanten",    label:"Mandanten",        icon:"◉",  badge:kpis.length },
-    { id:"portalchat",   label:"Mandanten-Portal", icon:"💬", badge: portalUnreadTotal > 0 ? portalUnreadTotal : null },
-    { id:"aufgaben",     label:"Aufgaben",          icon:"▦",  badge: ueberfaelligAufgaben > 0 ? ueberfaelligAufgaben : null },
-    { id:"ki",           label:"KI-Assistent",     icon:"✦" },
-    { id:"profit",       label:"Profit Monitor",   icon:"📈" },
-    { id:"steuerbot",    label:"Steuer-Autopilot", icon:"🤖" },
-    { id:"dokumente",    label:"Dokument-Scanner", icon:"📂" },
-    { id:"belege",       label:"Belegscanner",     icon:"📎" },
-    { id:"rechnungen",   label:"Rechnungen",       icon:"🧾" },
-    { id:"automation",   label:"Automation",       icon:"⚙" },
-    { id:"empfehlungen", label:"KI-Insights",      icon:"◈" },
-    { id:"analytics",    label:"Analytics",        icon:"◎" },
-    { id:"neu",          label:"Neu anlegen",      icon:"＋" },
-    { id:"settings",     label:"Einstellungen",    icon:"🔧" },
-  ].filter((item) => hasNavTab(normalizedRole, item.id, navSettings, { extended: navExtended }));
+  const sections = sidebarSections(normalizedRole, navSettings, { extended: navExtended });
+
+  const badgeFor = (id) => {
+    if (id === "mandanten") return kpis.length || null;
+    if (id === "dashboard") return ueberfaelligAufgaben > 0 ? ueberfaelligAufgaben : (kritisch > 0 ? kritisch : null);
+    if (id === "portalchat") return portalUnreadTotal > 0 ? portalUnreadTotal : null;
+    if (id === "aufgaben") return ueberfaelligAufgaben > 0 ? ueberfaelligAufgaben : null;
+    return null;
+  };
+
+  const renderNavBtn = (id) => {
+    const active = activeTab === id;
+    const label = NAV_TAB_LABELS[id] || id;
+    const icon = NAV_TAB_ICONS[id] || "•";
+    const badge = badgeFor(id);
+    return (
+      <button
+        key={id}
+        type="button"
+        title={label}
+        aria-current={active ? "page" : undefined}
+        onClick={() => goTab(id)}
+        style={{
+          width:"100%", display:"flex", alignItems:"center", gap:10,
+          padding:isMobile ? "12px 12px" : "10px 12px",
+          minHeight: isMobile ? 48 : undefined,
+          borderRadius:"var(--radius)", border:"none",
+          background:active?"var(--bg3)":"transparent",
+          color:active?"var(--accent)":"var(--text2)",
+          fontWeight:active?600:400,
+          fontSize: isMobile ? 15 : isCompact ? 13 : 14,
+          cursor:"pointer", marginBottom:2,
+          transition:"all var(--transition)",
+          borderLeft:active?`3px solid var(--accent)`:"3px solid transparent",
+          touchAction: "manipulation",
+        }}
+      >
+        <span style={{ fontSize: isMobile ? 18 : 16, flexShrink: 0 }}>{icon}</span>
+        <span style={{ flex:1, textAlign:"left", minWidth: 0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace: isCompact && !isMobile ? "normal" : "nowrap" }}>
+          {label}
+        </span>
+        {badge ? (
+          <Badge color={id==="aufgaben"?"var(--red)":"var(--accent)"} style={{ fontSize:10, flexShrink: 0 }}>
+            {badge}
+          </Badge>
+        ) : null}
+      </button>
+    );
+  };
 
   const goTab = (id) => {
     setActiveTab(id);
@@ -510,10 +531,10 @@ const Sidebar = ({
           <div style={{ fontFamily:"var(--font-head)", fontSize:isMobile ? 20 : 22,
                         color:"var(--accent)", letterSpacing:"-0.01em", lineHeight:1.2 }}>
             Kanzlei<br />
-            <span style={{ color:"var(--text)", fontSize:isMobile ? 17 : 18 }}>AI</span>
+            <span style={{ color:"var(--text)", fontSize:isMobile ? 17 : 18 }}>Automation</span>
           </div>
           <div style={{ fontSize:11, color:"var(--text3)", marginTop:4, display:(isCompact && !isMobile)?"none":"block" }}>
-            Steuerberater Suite
+            {PRODUCT_TAGLINE.slice(0, 48)}…
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
@@ -588,56 +609,16 @@ const Sidebar = ({
         minHeight: 0,
       }}>
         <div style={{ flexShrink: activeTab === "portalchat" ? 0 : undefined }}>
-        {navItems.map(item => {
-          const active = activeTab === item.id;
-          return (
-            <button
-              key={item.id}
-              type="button"
-              title={item.label}
-              aria-current={active ? "page" : undefined}
-              onClick={() => goTab(item.id)}
-              style={{
-                width:"100%", display:"flex", alignItems:"center", gap:10,
-                padding:isMobile ? "12px 12px" : "10px 12px",
-                minHeight: isMobile ? 48 : undefined,
-                borderRadius:"var(--radius)", border:"none",
-                background:active?"var(--bg3)":"transparent",
-                color:active?"var(--accent)":"var(--text2)",
-                fontWeight:active?600:400,
-                fontSize: isMobile ? 15 : isCompact ? 13 : 14,
-                cursor:"pointer", marginBottom:2,
-                transition:"all var(--transition)",
-                borderLeft:active?`3px solid var(--accent)`:"3px solid transparent",
-                touchAction: "manipulation",
-              }}
-            >
-              <span style={{ fontSize: isMobile ? 18 : 16, flexShrink: 0 }}>{item.icon}</span>
-              <span style={{
-                flex:1, textAlign:"left", minWidth: 0,
-                overflow:"hidden",
-                whiteSpace: isCompact && !isMobile ? "normal" : "nowrap",
-                lineHeight: 1.25,
-                ...(isCompact && !isMobile
-                  ? {
-                    display: "-webkit-box",
-                    WebkitLineClamp: 2,
-                    WebkitBoxOrient: "vertical",
-                    wordBreak: "break-word",
-                  }
-                  : {
-                    textOverflow: "ellipsis",
-                  }),
-              }}>{item.label}</span>
-              {item.badge ? (
-                <Badge color={item.id==="aufgaben"&&ueberfaelligAufgaben>0?"var(--red)":"var(--accent)"}
-                       style={{ fontSize:10, flexShrink: 0 }}>
-                  {item.badge}
-                </Badge>
-              ) : null}
-            </button>
-          );
-        })}
+        {sections.main.map(renderNavBtn)}
+        {sections.more.length > 0 ? (
+          <>
+            <div style={{ fontSize: 10, color: "var(--text3)", textTransform: "uppercase", letterSpacing: "0.08em", padding: "12px 12px 6px", marginTop: 8 }}>
+              Mehr
+            </div>
+            {sections.more.map(renderNavBtn)}
+          </>
+        ) : null}
+        {sections.admin.map(renderNavBtn)}
         </div>
       </div>
 
@@ -650,7 +631,7 @@ const Sidebar = ({
             writeNavExtended(next);
             onNavExtendedChange?.(next);
           }}
-          title={navExtended ? "Nur Kern-Module in der Sidebar" : "Alle Module anzeigen"}
+          title={navExtended ? "Weniger Module anzeigen" : "Analytics, Portal-Chat & mehr anzeigen"}
           style={{
             width: "100%",
             display: "flex",
@@ -669,7 +650,7 @@ const Sidebar = ({
             fontFamily: "var(--font-body)",
           }}
         >
-          <span>{navExtended ? "◆ Alle Module" : "◇ Erweiterte Module"}</span>
+          <span>{navExtended ? "◆ Mehr ausblenden" : "◇ Mehr anzeigen"}</span>
           <span style={{ fontSize: 10, color: "var(--text3)" }}>{navExtended ? "an" : "aus"}</span>
         </button>
       </div>
@@ -685,7 +666,7 @@ const Sidebar = ({
               color: "var(--accent)", fontSize: 13, fontWeight: 600,
             }}
           >
-            {isCompact && !isMobile ? "Team" : "Team & Einladungen"}
+            {isCompact && !isMobile ? "Team" : "Team verwalten"}
           </Link>
           <Link
             to="/profile"
@@ -923,14 +904,38 @@ const EmpfehlungenPanel = ({ empfehlungen, onEmail }) => {
 // MANDANTEN TABELLE
 // ═══════════════════════════════════════════════════════════
 
-const MandantenTabelle = ({ kpis, onSelect, onDelete, onEmail, selectedName, isMobile = false }) => {
+const MandantenTabelle = ({ kpis, onSelect, onDelete, onEmail, selectedName, isMobile = false, canDelete = false }) => {
   const [suche, setSuche] = useState("");
-  const [sort,  setSort]  = useState("score");
+  const [sort,  setSort]  = useState("gesundheit");
+  const [betreuerFilter, setBetreuerFilter] = useState("");
+
+  const myEmail = (typeof window !== "undefined" && (localStorage.getItem("kanzlei_user") || "")).trim().toLowerCase();
+
+  const betreuerOptionen = useMemo(() => {
+    const emails = new Set();
+    (kpis || []).forEach((k) => {
+      const b = String(k?.betreuer_email || "").trim().toLowerCase();
+      if (b && b.includes("@")) emails.add(b);
+    });
+    return Array.from(emails).sort();
+  }, [kpis]);
 
   const gefiltert = kpis
-    .filter(k => !suche || (k.mandant || "").toLowerCase().includes(suche.toLowerCase()))
+    .filter((k) => {
+      if (suche && !(k.mandant || "").toLowerCase().includes(suche.toLowerCase())) return false;
+      const b = String(k?.betreuer_email || "").trim().toLowerCase();
+      if (betreuerFilter === "__mine__") return !b || (myEmail && b === myEmail);
+      if (betreuerFilter === "__none__") return !b;
+      if (betreuerFilter) return b === betreuerFilter;
+      return true;
+    })
     .slice()
     .sort((a, b) => {
+      if (sort === "gesundheit") {
+        const ha = a.health_score ?? (a.status === "KRITISCH" ? 0 : 50);
+        const hb = b.health_score ?? (b.status === "KRITISCH" ? 0 : 50);
+        return ha - hb;
+      }
       if (sort === "score")  return (b.score||0) - (a.score||0);
       if (sort === "umsatz") return (b.umsatz||0) - (a.umsatz||0);
       return (a.mandant||"").localeCompare(b.mandant||"");
@@ -944,8 +949,23 @@ const MandantenTabelle = ({ kpis, onSelect, onDelete, onEmail, selectedName, isM
           <Input placeholder="Mandanten suchen..." value={suche}
                  onChange={setSuche} style={{ maxWidth:isMobile ? "100%" : 260, width:"100%" }} />
         </div>
+        <select
+          value={betreuerFilter}
+          onChange={(e) => setBetreuerFilter(e.target.value)}
+          style={{
+            padding:"8px 10px", borderRadius:8, border:"1px solid var(--border)",
+            background:"var(--bg2)", color:"var(--text2)", fontSize:12, minWidth: isMobile ? "100%" : 180,
+          }}
+        >
+          <option value="">Alle Betreuer</option>
+          {myEmail ? <option value="__mine__">Meine Mandanten</option> : null}
+          <option value="__none__">Ohne Betreuer</option>
+          {betreuerOptionen.map((em) => (
+            <option key={em} value={em}>{em}</option>
+          ))}
+        </select>
         <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
-          {[["score","Priorität"],["umsatz","Umsatz"],["name","Name"]].map(([s,l]) => (
+          {[["gesundheit","Gesundheit"],["umsatz","Aufwand/Umsatz"],["name","Name"]].map(([s,l]) => (
             <Btn key={s} variant={sort===s?"subtle":"ghost"} size="xs"
                  onClick={() => setSort(s)}>{l}</Btn>
           ))}
@@ -956,7 +976,7 @@ const MandantenTabelle = ({ kpis, onSelect, onDelete, onEmail, selectedName, isM
         <table style={{ width:"100%", borderCollapse:"collapse" }}>
           <thead>
             <tr style={{ borderBottom:"1px solid var(--border)" }}>
-              {["Status","Mandant","Umsatz","Score","Aufgaben","Tage o.A.",""].map(h => (
+              {["Status","Mandant","Gesundheit","Fehlend","Aufgaben","Tage o.A.",""].map(h => (
                 <th key={h} style={{ padding:"10px 16px", textAlign:"left",
                                      fontSize:11, fontWeight:600, color:"var(--text3)",
                                      textTransform:"uppercase", letterSpacing:"0.07em" }}>
@@ -976,9 +996,13 @@ const MandantenTabelle = ({ kpis, onSelect, onDelete, onEmail, selectedName, isM
             )}
             {gefiltert.map((k, i) => {
               const isSelected = k.mandant === selectedName;
-              const sc = { KRITISCH:"var(--red)", WICHTIG:"var(--orange)", NORMAL:"var(--green)" }[k.status] || "var(--text3)";
+              const ampel = k.health_ampel || (k.status === "KRITISCH" ? "rot" : k.status === "WICHTIG" ? "gelb" : "gruen");
+              const ampelColor = ampel === "rot" ? "var(--red)" : ampel === "gelb" ? "var(--orange)" : "var(--green)";
+              const ampelLabel = k.health_label || (ampel === "rot" ? "Rot" : ampel === "gelb" ? "Gelb" : "Grün");
+              const gruende = (k.health_gruende || []).join(" · ");
               return (
                 <tr key={k.mandant} onClick={() => onSelect(k.mandant)}
+                  title={gruende || undefined}
                   style={{
                     borderBottom:"1px solid var(--border)",
                     background:isSelected?"var(--bg3)":i%2===0?"transparent":"color-mix(in srgb, var(--text) 4%, var(--bg))",
@@ -987,8 +1011,8 @@ const MandantenTabelle = ({ kpis, onSelect, onDelete, onEmail, selectedName, isM
                   }}>
                   <td style={{ padding:"13px 16px" }}>
                     <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-                      <StatusDot status={k.status} />
-                      <Badge color={sc} style={{ fontSize:10 }}>{k.status}</Badge>
+                      <span style={{ width:10, height:10, borderRadius:"50%", background:ampelColor, flexShrink:0 }} />
+                      <Badge color={ampelColor} style={{ fontSize:10 }}>{ampelLabel}</Badge>
                     </div>
                   </td>
                   <td style={{ padding:"13px 16px" }}>
@@ -1000,22 +1024,25 @@ const MandantenTabelle = ({ kpis, onSelect, onDelete, onEmail, selectedName, isM
                     {k.email && (
                       <div style={{ fontSize:11, color:"var(--text3)", marginTop:2 }}>{k.email}</div>
                     )}
-                  </td>
-                  <td style={{ padding:"13px 16px", color:"var(--accent)", fontWeight:600 }}>
-                    €{(k.umsatz||0).toLocaleString("de")}
+                    {k.betreuer_email ? (
+                      <div style={{ fontSize:10, color:"var(--text3)", marginTop:2 }}>
+                        Betreuer: {k.betreuer_email}
+                      </div>
+                    ) : null}
+                    {gruende ? (
+                      <div style={{ fontSize:11, color:"var(--text3)", marginTop:4, maxWidth:320 }}>{gruende}</div>
+                    ) : null}
                   </td>
                   <td style={{ padding:"13px 16px" }}>
-                    <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-                      <div style={{ width:60, height:4, borderRadius:2,
-                                    background:"var(--bg3)", overflow:"hidden" }}>
-                        <div style={{ width:`${Math.min(100,(k.score||0)/20000*100)}%`,
-                                      height:"100%", background:sc, borderRadius:2,
-                                      transition:"width 0.5s ease" }} />
-                      </div>
-                      <span style={{ fontSize:12, color:"var(--text2)" }}>
-                        {Math.round(k.score||0).toLocaleString("de")}
-                      </span>
-                    </div>
+                    <span style={{ fontWeight:700, color:ampelColor }}>{k.health_score ?? "—"}</span>
+                    <span style={{ fontSize:11, color:"var(--text3)" }}>/100</span>
+                  </td>
+                  <td style={{ padding:"13px 16px" }}>
+                    {(k.fehlende_dokumente || 0) > 0 ? (
+                      <Badge color="var(--orange)">{k.fehlende_dokumente} fehlt</Badge>
+                    ) : (
+                      <span style={{ color:"var(--green)", fontSize:12 }}>✓</span>
+                    )}
                   </td>
                   <td style={{ padding:"13px 16px" }}>
                     {k.aufgaben_ueberfaellig > 0 ? (
@@ -1037,8 +1064,10 @@ const MandantenTabelle = ({ kpis, onSelect, onDelete, onEmail, selectedName, isM
                         <Btn size="xs" variant="ghost" title="Email senden"
                              onClick={() => onEmail(k.mandant)}>✉</Btn>
                       )}
-                      <Btn size="xs" variant="danger" title="Löschen"
-                           onClick={() => onDelete(k.mandant)}>✕</Btn>
+                      {canDelete && onDelete ? (
+                        <Btn size="xs" variant="danger" title="In Papierkorb"
+                             onClick={() => onDelete(k.mandant)}>✕</Btn>
+                      ) : null}
                     </div>
                   </td>
                 </tr>
@@ -1064,6 +1093,7 @@ const MandantFormPanel = ({ initialData, onSubmit, onCancel, loading, onDirtyCha
     telefon: initialData?.telefon || "",
     branche: initialData?.branche || "",
     notizen: initialData?.notizen || "",
+    betreuer_email: initialData?.betreuer_email || "",
   }), [initialData]);
   const [form, setForm] = useState(initialForm);
   const [error, setError] = useState("");
@@ -1076,6 +1106,7 @@ const MandantFormPanel = ({ initialData, onSubmit, onCancel, loading, onDirtyCha
       telefon: initialData?.telefon || "",
       branche: initialData?.branche || "",
       notizen: initialData?.notizen || "",
+      betreuer_email: initialData?.betreuer_email || "",
     };
     setForm(next);
     setError("");
@@ -1089,7 +1120,8 @@ const MandantFormPanel = ({ initialData, onSubmit, onCancel, loading, onDirtyCha
       form.umsatz !== initialForm.umsatz ||
       form.telefon !== initialForm.telefon ||
       form.branche !== initialForm.branche ||
-      form.notizen !== initialForm.notizen;
+      form.notizen !== initialForm.notizen ||
+      form.betreuer_email !== initialForm.betreuer_email;
     onDirtyChange(dirty);
   }, [form, initialForm, onDirtyChange]);
 
@@ -1114,6 +1146,7 @@ const MandantFormPanel = ({ initialData, onSubmit, onCancel, loading, onDirtyCha
         telefon: form.telefon.trim(),
         branche: form.branche.trim(),
         notizen: form.notizen.trim(),
+        betreuer_email: form.betreuer_email.trim(),
       });
     } catch (e) { setError(e.message || "Fehler beim Speichern"); }
   };
@@ -1158,6 +1191,16 @@ const MandantFormPanel = ({ initialData, onSubmit, onCancel, loading, onDirtyCha
         ))}
       </div>
 
+      <div style={{ marginBottom:12 }}>
+        <div style={{ fontSize:11, color:"var(--text3)", marginBottom:5,
+                      textTransform:"uppercase", letterSpacing:"0.06em" }}>Zuständig (E-Mail)</div>
+        <Input placeholder="mitarbeiter@kanzlei.de — leer = alle sehen" value={form.betreuer_email}
+               onChange={v => set("betreuer_email", v)} />
+        <div style={{ fontSize:11, color:"var(--text3)", marginTop:4 }}>
+          Mitarbeiter sehen nur Mandanten mit ihrer E-Mail oder ohne Zuweisung.
+        </div>
+      </div>
+
       <div style={{ marginBottom:20 }}>
         <div style={{ fontSize:11, color:"var(--text3)", marginBottom:5,
                       textTransform:"uppercase", letterSpacing:"0.06em" }}>Notizen</div>
@@ -1194,7 +1237,7 @@ const EmailModal = ({ name, mandantEmail = "", onClose }) => (
                     display:"flex", justifyContent:"space-between", alignItems:"center" }}>
         <div>
           <div style={{ fontFamily:"var(--font-head)", fontSize:18, color:"var(--accent)" }}>
-            KI-E-Mail an Mandant
+            Erinnerung senden
           </div>
           <div style={{ fontSize:12, color:"var(--text3)", marginTop:2 }}>{name}</div>
         </div>
@@ -1771,609 +1814,8 @@ function AufgabenSeite({ kpis, heute, onRefresh, isMobile = false }) {
   );
 }
 
-// ═══════════════════════════════════════════════════════════
-// RISIKO-DASHBOARD — Das Killer Feature
-// Mandanten-Risiko- & Umsatz-AI auf einen Blick
-// ═══════════════════════════════════════════════════════════
-
-function DashboardHeuteOpsBar({ ops, onTab, compact }) {
-  if (!ops?.zeile) return null;
-  const bot = Number(ops.bot_fragen_offen || 0);
-  const docs = Number(ops.fehlende_belege || 0);
-  const ueber = Number(ops.aufgaben_ueberfaellig || 0);
-  const heuteF = Number(ops.aufgaben_heute || 0);
-  const chips = [
-    { n: bot, label: "Bot offen", tab: "automation" },
-    { n: docs, label: "Belege", tab: "mandanten" },
-    { n: ueber, label: "überfällig", tab: "aufgaben" },
-    { n: heuteF, label: "heute", tab: "aufgaben" },
-  ].filter((c) => c.n > 0);
-
-  return (
-    <Card style={{ padding: compact ? "12px 14px" : "14px 18px", marginBottom: 0 }}>
-      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10 }}>
-        <div style={{ fontSize: 11, color: "var(--text3)", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 600 }}>
-          Heute
-        </div>
-        <div style={{ flex: "1 1 200px", fontSize: 13, color: "var(--text)", fontWeight: 500, minWidth: 0 }}>
-          {ops.zeile}
-        </div>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-          {chips.map((c) => (
-            <button
-              key={c.label}
-              type="button"
-              onClick={() => onTab?.(c.tab)}
-              style={{
-                border: "1px solid var(--border2)",
-                background: "var(--bg3)",
-                borderRadius: 8,
-                padding: "4px 10px",
-                fontSize: 12,
-                color: "var(--accent)",
-                cursor: "pointer",
-                fontFamily: "var(--font-body)",
-              }}
-            >
-              {c.n} {c.label}
-            </button>
-          ))}
-        </div>
-      </div>
-    </Card>
-  );
-}
-
-function DashboardPilotScorecard({ card, onTab }) {
-  if (!card) return null;
-  const woche = card.pilot_woche || 1;
-  const delta = card.delta || {};
-  const akt = card.aktuell || {};
-
-  return (
-    <Card style={{ padding: "14px 18px", border: "1px solid color-mix(in srgb, var(--purple) 28%, transparent)" }}>
-      <div style={{ fontSize: 10, color: "var(--text3)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>
-        Pilot Woche {woche}
-      </div>
-      <div style={{ fontFamily: "var(--font-head)", fontSize: 22, color: "var(--purple)", marginBottom: 8 }}>
-        +{delta.fragen_beantwortet ?? 0} Antworten
-      </div>
-      <div style={{ fontSize: 12, color: "var(--text2)", lineHeight: 1.55, marginBottom: 10 }}>
-        {delta.fragen_gestellt ?? 0} Fragen gestellt · ca. {delta.gesparte_stunden ?? 0} h gespart
-        <br />
-        <span style={{ color: "var(--text3)" }}>
-          Gesamt: {akt.fragen_beantwortet ?? 0}/{akt.fragen_gesamt ?? 0} beantwortet
-        </span>
-      </div>
-      <Btn size="xs" variant="ghost" onClick={() => onTab?.("automation")}>
-        Bot & Statistik
-      </Btn>
-    </Card>
-  );
-}
-
-function RisikoDashboard({ kpis, heute, onEmail, onTab, onRefresh, isMobile = false }) {
-  const VIP_THRESHOLD = 500000;
-  const [heuteOps, setHeuteOps] = useState(null);
-  const [pilotCard, setPilotCard] = useState(null);
-  const [filter,   setFilter]   = useState("alle");    // alle | kritisch | vip
-  const [sortBy,   setSortBy]   = useState("risiko");  // risiko | umsatz | name
-  const [sending,  setSending]  = useState(null);
-  const [taskLoadingId, setTaskLoadingId] = useState("");
-  const [toast,    setToast]    = useState("");
-  const [heuteEditItem, setHeuteEditItem] = useState(null);
-
-  /** echte sichtbare Breite — unabhängig von „Desktop-Website“ / großem layoutViewport */
-  const lw = useContentLayoutWidth();
-  const padX = lw < 960 ? "max(12px, env(safe-area-inset-left))" : 36;
-  const padR = lw < 960 ? "max(12px, env(safe-area-inset-right))" : 36;
-  const stackHeader = lw < 680;
-  const kpiGrid =
-    lw < 460 ? "minmax(0, 1fr)"
-      : lw < 800 ? "repeat(2, minmax(0, 1fr))"
-        : "repeat(4, minmax(0, 1fr))";
-  const cardPadTight = lw < 560;
-  const rowActionsBelow = lw < 620;
-  const heuteCompact = lw < 760 || isMobile;
-  /** Nur Abstand zwischen Blöcken — Karten/Pills unverändert */
-  const gapTitleToKpi = lw < 520 ? 36 : lw < 800 ? 48 : 56;
-  const gapKpiToFilter = lw < 520 ? 28 : lw < 800 ? 36 : 44;
-  /** Filter (Alle/Kritisch/VIP) → Mandanten-Karte: knapp, aber sichtbar */
-  const gapFilterToList = lw < 520 ? 10 : lw < 800 ? 12 : 14;
-  const gapSection = lw < 520 ? 24 : lw < 800 ? 32 : 40;
-  const gapListCards = lw < 520 ? 14 : lw < 800 ? 16 : 18;
-
-  const mandantenNamenDashboard = useMemo(() => {
-    const s = new Set();
-    (kpis || []).forEach((k) => {
-      if (k?.mandant) s.add(k.mandant);
-    });
-    return [...s].sort((a, b) => a.localeCompare(b));
-  }, [kpis]);
-
-  const showToast = (t) => { setToast(t); setTimeout(() => setToast(""), 3500); };
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const [ops, pilot] = await Promise.all([
-          getHeuteOps().catch(() => null),
-          getPilotScorecard().catch(() => null),
-        ]);
-        if (!cancelled) {
-          setHeuteOps(ops);
-          setPilotCard(pilot);
-        }
-      } catch {
-        /* optional widgets */
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [kpis?.length, heute?.length]);
-
-  // Mandanten filtern + sortieren
-  const liste = [...kpis]
-    .filter(k => {
-      if (filter === "kritisch") return k.status === "KRITISCH" || k.status === "WICHTIG";
-      if (filter === "vip")      return k.ist_vip || (k.umsatz || 0) >= VIP_THRESHOLD;
-      return true;
-    })
-    .sort((a, b) => {
-      if (sortBy === "risiko")  return (b.risiko_score || b.score || 0) - (a.risiko_score || a.score || 0);
-      if (sortBy === "umsatz")  return (b.umsatz || 0) - (a.umsatz || 0);
-      return (a.mandant || "").localeCompare(b.mandant || "");
-    });
-
-  const kritisch = kpis.filter(k => k.status === "KRITISCH").length;
-  const vips     = kpis.filter(k => k.ist_vip || (k.umsatz || 0) >= VIP_THRESHOLD).length;
-  const gefahr   = kpis.filter(k => (k.tage_ohne_antwort || 0) >= 14).length;
-  const gesamt_umsatz = kpis.reduce((s, k) => s + (k.umsatz || 0), 0);
-
-  const STATUS_FARBE = {
-    KRITISCH: "var(--red)", WICHTIG: "var(--orange)", NORMAL: "var(--blue)", OK: "var(--green)",
-  };
-
-  const UMSATZ_FARBE = (u) =>
-    u >= 500000 ? "var(--purple)" : u >= 100000 ? "var(--accent)" : u >= 30000 ? "var(--blue)" : "var(--text3)";
-
-  const handleEmail = (name) => {
-    if (onEmail) {
-      onEmail(name);
-      return;
-    }
-    showToast("⚠ E-Mail-Dialog nicht verfügbar");
-  };
-
-  const resolveTaskId = (item) => item?.id || item?.aufgabe_id || item?.task_id || "";
-
-  const handleHeuteToggle = async (item) => {
-    const id = resolveTaskId(item);
-    if (!id) { showToast("⚠ Aufgabe konnte nicht zugeordnet werden"); return; }
-    setTaskLoadingId(id);
-    try {
-      await toggleAufgabeAPI(id);
-      showToast("✓ Status aktualisiert");
-      if (onRefresh) await onRefresh();
-    } catch (e) {
-      showToast(`⚠ ${e.message || "Aktualisierung fehlgeschlagen"}`);
-    } finally {
-      setTaskLoadingId("");
-    }
-  };
-
-  const handleHeuteDelete = async (item) => {
-    const id = resolveTaskId(item);
-    if (!id) { showToast("⚠ Aufgabe konnte nicht zugeordnet werden"); return; }
-    if (!window.confirm("Aufgabe löschen?")) return;
-    setTaskLoadingId(id);
-    try {
-      await deleteAufgabeAPI(id);
-      showToast("✓ Aufgabe gelöscht");
-      if (onRefresh) await onRefresh();
-    } catch (e) {
-      showToast(`⚠ ${e.message || "Löschen fehlgeschlagen"}`);
-    } finally {
-      setTaskLoadingId("");
-    }
-  };
-
-  const handleHeuteEdit = (item) => {
-    const id = resolveTaskId(item);
-    if (!id) {
-      showToast("⚠ Aufgabe konnte nicht zugeordnet werden");
-      return;
-    }
-    setHeuteEditItem({ ...item, id });
-  };
-
-  const speichereHeuteAufgabeEdit = async (payload) => {
-    const id = resolveTaskId(heuteEditItem);
-    if (!id) return;
-    setTaskLoadingId(id);
-    try {
-      await updateAufgabeAPI(id, payload);
-      showToast("✓ Aufgabe bearbeitet");
-      setHeuteEditItem(null);
-      if (onRefresh) await onRefresh();
-    } catch (e) {
-      showToast(`⚠ ${e.message || "Bearbeiten fehlgeschlagen"}`);
-      throw e;
-    } finally {
-      setTaskLoadingId("");
-    }
-  };
-
-  return (
-    <div style={{ background:"var(--bg)",
-                  maxWidth:"100%", minWidth:0, boxSizing:"border-box" }}>
-
-      {/* Toast */}
-      {toast && (
-        <div style={{ position:"fixed", top:20, right:12, zIndex:9999,
-                      maxWidth:`min(340px, calc(${lw}px - 24px))`,
-                      background:"var(--bg3)", border:"1px solid color-mix(in srgb, var(--accent) 30%, transparent)",
-                      borderLeft:"3px solid var(--accent)", borderRadius:"var(--radius)",
-                      padding:"12px 18px", color:"var(--text)", fontSize:13, fontWeight:500,
-                      wordBreak:"break-word",
-                      animation:"slideIn 0.25s ease" }}>
-          {toast}
-        </div>
-      )}
-
-      {/* ── Header ── */}
-      <div style={{ background:"var(--bg2)", borderBottom:"1px solid var(--border)",
-                    padding:lw < 960 ? `16px ${padR} 22px ${padX}` : "24px 36px 32px 36px" }}>
-        <div style={{
-          display:"flex",
-          justifyContent:"space-between",
-          alignItems:"flex-start",
-          flexDirection:stackHeader ? "column" : "row",
-          flexWrap:stackHeader ? "nowrap" : "wrap",
-          gap:stackHeader ? 16 : 14,
-        }}>
-          <div style={{ minWidth:0, width:stackHeader ? "100%" : undefined, flex:stackHeader ? "none" : "1 1 220px" }}>
-            <div style={{
-              fontFamily:"var(--font-head)",
-              fontSize:lw < 520 ? 17 : lw < 960 ? 20 : 26,
-              lineHeight:stackHeader ? 1.22 : 1.2,
-              color:"var(--text)",
-              marginBottom:6,
-              hyphens:"auto",
-              wordBreak:"break-word",
-            }}>
-              Mandanten-Risiko & Umsatz AI
-            </div>
-            <div style={{ color:"var(--text3)", fontSize:lw < 520 ? 12 : 13, lineHeight:1.5 }}>
-              {new Date().toLocaleDateString("de-DE", { weekday:"long", day:"numeric", month:"long" })}
-              {" · "}KI analysiert automatisch wer sofortige Aufmerksamkeit braucht
-            </div>
-          </div>
-          <div style={{
-            display:"flex", gap:8, flexWrap:"wrap", flexShrink:0,
-            width:stackHeader ? "100%" : undefined,
-            justifyContent:stackHeader ? "flex-start" : "flex-end",
-          }}>
-            <Btn size="sm" variant="ghost" onClick={() => onTab("aufgaben")}>+ Aufgabe</Btn>
-            <Btn size="sm" variant="ghost" onClick={() => onTab("neu")}>+ Mandant</Btn>
-          </div>
-        </div>
-      </div>
-
-      {/* ── KPI Zeile (Abstand nach unten zu Filter nur über marginBottom) ── */}
-      <div style={{
-        boxSizing:"border-box",
-        width:"100%",
-        maxWidth:"100%",
-        minWidth:0,
-        padding:`${gapTitleToKpi}px ${padR} 0 ${padX}`,
-        marginBottom: gapKpiToFilter,
-        display:"grid",
-        gridTemplateColumns:kpiGrid,
-        gap:lw < 520 ? 10 : 12,
-      }}>
-        {[
-          { label:"Kritisch",     value:kritisch,     color:"var(--red)",     icon:"🚨",
-            sub:"sofort handeln" },
-          { label:"VIP-Mandanten",value:vips,         color:"var(--purple)", icon:"⭐",
-            sub:">€500k Umsatz" },
-          { label:"Keine Antwort",value:gefahr,       color:"var(--orange)",  icon:"📞",
-            sub:">14 Tage still" },
-          { label:"Gesamt-Umsatz",value:`€${(gesamt_umsatz/1000).toFixed(0)}k`,
-            color:"var(--accent)", icon:"💰", sub:`${kpis.length} Mandanten` },
-        ].map((item, i) => (
-          <Card key={i} animate delay={i*50} style={{ padding:cardPadTight ? "12px 12px" : "16px 18px", minWidth:0 }}>
-            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:8 }}>
-              <div style={{ minWidth:0 }}>
-                <div style={{ fontSize:10, color:"var(--text3)", textTransform:"uppercase",
-                              letterSpacing:"0.08em", marginBottom:6 }}>{item.label}</div>
-                <div style={{
-                  fontSize:lw < 520 ? "clamp(20px, 9vw, 26px)" : lw < 960 ? "clamp(22px, 5vw, 28px)" : 30,
-                  fontFamily:"var(--font-head)",
-                  color:item.color, lineHeight:1,
-                }}>{item.value}</div>
-                <div style={{ fontSize:11, color:"var(--text3)", marginTop:4 }}>{item.sub}</div>
-              </div>
-              <span style={{ fontSize:24, opacity:0.6 }}>{item.icon}</span>
-            </div>
-          </Card>
-        ))}
-      </div>
-
-      {(heuteOps || pilotCard) ? (
-        <div style={{
-          padding: `0 ${padR} 0 ${padX}`,
-          marginBottom: gapKpiToFilter,
-          display: "grid",
-          gridTemplateColumns: lw < 720 ? "minmax(0, 1fr)" : "1.4fr minmax(220px, 0.9fr)",
-          gap: lw < 520 ? 10 : 12,
-          boxSizing: "border-box",
-          width: "100%",
-          maxWidth: "100%",
-          minWidth: 0,
-        }}>
-          <DashboardHeuteOpsBar ops={heuteOps} onTab={onTab} compact={lw < 520} />
-          <DashboardPilotScorecard card={pilotCard} onTab={onTab} />
-        </div>
-      ) : null}
-
-      {/* ── Filter + Sort (kompakt; Abstand zur Liste über marginTop der Liste) ── */}
-      <div style={{
-        padding:`12px ${padR} 12px ${padX}`,
-        display:"flex", gap:10, alignItems:"center",
-        flexWrap:"wrap", boxSizing:"border-box", width:"100%", maxWidth:"100%", minWidth:0,
-      }}>
-        <div style={{ display:"flex", gap:4, background:"var(--bg3)",
-                      borderRadius:10, padding:6, flexWrap:"wrap" }}>
-          {[["alle","Alle"], ["kritisch","🚨 Kritisch"], ["vip","⭐ VIP"]].map(([v,l]) => (
-            <button key={v} type="button" onClick={() => setFilter(v)} style={{
-              padding:"8px 14px", borderRadius:8, border:"none", cursor:"pointer",
-              background:filter===v?"var(--bg2)":"transparent",
-              color:filter===v?"var(--accent)":"var(--text3)",
-              fontSize:13, fontWeight:filter===v?600:400,
-              fontFamily:"var(--font-body)", transition:"all 0.15s",
-            }}>{l}</button>
-          ))}
-        </div>
-        <div style={{ marginLeft:lw < 720 ? 0 : "auto", display:"flex", gap:8, alignItems:"center",
-                      flexWrap:"wrap" }}>
-          <span style={{ fontSize:12, color:"var(--text3)" }}>Sortierung:</span>
-          {[["risiko","Risiko"], ["umsatz","Umsatz"], ["name","Name"]].map(([v,l]) => (
-            <Btn key={v} size="xs" variant={sortBy===v?"subtle":"ghost"}
-                 onClick={() => setSortBy(v)}>{l}</Btn>
-          ))}
-        </div>
-        <span style={{ fontSize:12, color:"var(--text3)", ...(lw < 720 ? { width:"100%" } : {}) }}>{liste.length} Mandanten</span>
-      </div>
-
-      {/* ── Mandanten-Liste (Abstand zur Filterzeile nur über marginTop) ── */}
-      <div style={{
-        marginTop: gapFilterToList,
-        padding:`0 ${padR} ${lw < 960 ? 24 : 44}px ${padX}`,
-        display:"flex", flexDirection:"column", gap:gapListCards,
-        boxSizing:"border-box", width:"100%", maxWidth:"100%", minWidth:0,
-      }}>
-        {liste.length === 0 && (
-          <Card style={{ textAlign:"center", padding:40 }}>
-            <div style={{ fontSize:36, marginBottom:10 }}>✅</div>
-            <div style={{ color:"var(--text)", fontWeight:600, marginBottom:6 }}>
-              Keine Mandanten in diesem Filter
-            </div>
-            <div style={{ color:"var(--text3)", fontSize:13, marginBottom:18, maxWidth:420, marginLeft:"auto", marginRight:"auto" }}>
-              Wechseln Sie den Filter auf „Alle“, legen Sie einen Mandanten an oder importieren Sie Bestände — dann erscheint hier Ihr Risiko- und Umsatz-Radar.
-            </div>
-            <div style={{ display:"flex", gap:10, justifyContent:"center", flexWrap:"wrap" }}>
-              <Btn size="sm" variant="primary" onClick={() => { setFilter("alle"); setSortBy("risiko"); }}>
-                Alle Mandanten anzeigen
-              </Btn>
-              <Btn size="sm" variant="ghost" onClick={() => onTab("neu")}>
-                + Mandant anlegen
-              </Btn>
-            </div>
-          </Card>
-        )}
-
-        {liste.map((k, i) => {
-          const risiko     = k.risiko_score ?? Math.min(100, Math.round((k.score||0) / 120));
-          const risikoFarbe= risiko >= 70 ? "var(--red)" : risiko >= 40 ? "var(--orange)" : risiko >= 15 ? "var(--blue)" : "var(--green)";
-          const statusFarbe= STATUS_FARBE[k.status] || "var(--green)";
-          const empf       = k.empfehlung || {};
-          const empfFarbe  = empf.farbe || statusFarbe;
-          const istVip     = k.ist_vip || (k.umsatz || 0) >= VIP_THRESHOLD;
-          const umsatzF    = UMSATZ_FARBE(k.umsatz || 0);
-
-          return (
-            <div key={k.mandant} style={{
-              background:"var(--bg2)", border:`1px solid var(--border)`,
-              borderLeft:`4px solid ${statusFarbe}`,
-              borderRadius:"var(--radius-lg)",
-              padding:lw < 480 ? "14px 12px" : "18px 20px",
-              animation:`fadeUp 0.3s ease ${i*30}ms both`,
-              transition:"all 0.15s",
-              maxWidth:"100%", minWidth:0, boxSizing:"border-box",
-            }}>
-              <div style={{ display:"flex", gap:lw < 520 ? 12 : 16, alignItems:"flex-start", flexWrap:"wrap",
-                            width:"100%", maxWidth:"100%", minWidth:0, boxSizing:"border-box" }}>
-
-                {/* Risiko-Ring */}
-                <div style={{ flexShrink:0, textAlign:"center", minWidth:72 }}>
-                  <div style={{
-                    width:64, height:64, borderRadius:"50%",
-                    background:`conic-gradient(${risikoFarbe} ${risiko*3.6}deg, var(--bg3) 0deg)`,
-                    display:"flex", alignItems:"center", justifyContent:"center",
-                    margin:"0 auto 4px",
-                  }}>
-                    <div style={{
-                      width:52, height:52, borderRadius:"50%",
-                      background:"var(--bg2)", display:"flex", alignItems:"center",
-                      justifyContent:"center", flexDirection:"column",
-                    }}>
-                      <div style={{ fontSize:16, fontWeight:700, color:risikoFarbe, lineHeight:1 }}>
-                        {risiko}
-                      </div>
-                    </div>
-                  </div>
-                  <div style={{ fontSize:10, color:"var(--text3)", textTransform:"uppercase",
-                                letterSpacing:"0.05em" }}>Risiko</div>
-                </div>
-
-                {/* Mandant Info */}
-                <div style={{ flex:1, minWidth:0 }}>
-                  <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:4, flexWrap:"wrap" }}>
-                    <Link to={`/mandant/${encodeURIComponent(k.mandant)}`}
-                      style={{ fontFamily:"var(--font-head)", fontSize:lw < 520 ? 16 : 18,
-                               color:"var(--text)", fontWeight:600, wordBreak:"break-word", minWidth:0 }}>
-                      {k.mandant}
-                    </Link>
-                    {istVip && (
-                      <span style={{ fontSize:11, padding:"2px 8px", borderRadius:20,
-                                     background:"color-mix(in srgb, var(--purple) 18%, var(--bg3))",
-                                     color:"var(--purple)",
-                                     border:"1px solid color-mix(in srgb, var(--purple) 28%, transparent)", fontWeight:700 }}>
-                        ⭐ VIP
-                      </span>
-                    )}
-                    <Badge color={statusFarbe} style={{ fontSize:10 }}>{k.status}</Badge>
-                  </div>
-
-                  {/* Umsatz + Metriken */}
-                  <div style={{ display:"flex", gap:16, flexWrap:"wrap", marginBottom:10 }}>
-                    <span style={{ fontSize:15, fontWeight:700, color:umsatzF,
-                                   fontFamily:"var(--font-head)" }}>
-                      €{(k.umsatz||0).toLocaleString("de")}
-                    </span>
-                    {k.tage_ohne_antwort > 0 && (
-                      <span style={{ fontSize:12, color:(k.tage_ohne_antwort||0)>=14?"var(--red)":"var(--orange)" }}>
-                        📞 {k.tage_ohne_antwort}d kein Kontakt
-                      </span>
-                    )}
-                    {k.aufgaben_ueberfaellig > 0 && (
-                      <span style={{ fontSize:12, color:"var(--red)" }}>
-                        ⏰ {k.aufgaben_ueberfaellig} überfällig
-                      </span>
-                    )}
-                    {k.aufgaben_offen > 0 && (
-                      <span style={{ fontSize:12, color:"var(--text3)" }}>
-                        {k.aufgaben_offen} Aufgaben offen
-                      </span>
-                    )}
-                    {k.fehlende_dokumente > 0 && (
-                      <span style={{ fontSize:12, color:"var(--blue)" }}>
-                        📄 {k.fehlende_dokumente} Dok. fehlen
-                      </span>
-                    )}
-                  </div>
-
-                  {/* Umsatz-Bar */}
-                  <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:10 }}>
-                    <div style={{ fontSize:10, color:"var(--text3)", width:40 }}>
-                      {k.umsatz_kategorie || "—"}
-                    </div>
-                    <div style={{ flex:1, minWidth:0, height:3, background:"var(--bg3)",
-                                  borderRadius:2, maxWidth:lw < 520 ? "none" : 220 }}>
-                      <div style={{
-                        width:`${k.umsatz_score || Math.min(100,(k.umsatz||0)/5000)}%`,
-                        height:"100%", background:umsatzF, borderRadius:2,
-                        transition:"width 0.8s ease",
-                      }} />
-                    </div>
-                    <div style={{ fontSize:10, color:"var(--text3)" }}>Umsatz-Score</div>
-                  </div>
-
-                  {/* KI-Empfehlung */}
-                  {empf.titel && (
-                    <div style={{
-                      display:"flex", alignItems:"flex-start", gap:8, flexWrap:"wrap",
-                      padding:"8px 12px", borderRadius:8,
-                      background:empfFarbe+"12",
-                      border:`1px solid ${empfFarbe}25`,
-                    }}>
-                      <span style={{ fontSize:16, flexShrink:0 }}>{empf.icon || "●"}</span>
-                      <div style={{ flex:"1 1 160px", minWidth:0 }}>
-                        <div style={{ fontSize:13, fontWeight:600, color:empfFarbe }}>
-                          {empf.titel}
-                        </div>
-                        {empf.text && (
-                          <div style={{
-                            fontSize:12, color:"var(--text3)", marginTop:1, wordBreak:"break-word",
-                            ...(lw < 720 ? {} : { overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }),
-                          }}>
-                            {empf.text}
-                          </div>
-                        )}
-                      </div>
-                      {(empf.aktion_text || "") && (
-                        <span style={{
-                          fontSize:11, color:empfFarbe, flexShrink:0, fontWeight:600,
-                          ...(lw < 720 ? { width:"100%" } : {}),
-                        }}>
-                          {empf.aktion_text}
-                        </span>
-                      )}
-                    </div>
-                  )}
-                </div>
-
-                {/* Aktions-Buttons */}
-                <div style={{
-                  display:"flex",
-                  flexDirection:rowActionsBelow ? "row" : "column",
-                  gap:6, flexShrink:0,
-                  ...(rowActionsBelow ? { flex:"1 1 100%", flexWrap:"wrap", width:"100%" } : {}),
-                }}>
-                  <Link to={`/mandant/${encodeURIComponent(k.mandant)}`} style={rowActionsBelow ? { flex:"1 1 160px", minWidth:0, maxWidth:"100%" } : undefined}>
-                    <Btn size="sm" variant="ghost" style={{ width:"100%" }}>
-                      Öffnen →
-                    </Btn>
-                  </Link>
-                  <Btn size="sm" variant={k.status==="KRITISCH"?"danger":"subtle"}
-                       onClick={() => handleEmail(k.mandant)}
-                       style={rowActionsBelow ? { flex:"1 1 160px", minWidth:0, maxWidth:"100%" } : undefined}>
-                    {k.status==="KRITISCH" ? "⚡ E-Mail" : "✉ E-Mail"}
-                  </Btn>
-                </div>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Heute & Dringend unten */}
-      {heute && heute.length > 0 && (
-        <div style={{
-          padding:`${gapSection}px ${padR} ${lw < 960 ? 28 : 44}px ${padX}`,
-          boxSizing:"border-box", width:"100%", maxWidth:"100%", minWidth:0,
-        }}>
-          <div style={{ fontFamily:"var(--font-head)", fontSize:18,
-                        color:"var(--text)", marginBottom:16 }}>
-            Heute & Dringend
-          </div>
-          <HeutePanel
-            heute={heute}
-            onToggle={handleHeuteToggle}
-            onEdit={handleHeuteEdit}
-            onDelete={handleHeuteDelete}
-            actionLoadingId={taskLoadingId}
-            isMobile={heuteCompact}
-          />
-        </div>
-      )}
-
-      <AufgabeEditModal
-        open={Boolean(heuteEditItem)}
-        task={heuteEditItem}
-        mandantenListe={mandantenNamenDashboard}
-        allowMandantChange
-        onClose={() => setHeuteEditItem(null)}
-        onSave={speichereHeuteAufgabeEdit}
-      />
-    </div>
-  );
-}
-
-
 /** Tabs mit festem Viewport + internem Scroll (Chat, KI, Dokumente) */
-const TABS_OWN_SCROLL = new Set(["portalchat", "ki", "dokumente"]);
+const TABS_OWN_SCROLL = new Set(["portalchat", "ki", "dokumente", "belege", "automation"]);
 
 function AppInner() {
   const location = useLocation();
@@ -2435,10 +1877,12 @@ function AppInner() {
   const [isFormDirty,  setIsFormDirty]  = useState(false);
   const [selectedName, setSelectedName] = useState(null);
   const [emailModal,   setEmailModal]   = useState(null);
-  const [toasts,       setToasts]       = useState([]);
+  const { toast, toastUndo } = useAppToast();
   const [readiness,    setReadiness]    = useState(null);
   const [billingUsage, setBillingUsage] = useState(null);
   const [portalUnreadTotal, setPortalUnreadTotal] = useState(0);
+  const [papierkorb, setPapierkorb] = useState([]);
+  const [papierkorbOpen, setPapierkorbOpen] = useState(false);
   const [navExtended, setNavExtended] = useState(() => readNavExtended());
 
   useEffect(() => {
@@ -2604,7 +2048,7 @@ function AppInner() {
     let cancelled = false;
     getSettings()
       .then((body) => {
-        const d = body?.data ?? body;
+        const d = unwrapSettingsPayload(body);
         if (!cancelled && d && typeof d === "object") setNavSettings(d);
       })
       .catch(() => {
@@ -2627,10 +2071,14 @@ function AppInner() {
     }
   }, [activeTab, appRole, navSettings, navExtended]);
 
-  const toast = useCallback((text, type="success") => {
-    const id = Date.now() + Math.random();
-    setToasts(p => [...p, { id, text, type }]);
-    setTimeout(() => setToasts(p => p.filter(t => t.id !== id)), 4000);
+  const ladePapierkorb = useCallback(async () => {
+    try {
+      const r = await getMandantenPapierkorb();
+      const rows = Array.isArray(r?.data) ? r.data : (Array.isArray(r) ? r : []);
+      setPapierkorb(rows);
+    } catch {
+      setPapierkorb([]);
+    }
   }, []);
 
   const ladeAlles = useCallback(async (initial=false) => {
@@ -2669,7 +2117,8 @@ function AppInner() {
     } finally {
       if (initial) setLoading(false);
     }
-  }, []);
+    ladePapierkorb();
+  }, [ladePapierkorb]);
 
   useEffect(() => { formLoadingRef.current = formLoading; }, [formLoading]);
   useEffect(() => { formDirtyRef.current = isFormDirty; }, [isFormDirty]);
@@ -2738,13 +2187,29 @@ function AppInner() {
   };
 
   const handleDelete = async (name) => {
-    if (!window.confirm(`"${name}" wirklich löschen?`)) return;
+    if (!window.confirm(`"${name}" in den Papierkorb legen?`)) return;
     try {
       await deleteMandantAPI(name);
-      toast(`${name} gelöscht`, "warn");
       if (selectedName === name) setSelectedName(null);
-      await ladeAlles();
+      setKpis((prev) => prev.filter((k) => k.mandant !== name));
+      await ladePapierkorb();
+      toastUndo(`${name} in Papierkorb`, async () => {
+        await restoreMandantAPI(name);
+        toast(`${name} wiederhergestellt`);
+        await ladeAlles();
+        await ladePapierkorb();
+      });
     } catch (e) { toast(e.message, "error"); }
+  };
+
+  const handleRestoreMandant = async (name) => {
+    try {
+      await restoreMandantAPI(name);
+      toast(`${name} wiederhergestellt`);
+      await ladeAlles();
+    } catch (e) {
+      toast(e.message || "Wiederherstellen fehlgeschlagen", "error");
+    }
   };
 
   const contentPad = isMobile ? "14px 12px" : "28px 36px";
@@ -2753,6 +2218,11 @@ function AppInner() {
     const row = (kpis || []).find((k) => k.mandant === mandantName);
     setEmailModal({ name: mandantName, email: row?.email || "" });
   };
+
+  const canDeleteMandant = useMemo(
+    () => featureAllowed(navSettings, "rollen_mandant_loeschen", getRealRole()),
+    [navSettings],
+  );
 
   const renderContent = () => {
     if (loading) return (
@@ -2769,7 +2239,7 @@ function AppInner() {
 
       // ── DASHBOARD ──────────────────────────────────────────
       case "dashboard":
-        return <RisikoDashboard kpis={kpis} heute={heute} onEmail={openEmailModal} onTab={setActiveTab} onRefresh={ladeAlles} isMobile={isMobile} />;
+        return <FocusDashboard onEmail={openEmailModal} onTab={setActiveTab} onRefresh={ladeAlles} isMobile={isMobile} />;
 
       // ── MANDANTEN ──────────────────────────────────────────
       case "portalchat":
@@ -2802,12 +2272,37 @@ function AppInner() {
               borderRadius:12, padding:"12px 16px", marginBottom:16, fontSize:13,
               color:"var(--text2)", lineHeight:1.55,
             }}>
-              <strong style={{ color:"var(--text)" }}>KI-Email & Mandantenportal:</strong>{" "}
-              Mandant in der Liste anklicken (Name) → in der Akte{" "}
-              <em style={{ color:"var(--accent)", fontStyle:"normal" }}>KI-Email</em> und{" "}
-              <em style={{ color:"var(--accent)", fontStyle:"normal" }}>Mandantenportal</em> rechts.
-              Portal-URL auch unter Einstellungen → Mandanten-Portal.
+              <strong style={{ color:"var(--text)" }}>Grün / Gelb / Rot</strong> zeigt Mandanten-Gesundheit.
+              Klick auf Name → Detail. „Erinnern“ formuliert automatisch eine passende E-Mail.
             </div>
+            {papierkorb.length > 0 ? (
+              <div style={{ marginBottom:16 }}>
+                <button type="button" onClick={() => setPapierkorbOpen((v) => !v)} style={{
+                  padding:"8px 12px", borderRadius:8, border:"1px solid var(--border2)",
+                  background:"var(--bg2)", cursor:"pointer", fontSize:13, color:"var(--text2)",
+                }}>
+                  🗑 Papierkorb ({papierkorb.length}) {papierkorbOpen ? "▲" : "▼"}
+                </button>
+                {papierkorbOpen ? (
+                  <div style={{ marginTop:8, display:"flex", flexDirection:"column", gap:6 }}>
+                    {papierkorb.map((m) => (
+                      <div key={m.name} style={{
+                        display:"flex", justifyContent:"space-between", alignItems:"center", gap:10,
+                        padding:"10px 12px", borderRadius:8, background:"var(--bg2)", border:"1px solid var(--border)",
+                      }}>
+                        <span style={{ fontSize:13, color:"var(--text)" }}>{m.name}</span>
+                        <button type="button" onClick={() => handleRestoreMandant(m.name)} style={{
+                          padding:"4px 10px", borderRadius:8, border:"1px solid var(--border2)",
+                          background:"var(--bg3)", cursor:"pointer", fontSize:12, color:"var(--accent)",
+                        }}>
+                          Wiederherstellen
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
             {selectedName && (
               <div style={{ marginBottom:20 }}>
                 <MandantFormPanel
@@ -2827,6 +2322,7 @@ function AppInner() {
               onEmail={openEmailModal}
               selectedName={selectedName}
               isMobile={isMobile}
+              canDelete={canDeleteMandant}
             />
           </div>
         );
@@ -2856,8 +2352,9 @@ function AppInner() {
       case "profit":     return <ProfitMonitor />;
       case "automation": return <WorkflowBaukasten />;
       case "dokumente":
-        return null;
-      case "belege":     return <BelegScanner />;
+        return <DokumenteHub isMobile={isMobile} />;
+      case "belege":
+        return <DokumenteHub isMobile={isMobile} />;
       case "rechnungen": return <Rechnungen />;
       case "ki":
         return (
@@ -2957,7 +2454,7 @@ function AppInner() {
             maxWidth: "100%",
           }}>
             <div style={{ flex: 1, minWidth: 0, fontWeight: 700, fontSize: 16, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {MOBILE_TAB_TITLE[activeTab] || "Kanzlei AI"}
+              {MOBILE_TAB_TITLE[activeTab] || PRODUCT_NAME}
             </div>
           </header>
         ) : null}
@@ -3037,17 +2534,7 @@ function AppInner() {
           </div>
         )}
         <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-          {activeTab === "dokumente" ? (
-            <div style={{
-              flex: 1,
-              minHeight: 0,
-              display: "flex",
-              flexDirection: "column",
-              overflow: "hidden",
-            }}>
-              <DokumentScanner tabActive />
-            </div>
-          ) : TABS_OWN_SCROLL.has(activeTab) ? (
+          {TABS_OWN_SCROLL.has(activeTab) ? (
             <div style={{
               flex: 1,
               minHeight: 0,
@@ -3083,6 +2570,8 @@ function AppInner() {
           onClose={() => setEmailModal(null)}
         />
       )}
+      <KiAskDrawer />
+      <GlobalSearch onTab={setActiveTab} />
       {((!isMobile && !sidebarVisible) || (isMobile && !mobileNavOpen)) ? (
         <button
           type="button"
@@ -3118,7 +2607,6 @@ function AppInner() {
           <span aria-hidden="true">{isMobile ? (mobileNavOpen ? "◀" : "▶") : "▶"}</span>
         </button>
       ) : null}
-      <ToastContainer toasts={toasts} />
     </div>
   );
 }
@@ -3512,6 +3000,7 @@ export default function App() {
           </div>
         </div>
       ) : null}
+      <AppToastProvider>
       <Router>
         <Routes>
           <Route path="/register-email" element={<Navigate to="/register" replace />} />
@@ -3521,9 +3010,20 @@ export default function App() {
           <Route path="/reset-password" element={<ResetPassword />} />
           <Route path="/verify-email" element={<VerifyEmail />} />
           {authAktiv && !isAuthed ? (
-            <Route path="*" element={<Login />} />
+            <>
+              <Route path="/produkt" element={<ProduktLanding />} />
+              <Route path="/register-email" element={<Navigate to="/register" replace />} />
+              <Route path="/register" element={<Register />} />
+              <Route path="/login-email" element={<Navigate to="/login" replace />} />
+              <Route path="/login" element={<Login />} />
+              <Route path="/forgot-password" element={<ForgotPassword />} />
+              <Route path="/reset-password" element={<ResetPassword />} />
+              <Route path="/verify-email" element={<VerifyEmail />} />
+              <Route path="*" element={<Navigate to="/produkt" replace />} />
+            </>
           ) : (
             <>
+              <Route path="/produkt" element={isAuthed ? <Navigate to="/" replace /> : <ProduktLanding />} />
               <Route
                 path="/login"
                 element={
@@ -3558,6 +3058,7 @@ export default function App() {
           )}
         </Routes>
       </Router>
+      </AppToastProvider>
     </ThemeProvider>
   );
 }

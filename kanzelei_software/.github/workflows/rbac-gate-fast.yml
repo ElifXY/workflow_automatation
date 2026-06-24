@@ -1,0 +1,45 @@
+name: RBAC Gate Fast
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: rbac-gate-fast-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rbac-gate-fast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run RBAC/Auth gate
+        env:
+          JWT_SECRET: ci-jwt-secret-very-long-value-1234567890
+          SAAS_MASTER_KEY: ci-saas-master-key-1234567890
+          STRIPE_SECRET_KEY: sk_test_ci_dummy_key_1234567890
+          STRIPE_WEBHOOK_SECRET: whsec_ci_dummy_key_1234567890
+          ANTHROPIC_API_KEY: sk-ant-ci-dummy
+          OPENAI_API_KEY: sk-proj-ci-dummy
+          PORTAL_SECRET: ci-portal-secret-1234567890abcdef
+          PORTAL_ADMIN_KEY: ci-admin-key
+          ENVIRONMENT: development
+          FORCE_HTTPS: "0"
+          SECURITY_HEADERS: "1"
+        run: |
+          python scripts/go_live_rbac_gate.py
+          python scripts/test_phase5_tenant_admin.py

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -15,6 +16,8 @@ def _write_report(lines: list[str]) -> None:
 
 
 def main() -> int:
+    os.environ.setdefault("ENABLE_ADVANCED_FEATURES", "1")
+    os.environ.setdefault("SECURITY_BASELINE_BOOTSTRAP", "1")
     lines: list[str] = ["# Tenant Enforcement Audit", ""]
     ok = True
 
@@ -65,6 +68,7 @@ def main() -> int:
             "benutzername": "audit",
             "rolle": "admin",
             "kanzlei_id": "default",
+            "tenant_id": "default",
         }
         try:
             tests = [

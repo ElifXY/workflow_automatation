@@ -55,13 +55,26 @@ class MandantenService:
         created = self.store.hole_mandant(data.name)
         if not created:
             raise RuntimeError("Mandant wurde nicht persistiert")
+        betreuer = getattr(data, "betreuer_email", None)
+        if betreuer:
+            self._apply_betreuer(data.name, betreuer)
         self.store.log_eintrag(f"MANDANT_ERSTELLT | {data.name} | Umsatz: {data.umsatz}€")
         return {"status": "created", "name": data.name}
+
+    def _apply_betreuer(self, name: str, betreuer_email: Optional[str]) -> None:
+        if betreuer_email is None:
+            return
+        extra = self.store.mandant_extra_holen(name)
+        extra["betreuer_email"] = str(betreuer_email or "").strip().lower()
+        self.store.mandant_extra_setzen(name, extra)
 
     def update_mandant(self, name: str, update_felder: Dict[str, Any]) -> Dict[str, Any]:
         m = self.store.hole_mandant(name)
         if not m:
             raise ValueError(f"Mandant '{name}' nicht gefunden")
+        betreuer = update_felder.pop("betreuer_email", None)
+        if betreuer is not None:
+            self._apply_betreuer(name, betreuer)
         m.update(update_felder)
         m["zuletzt_geaendert"] = datetime.now().isoformat()
         saved = self.store.mandant_speichern(name, m)
@@ -77,7 +90,21 @@ class MandantenService:
         if not deleted:
             raise RuntimeError("Mandant konnte nicht gelöscht werden")
         self.store.log_eintrag(f"MANDANT_GELOESCHT | {name}")
-        return {"status": "deleted", "name": name}
+        return {"status": "deleted", "name": name, "papierkorb": True}
+
+    def list_papierkorb(self) -> List[Dict[str, Any]]:
+        daten = self.store.hole_mandanten_papierkorb()
+        return [{"name": name, **m} for name, m in daten.items()]
+
+    def restore_mandant(self, name: str) -> Dict[str, Any]:
+        papier = self.store.hole_mandanten_papierkorb()
+        if name not in papier:
+            raise ValueError(f"Mandant '{name}' nicht im Papierkorb")
+        restored = self.store.mandant_wiederherstellen(name)
+        if not restored:
+            raise RuntimeError("Mandant konnte nicht wiederhergestellt werden")
+        self.store.log_eintrag(f"MANDANT_WIEDERHERGESTELLT | {name}")
+        return {"status": "restored", "name": name}
 
     def mark_antwort(self, name: str) -> Dict[str, Any]:
         m = self.store.hole_mandant(name)

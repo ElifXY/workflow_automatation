@@ -6,7 +6,7 @@ echo "==> Projekt: $(pwd)"
 GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 echo "==> Git: ${GIT_SHA} $(git branch --show-current 2>/dev/null || true)"
 export GIT_REV="${GIT_SHA}"
-export APP_BUILD_ID="${APP_BUILD_ID:-deploy-20260519b}"
+export APP_BUILD_ID="${APP_BUILD_ID:-deploy-20260520o}"
 
 # NGINX_ENV=development leitet / an den Frontend-Dev-Container — UI-Änderungen aus Dockerfile.nginx erscheinen dann NICHT.
 if [ -f .env ]; then
@@ -46,7 +46,7 @@ echo ""
 echo "==> API system/build:"
 docker compose exec -T api curl -fsS http://127.0.0.1:8000/api/system/build || true
 echo ""
-echo "==> Portal-Build (portal-deploy-20260519b):"
+echo "==> Portal-Build (portal-deploy-20260520o):"
 docker compose exec -T api curl -fsS http://127.0.0.1:8000/portal/health || true
 echo ""
 echo "==> UI build-info im nginx-Container:"
@@ -59,6 +59,6 @@ docker compose exec -T nginx nginx -s reload 2>/dev/null || true
 echo ""
 echo "Fertig. Browser: Strg+Shift+R (oder Inkognito)."
 echo "  Prüfen: https://<domain>/build-info.json → build ${APP_BUILD_ID}"
-echo "  Prüfen: https://<domain>/api/system/build → api-deploy-20260519b"
+echo "  Prüfen: https://<domain>/api/system/build → api-deploy-20260520o"
 echo "  Cloudflare aktiv? → Dashboard: Caching → Purge Everything"
 echo "  Optional: bash scripts/verify_deploy.sh"

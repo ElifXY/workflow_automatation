@@ -6,9 +6,9 @@
 
 // INHALT FÜR public/manifest.json:
 export const MANIFEST = {
-  "short_name": "Kanzlei AI",
-  "name": "Kanzlei AI — Steuerberater Suite",
-  "description": "KI-gestütztes Kanzlei-Management für Steuerberater",
+  "short_name": "Kanzlei Automation",
+  "name": "Kanzlei Automation",
+  "description": "Mandanten liefern rechtzeitig — keine liegengebliebenen Fälle.",
   "icons": [
     { "src": "favicon.ico",   "sizes": "64x64 32x32 24x24 16x16", "type": "image/x-icon" },
     { "src": "logo192.png",   "type": "image/png", "sizes": "192x192" },
@@ -30,9 +30,9 @@ export const MANIFEST = {
       "icons": [{ "src": "logo192.png", "sizes": "192x192" }]
     },
     {
-      "name": "KI-Assistent",
-      "short_name": "KI Chat",
-      "url": "/?tab=ki",
+      "name": "Automationen",
+      "short_name": "Automation",
+      "url": "/?tab=automation",
       "icons": [{ "src": "logo192.png", "sizes": "192x192" }]
     },
     {
@@ -116,7 +116,7 @@ self.addEventListener('fetch', (event) => {
 self.addEventListener('push', (event) => {
   const data = event.data?.json() || {};
   const options = {
-    body:    data.body    || 'Neue Benachrichtigung von Kanzlei AI',
+    body:    data.body    || 'Neue Benachrichtigung von Kanzlei Automation',
     icon:    '/logo192.png',
     badge:   '/logo192.png',
     vibrate: [200, 100, 200],
@@ -128,7 +128,7 @@ self.addEventListener('push', (event) => {
   };
   event.waitUntil(
     self.registration.showNotification(
-      data.title || 'Kanzlei AI',
+      data.title || 'Kanzlei Automation',
       options
     )
   );

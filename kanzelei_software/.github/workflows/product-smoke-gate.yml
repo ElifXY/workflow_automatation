@@ -1,0 +1,51 @@
+name: Product Smoke Gate
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: product-smoke-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  product-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run product smoke tests (Pass 10–13)
+        env:
+          JWT_SECRET: ci-jwt-secret-very-long-value-1234567890
+          SAAS_MASTER_KEY: ci-saas-master-key-1234567890
+          STRIPE_SECRET_KEY: sk_test_ci_dummy_key_1234567890
+          STRIPE_WEBHOOK_SECRET: whsec_ci_dummy_key_1234567890
+          ANTHROPIC_API_KEY: sk-ant-ci-dummy
+          OPENAI_API_KEY: sk-proj-ci-dummy
+          PORTAL_SECRET: ci-portal-secret-1234567890abcdef
+          PORTAL_ADMIN_KEY: ci-admin-key
+          ENVIRONMENT: development
+          APP_ENV: development
+          USE_POSTGRES_DATA: "0"
+          FORCE_HTTPS: "0"
+          SECURITY_HEADERS: "1"
+        run: |
+          python scripts/test_pass10_smoke.py
+          python scripts/test_pass11_api_smoke.py
+          python scripts/test_pass12_api_smoke.py
+          python scripts/test_pass13_smoke.py
+          python scripts/test_pass13_api_smoke.py
+          python scripts/test_pass14_api_smoke.py

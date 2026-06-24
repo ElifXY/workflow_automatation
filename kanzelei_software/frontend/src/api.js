@@ -446,6 +446,13 @@ export const deleteMandantAPI = (name) =>
     method: "DELETE",
   });
 
+export const getMandantenPapierkorb = () => apiFetch("/mandanten/papierkorb");
+
+export const restoreMandantAPI = (name) =>
+  apiFetch(`/mandanten/${encodeURIComponent(name)}/wiederherstellen`, {
+    method: "POST",
+  });
+
 export const mandantAntwortEmpfangen = (name) =>
   apiFetch(`/mandanten/${encodeURIComponent(name)}/antwort`, {
     method: "POST",
@@ -518,6 +525,12 @@ export const unwrapApiData = (body) => {
 export const getEmailAbsender = async () =>
   unwrapApiData(await apiFetch("/email/absender"));
 
+export const testTenantSmtp = (to) =>
+  apiFetch("/email/smtp/test", {
+    method: "POST",
+    body: JSON.stringify(to ? { to } : {}),
+  });
+
 // BUGFIX: Alter Endpoint war /email/{name} — neu: /email/{name}/vorschau
 export const getEmailPreview = async (name) =>
   unwrapApiData(await apiFetch(`/email/${encodeURIComponent(name)}/vorschau`));
@@ -560,6 +573,57 @@ export const getHeuteOps = async () => {
   return r?.data ?? r;
 };
 
+export const getBlockierung = async () => {
+  const r = await apiFetch("/dashboard/blockierung");
+  return r?.data ?? r;
+};
+
+export const getAutopilotStats = async () => {
+  const r = await apiFetch("/dashboard/autopilot");
+  return r?.data ?? r;
+};
+
+export const getDashboardRoi = async () => {
+  const r = await apiFetch("/dashboard/roi");
+  return r?.data ?? r;
+};
+
+export const globalSearch = async (q, limit = 20) => {
+  const params = new URLSearchParams({ q: String(q || ""), limit: String(limit) });
+  const r = await apiFetch(`/suche?${params}`);
+  return r?.data ?? r;
+};
+
+export const getWorkflowVorlagen = async () => {
+  const r = await apiFetch("/regeln/vorlagen");
+  return r?.data ?? r;
+};
+
+export const activateWorkflowVorlage = async (templateId, bestaetigen = false) => {
+  const r = await apiFetch(`/regeln/vorlagen/${encodeURIComponent(templateId)}/aktivieren?bestaetigen=${bestaetigen ? "true" : "false"}`, {
+    method: "POST",
+  });
+  return r?.data ?? r;
+};
+
+export const getMandantEskalation = async (name) => {
+  const r = await apiFetch(`/mandanten/${encodeURIComponent(name)}/eskalation`);
+  return r?.data ?? r;
+};
+
+export const getAutomationAudit = async (limit = 50) => {
+  const r = await apiFetch(`/dashboard/automation-audit?limit=${limit}`);
+  return r?.data ?? r;
+};
+
+export const sendRoiEmail = () =>
+  apiFetch("/dashboard/roi/email", { method: "POST" });
+
+export const getOnboardingStatus = async () => {
+  const r = await apiFetch("/onboarding/status");
+  return r?.data ?? r;
+};
+
 export const getPilotScorecard = async () => {
   const r = await apiFetch("/dashboard/pilot-scorecard");
   return r?.data ?? r;
@@ -570,8 +634,10 @@ export const setPilotBaseline = () =>
 // BUGFIX: Alter Endpoint war /kpi — neu: /kpis
 export const getKpis        = async () => {
   const r = await apiFetch("/kpis");
-  if (Array.isArray(r)) return r;
-  return r?.eintraege || r?.data?.eintraege || [];
+  if (r?.data?.eintraege) return r.data;
+  if (r?.eintraege) return r;
+  if (Array.isArray(r)) return { eintraege: r };
+  return r;
 };
 export const getDecisions   = () => apiFetch("/decisions");
 export const getEmpfehlungen= async () => {
@@ -663,8 +729,20 @@ export const addKommunikation = (name, typ, text) =>
 // SETTINGS
 // ═══════════════════════════════════════════════════════════════
 
-export const getSettings   = ()           => apiFetch("/settings");
-export const updateSetting = (key, wert)  =>
+/** Einstellungen-API (ok/data oder flach) → flaches Objekt ohne _meta */
+export const unwrapSettingsPayload = (body) => {
+  if (!body || typeof body !== "object") return {};
+  const raw = body.data != null && typeof body.data === "object" ? body.data : body;
+  const out = { ...raw };
+  delete out._meta;
+  delete out._festgeschrieben;
+  return out;
+};
+
+export const getSettings = async () =>
+  unwrapSettingsPayload(await apiFetch("/settings"));
+
+export const updateSetting = (key, wert) =>
   apiFetch("/settings", {
     method: "PUT",
     body: JSON.stringify({ key, wert }),
@@ -699,6 +777,29 @@ export const getSystemInfo         = () => apiFetch("/system/info");
 export const getSystemExport       = () => apiFetch("/system/export");
 export const getPlausibilitaet     = () => apiFetch("/plausibilitaet");
 export const getSaasReadiness      = () => apiFetch("/saas/readiness");
+
+export const getM365Status = () => apiFetch("/integrationen/m365/status");
+export const startM365Connect = (redirectTo = "/settings") =>
+  apiFetch(`/integrationen/m365/connect/start?redirect_to=${encodeURIComponent(redirectTo)}`, {
+    method: "POST",
+  });
+export const disconnectM365 = () =>
+  apiFetch("/integrationen/m365/disconnect", { method: "POST" });
+export const getM365CalendarPreview = () => apiFetch("/integrationen/m365/calendar-preview");
+export const getM365MailPreview = (limit = 10) =>
+  apiFetch(`/integrationen/m365/mail-preview?limit=${encodeURIComponent(limit)}`);
+export const getBetreuerMatrix = () => apiFetch("/mandanten/betreuer-matrix");
+export const getMandantM365Mails = (name, limit = 8) =>
+  apiFetch(`/mandanten/${encodeURIComponent(name)}/m365-mails?limit=${encodeURIComponent(limit)}`);
+export const syncM365MailsToTimeline = (name, limit = 10) =>
+  apiFetch(`/mandanten/${encodeURIComponent(name)}/m365-mails/sync-timeline?limit=${encodeURIComponent(limit)}`, {
+    method: "POST",
+  });
+export const bulkAssignBetreuer = (body) =>
+  apiFetch("/mandanten/betreuer-matrix/bulk", {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
 export const getBillingUsage       = () => apiFetch("/billing/usage");
 export const getBillingMetrics     = () => apiFetch("/billing/metrics");
 export const getBillingFunnel      = (lookback_hours = 24) => apiFetch(`/billing/funnel?lookback_hours=${encodeURIComponent(lookback_hours)}`);

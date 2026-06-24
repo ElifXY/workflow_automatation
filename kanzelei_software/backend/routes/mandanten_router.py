@@ -26,10 +26,22 @@ def get_mandanten(
     branche: Optional[str] = Query(None),
     min_umsatz: Optional[float] = Query(None, ge=0),
     sortierung: Optional[str] = Query("name"),
+    betreuer_email: Optional[str] = Query(None),
+    nur_ohne_betreuer: bool = Query(False),
+    nur_meine: bool = Query(False),
     _user: dict = Depends(get_current_user),
 ):
     root = _root()
-    return root.get_mandanten(suche, branche, min_umsatz, sortierung, _user)
+    return root.get_mandanten(
+        suche,
+        branche,
+        min_umsatz,
+        sortierung,
+        betreuer_email,
+        nur_ohne_betreuer,
+        nur_meine,
+        _user,
+    )
 
 
 @router.get("/mandanten/{name}", summary="Einzelnen Mandanten lesen")

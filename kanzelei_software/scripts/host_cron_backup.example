@@ -1,0 +1,6 @@
+# Täglicher Postgres-Dump auf dem Host (Projektpfad + Compose-Name anpassen).
+# crontab -e:
+#
+# 15 2 * * * cd /pfad/zu/kanzelei_software && docker compose exec -T postgres pg_dump -U kanzlei kanzlei_ai | gzip -c > /var/backups/kanzlei_$(date +\%Y\%m\%d).sql.gz
+#
+# Der Service postgres_backup startet mit normalem „docker compose up -d“ automatisch mit.

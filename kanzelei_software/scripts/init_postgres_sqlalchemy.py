@@ -5,7 +5,11 @@ import sys
 
 from sqlalchemy import create_engine
 
-from db.sqlalchemy_models import Base
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+from backend.db.sqlalchemy_models import Base  # noqa: E402
 
 
 def main() -> int:
@@ -17,8 +21,12 @@ def main() -> int:
         print("DATABASE_URL muss mit postgresql:// beginnen.")
         return 2
 
-    engine = create_engine(database_url, pool_pre_ping=True)
-    Base.metadata.create_all(engine)
+    try:
+        engine = create_engine(database_url, pool_pre_ping=True)
+        Base.metadata.create_all(engine)
+    except Exception as e:
+        print(f"SQLAlchemy create_all fehlgeschlagen: {e}")
+        return 1
     print("SQLAlchemy schema created/verified for PostgreSQL.")
     return 0
 

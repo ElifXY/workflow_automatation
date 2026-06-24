@@ -1,0 +1,85 @@
+# Voller Stack: Compose, Nginx-Build, API-Health, https://localhost (self-signed), nginx -t
+name: Docker stack verify
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: docker-stack-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  full-stack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deterministic .env for Compose
+        run: cp .env.defaults .env
+
+      - name: Static full-stack check (ohne Docker)
+        run: python scripts/full_stack_check.py
+
+      - name: Docker Compose config
+        run: docker compose -f docker-compose.yml config -q
+
+      - name: Build images (nginx + api)
+        run: docker compose -f docker-compose.yml build nginx api
+
+      - name: Ensure external compose network exists
+        run: docker network inspect kanzlei_network >/dev/null 2>&1 || docker network create kanzlei_network
+
+      - name: Start stack
+        run: docker compose -f docker-compose.yml up -d
+
+      - name: Wait for API /health
+        run: |
+          set -e
+          for i in $(seq 1 90); do
+            if curl -sf --connect-timeout 2 http://127.0.0.1:8000/health >/dev/null; then
+              echo "API healthy after ${i} attempts"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "API never became healthy"
+          docker compose -f docker-compose.yml ps
+          docker compose -f docker-compose.yml logs --tail=120 api || true
+          exit 1
+
+      - name: Wait for Nginx (port 80)
+        run: |
+          set -e
+          for i in $(seq 1 60); do
+            if curl -sf --connect-timeout 2 http://127.0.0.1:80/ >/dev/null; then
+              echo "Nginx HTTP ok after ${i} attempts"
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose -f docker-compose.yml ps
+          docker compose -f docker-compose.yml logs --tail=120 nginx || true
+          exit 1
+
+      - name: Nginx HTTPS localhost (self-signed)
+        run: |
+          set -e
+          body=$(curl -skf --connect-timeout 5 https://127.0.0.1:443/ | head -c 8000 | tr '[:upper:]' '[:lower:]')
+          echo "$body" | grep -qE 'html|react|<!doctype' || { echo "Unexpected HTTPS body"; exit 1; }
+          echo "HTTPS localhost SPA check OK"
+
+      - name: nginx -t in container
+        run: docker compose -f docker-compose.yml exec -T nginx nginx -t
+
+      - name: docker compose ps
+        run: docker compose -f docker-compose.yml ps
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.yml down --remove-orphans

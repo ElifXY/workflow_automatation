@@ -1,5 +1,5 @@
 """
-Go-Live Check für Kanzlei AI.
+Go-Live Check für Kanzlei Automation.
 
 Prüft:
 - Umgebungsvariablen (kritische Secrets)
@@ -9,6 +9,10 @@ Prüft:
 Usage:
   python scripts/go_live_check.py
   python scripts/go_live_check.py --base-url http://127.0.0.1:8000 --token <JWT>
+
+Ergänzend (Mandanten, Einladungen, ORM ``users`` ohne HTTP):
+  python scripts/production_go_live_gate.py
+  python scripts/production_go_live_gate.py --strict
 """
 
 from __future__ import annotations
@@ -34,6 +38,7 @@ def _check_env() -> List[Tuple[str, str, str]]:
         "STRIPE_SECRET_KEY",
         "STRIPE_WEBHOOK_SECRET",
         "DATABASE_URL",
+        "OPENAI_API_KEY",
     ]
     for key in required:
         val = os.getenv(key, "").strip()
@@ -43,6 +48,33 @@ def _check_env() -> List[Tuple[str, str, str]]:
             checks.append((YELLOW, f"ENV {key}", "gesetzt, aber sehr kurz"))
         else:
             checks.append((GREEN, f"ENV {key}", "ok"))
+
+    env = (os.getenv("ENVIRONMENT") or os.getenv("APP_ENV") or "development").lower()
+    if env == "production":
+        gw = os.getenv("API_GATEWAY_KEY", "").strip()
+        if len(gw) < 32:
+            checks.append((RED, "ENV API_GATEWAY_KEY", "fehlt oder <32 Zeichen (Production)"))
+        else:
+            checks.append((GREEN, "ENV API_GATEWAY_KEY", "ok (Länge)"))
+
+        jwt = os.getenv("JWT_SECRET", "").strip()
+        bad_j = any(x in jwt.lower() for x in ("placeholder", "dev-jwt", "minimum-64", "change-in-prod"))
+        if len(jwt) < 48 or bad_j:
+            checks.append((RED, "ENV JWT_SECRET", "zu schwach oder Dev-Muster (Production)"))
+        else:
+            checks.append((GREEN, "ENV JWT_SECRET", "ok (Stärke)"))
+
+        du = os.getenv("DATABASE_URL", "").strip()
+        if "KzDevOnly_" in du or "DevOnlyChangeBeforeProd2026X" in du:
+            checks.append((RED, "ENV DATABASE_URL", "enthält Dev-Standardpasswort"))
+        else:
+            checks.append((GREEN, "ENV DATABASE_URL", "kein Dev-Passwort-Muster"))
+
+        ru = os.getenv("REDIS_URL", "").strip()
+        if ru and ("KzDevOnly_" in ru or "DevOnlyChangeBeforeProd2026X" in ru):
+            checks.append((RED, "ENV REDIS_URL", "enthält Dev-Standardpasswort"))
+        elif ru:
+            checks.append((GREEN, "ENV REDIS_URL", "ok"))
     return checks
 
 
@@ -79,7 +111,7 @@ def main() -> int:
     checks.extend(_check_env())
 
     with httpx.Client(base_url=args.base_url, timeout=8.0) as client:
-        for path in ["/health", "/ready", "/saas/readiness", "/compliance/status"]:
+        for path in ["/health", "/ready", "/saas/readiness", "/compliance/status", "/ki/status"]:
             color, info = _call(client, "GET", path, auth_headers)
             checks.append((color, f"GET {path}", info))
 

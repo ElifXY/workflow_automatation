@@ -8,6 +8,8 @@
 
 import { useState, useEffect, useCallback } from "react";
 import DecimalInput from "../components/DecimalInput";
+import { getWorkflowVorlagen, activateWorkflowVorlage, getAutomationAudit } from "../api";
+import { useAppToast } from "../AppToast";
 
 const BASE = process.env.REACT_APP_API_URL || "/api";
 const api  = async (url, opts={}) => {
@@ -48,8 +50,10 @@ const Btn = ({children,onClick,variant="primary",size="md",loading=false,disable
 
 // ── Tabs ─────────────────────────────────────────────────────
 const TABS = [
+  {id:"vorlagen",   label:"Vorlagen",          icon:"📦"},
   {id:"regeln",     label:"Workflow-Regeln",   icon:"⚙"},
   {id:"bot",        label:"Proaktiver Bot",    icon:"🤖"},
+  {id:"protokoll",  label:"Protokoll",         icon:"📋"},
   {id:"lohn",       label:"Lohnabrechnung",   icon:"💶"},
 ];
 
@@ -176,6 +180,7 @@ const RegelnTab = () => {
   const [loading,    setLoading]    = useState(true);
   const [running,    setRunning]    = useState(false);
   const [toast,      setToast]      = useState(null);
+  const { toastUndo } = useAppToast();
 
   const showToast = (t) => { setToast(t); setTimeout(()=>setToast(null),3500); };
 
@@ -206,7 +211,25 @@ const RegelnTab = () => {
 
   const loeschen = async (id) => {
     if(!window.confirm("Regel löschen?")) return;
+    const regel = regeln.find((r) => String(r.id) === String(id));
     await api(`/regeln/${id}`,{method:"DELETE"});
+    if (regel) {
+      toastUndo(`Regel „${regel.name || id}" gelöscht`, async () => {
+        await api("/regeln", {
+          method: "POST",
+          body: JSON.stringify({
+            name: regel.name,
+            beschreibung: regel.beschreibung || "",
+            trigger: regel.trigger,
+            bedingungen: regel.bedingungen || [],
+            aktionen: regel.aktionen || [],
+            aktiv: regel.aktiv !== false,
+          }),
+        });
+        showToast("✓ Regel wiederhergestellt");
+        laden();
+      });
+    }
     laden();
   };
 
@@ -884,11 +907,180 @@ const LohnTab = () => {
 };
 
 // ═══════════════════════════════════════════════════════════
+// TAB: VORLAGEN-MARKTPLATZ
+// ═══════════════════════════════════════════════════════════
+
+const VorlagenTab = () => {
+  const [vorlagen, setVorlagen] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [preview, setPreview] = useState(null);
+  const [activating, setActivating] = useState("");
+
+  const laden = useCallback(async () => {
+    setLoading(true);
+    try {
+      const d = await getWorkflowVorlagen();
+      setVorlagen(d?.vorlagen || []);
+    } catch {
+      setVorlagen([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { laden(); }, [laden]);
+
+  const vorschau = async (id) => {
+    try {
+      const d = await activateWorkflowVorlage(id, false);
+      setPreview({ ...d, vorlage: id });
+    } catch (e) {
+      alert(e.message || "Vorschau fehlgeschlagen");
+    }
+  };
+
+  const aktivieren = async (id) => {
+    const n = preview?.vorlage === id ? (preview?.betroffene_mandanten ?? 0) : 0;
+    if (!window.confirm(`Vorlage aktivieren? Betrifft ca. ${n || "?"} Mandanten.`)) return;
+    setActivating(id);
+    try {
+      await activateWorkflowVorlage(id, true);
+      setPreview(null);
+      alert("Vorlage aktiviert");
+      laden();
+    } catch (e) {
+      alert(e.message || "Aktivierung fehlgeschlagen");
+    } finally {
+      setActivating("");
+    }
+  };
+
+  if (loading) return <div style={{ color: "var(--text3)" }}>Lade Vorlagen…</div>;
+
+  return (
+    <div>
+      <p style={{ color: "var(--text2)", marginBottom: 20, maxWidth: 640, lineHeight: 1.6 }}>
+        Fertige Prozesse mit einem Klick — keine Regeln von Hand bauen.
+      </p>
+      <div style={{ display: "grid", gap: 14, gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))" }}>
+        {vorlagen.map((v) => (
+          <div key={v.id} style={{
+            background: "var(--bg2)", border: "1px solid var(--border2)", borderRadius: 14, padding: "18px 20px",
+          }}>
+            <div style={{ fontSize: 28, marginBottom: 8 }}>{v.icon || "⚙"}</div>
+            <div style={{ fontWeight: 600, fontSize: 16, color: "var(--text)", marginBottom: 6 }}>{v.name}</div>
+            <div style={{ fontSize: 13, color: "var(--text3)", marginBottom: 12, lineHeight: 1.5 }}>{v.beschreibung}</div>
+            <div style={{ fontSize: 12, color: "var(--text2)", marginBottom: 14 }}>
+              Ca. <strong>{v.betroffene_mandanten ?? 0}</strong> Mandanten betroffen
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <Btn size="sm" variant="ghost" onClick={() => vorschau(v.id)}>Vorschau</Btn>
+              <Btn
+                size="sm"
+                loading={activating === v.id}
+                onClick={() => (preview?.vorlage === v.id ? aktivieren(v.id) : vorschau(v.id))}
+              >
+                {preview?.vorlage === v.id && preview?.status === "vorschau" ? "Jetzt aktivieren" : "Aktivieren"}
+              </Btn>
+            </div>
+            {preview?.vorlage === v.id && preview?.status === "vorschau" ? (
+              <div style={{ marginTop: 12, fontSize: 12, color: "var(--orange)", padding: 10, background: "var(--bg3)", borderRadius: 8 }}>
+                {preview.hinweis}
+                <div style={{ marginTop: 8 }}>
+                  <Btn size="xs" onClick={() => aktivieren(v.id)}>Jetzt aktivieren</Btn>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+// ═══════════════════════════════════════════════════════════
+// TAB: AUTOMATION-PROTOKOLL (Audit)
+// ═══════════════════════════════════════════════════════════
+
+const KAT_LABEL = {
+  eskalation: "Eskalation",
+  workflow: "Workflow",
+  email: "E-Mail",
+  scheduler: "Scheduler",
+  bot: "Bot",
+  automation: "Automation",
+};
+
+const ProtokollTab = () => {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const laden = useCallback(async () => {
+    setLoading(true);
+    try {
+      const d = await getAutomationAudit(80);
+      setRows(d?.eintraege || []);
+    } catch {
+      setRows([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { laden(); }, [laden]);
+
+  if (loading) return <div style={{ color: "var(--text3)" }}>Lade Protokoll…</div>;
+
+  return (
+    <div>
+      <p style={{ color: "var(--text2)", marginBottom: 16, maxWidth: 640, lineHeight: 1.6 }}>
+        Nachvollziehbarkeit: Workflow-Ausführungen, Eskalationen, Bot-Mails und Scheduler-Läufe.
+      </p>
+      {rows.length === 0 ? (
+        <div style={{ fontSize: 13, color: "var(--text3)", padding: 20, background: "var(--bg2)", borderRadius: 12 }}>
+          Noch keine Automation-Einträge im Audit-Log.
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {rows.map((r, i) => (
+            <div key={`${r.zeit}-${i}`} style={{
+              padding: "12px 14px", background: "var(--bg2)", borderRadius: 10,
+              border: "1px solid var(--border2)", borderLeft: "3px solid var(--accent)",
+            }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+                <span style={{
+                  fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em",
+                  color: "var(--accent)",
+                }}>
+                  {KAT_LABEL[r.kategorie] || r.kategorie}
+                </span>
+                <span style={{ fontSize: 11, color: "var(--text3)" }}>
+                  {r.zeit ? new Date(r.zeit).toLocaleString("de-DE") : "—"}
+                </span>
+              </div>
+              <div style={{ fontSize: 13, color: "var(--text)", marginTop: 6, lineHeight: 1.45 }}>
+                {r.text}
+              </div>
+              <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 4 }}>
+                {r.benutzer || "system"}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      <div style={{ marginTop: 16 }}>
+        <Btn size="sm" variant="ghost" onClick={laden}>Aktualisieren</Btn>
+      </div>
+    </div>
+  );
+};
+
+// ═══════════════════════════════════════════════════════════
 // HAUPT-COMPONENT
 // ═══════════════════════════════════════════════════════════
 
 export default function WorkflowBaukasten() {
-  const [tab, setTab] = useState("regeln");
+  const [tab, setTab] = useState("vorlagen");
 
   return (
     <div style={{background:"var(--bg)",fontFamily:"'DM Sans',sans-serif"}}>
@@ -903,7 +1095,7 @@ export default function WorkflowBaukasten() {
         padding:"20px 32px",position:"sticky",top:0,zIndex:10}}>
         <div style={{fontFamily:"'DM Serif Display',serif",fontSize:22,
           color:"var(--text)",marginBottom:14}}>
-          Automation & Tools
+          Automationen
         </div>
         <div style={{display:"flex",gap:4}}>
           {TABS.map(t=>(
@@ -924,8 +1116,10 @@ export default function WorkflowBaukasten() {
       </div>
 
       <div style={{padding:"28px 32px"}}>
+        {tab==="vorlagen"   && <VorlagenTab />}
         {tab==="regeln"     && <RegelnTab />}
         {tab==="bot"        && <BotTab />}
+        {tab==="protokoll"  && <ProtokollTab />}
         {tab==="lohn"       && <LohnTab />}
       </div>
     </div>

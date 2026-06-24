@@ -10,12 +10,14 @@ class SettingsService:
     def get_all(self) -> Dict[str, Any]:
         from modules.settings_manager import load_settings_for_store, FESTGESCHRIEBEN
 
-        settings = load_settings_for_store(self.store)
+        from core.email_sender import mask_secret_settings
+
+        settings = mask_secret_settings(load_settings_for_store(self.store))
         return {
             **settings,
             "_festgeschrieben": list(FESTGESCHRIEBEN.keys()),
             "_meta": {
-                "kategorien": ["ki", "workflow", "portal", "billing", "compliance", "schnittstellen", "kanzlei"],
+                "kategorien": ["ki", "workflow", "portal", "billing", "compliance", "schnittstellen", "email", "kanzlei"],
                 "version": "3.1",
                 "kanzlei_id": getattr(self.store, "kanzlei_id", "default"),
                 "hinweis": "Werte in _festgeschrieben können nicht geändert werden (GoBD §147 AO)",

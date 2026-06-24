@@ -10,7 +10,4 @@
 - `Cross-tenant Header blockiert`: OK
 
 ## Runtime Checks
-- `auth_required`: status=401, expected=401, result=OK, error=Login erforderlich
-- `header_mismatch`: status=403, expected=403, result=OK, error=Cross-tenant Header blockiert
-- `query_mismatch`: status=403, expected=403, result=OK, error=Cross-tenant Query blockiert
-- `payload_mismatch_nested`: status=403, expected=403, result=OK, error=Cross-tenant Payload blockiert
+- runtime checks failed to execute: USE_POSTGRES_DATA ist gesetzt: DATABASE_URL muss postgresql://… oder postgres://… sein (Schema scripts/postgres_bootstrap.sql, Daten scripts/migrate_sqlite_to_postgres.py).

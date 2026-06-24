@@ -1,0 +1,11 @@
+# Beispiel: Host-Cron für Zertifikats-Erneuerung (nur falls ohne certbot-Container-Loop).
+# crontab -e und eine Zeile aktivieren (Projektpfad anpassen):
+#
+# Klassisch (nur certbot auf dem Host):
+# 0 3 * * * certbot renew --quiet
+#
+# Mit Nginx-Reload nach erfolgreichem Renew:
+# 0 3 * * * certbot renew --quiet && systemctl reload nginx
+#
+# Mit Docker-Compose (Profil ssl):
+# 0 3 * * * cd /pfad/zu/kanzelei_software && docker compose --profile ssl exec -T certbot certbot renew --quiet && docker compose exec -T nginx nginx -s reload

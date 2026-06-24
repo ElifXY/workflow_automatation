@@ -45,6 +45,12 @@ ds = DatenSpeicher()
 SECRET_KEY    = os.getenv("PORTAL_SECRET", secrets.token_hex(32))
 
 
+def _portal_setting(store: DatenSpeicher, key: str, default=None):
+    """Portal-Flags der Kanzlei des Mandanten (nicht global ``default``)."""
+    val = setting_holen(key, store=store)
+    return default if val is None and default is not None else val
+
+
 def _store_for_mandant(mandant: str) -> DatenSpeicher:
     """DatenSpeicher der Kanzlei, zu der der Mandant gehört (Multi-Tenant)."""
     try:
@@ -103,13 +109,14 @@ def verifiziere_token(token: str) -> Optional[str]:
         return None
 
 def hole_mandant(authorization: Optional[str] = Header(None)) -> str:
-    if not bool(setting_holen("portal_aktiv")):
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Mandantenportal ist deaktiviert")
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Login erforderlich")
     mandant = verifiziere_token(authorization.replace("Bearer ", ""))
     if not mandant:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token abgelaufen")
+    store = _store_for_mandant(mandant)
+    if not bool(_portal_setting(store, "portal_aktiv")):
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Mandantenportal ist deaktiviert")
     return mandant
 
 
@@ -231,12 +238,12 @@ def portal_startseite():
     except FileNotFoundError:
         return HTMLResponse("""<html><body style="background:#0b0d11;color:#e8eaf0;
             font-family:sans-serif;padding:40px;text-align:center">
-            <h2 style="color:#c8a96e">Kanzlei AI — Mandantenportal</h2>
+            <h2 style="color:#c8a96e">Kanzlei Automation — Mandantenportal</h2>
             <p>portal.html nicht gefunden.</p></body></html>""")
 
 @portal_router.get("/portal/health")
 def health():
-    return {"status": "ok", "version": "2.1.0", "build": "portal-deploy-20260519b"}
+    return {"status": "ok", "version": "2.1.0", "build": "portal-deploy-20260520o"}
 
 @portal_router.post("/portal/login", tags=["Portal"])
 @portal_router.get("/portal/login", tags=["Portal"])
@@ -263,6 +270,19 @@ def portal_login(token: str = Query(...)):
     except Exception:
         offene_bot_fragen = 0
 
+    tage_ohne_antwort = 0
+    try:
+        tage_ohne_antwort = int(store.berechne_tage_ohne_antwort(mandant) or 0)
+    except Exception:
+        tage_ohne_antwort = 0
+
+    antwort_hinweis = ""
+    if tage_ohne_antwort >= 7:
+        antwort_hinweis = (
+            f"Ihre Kanzlei wartet seit {tage_ohne_antwort} Tagen auf Ihre Rückmeldung. "
+            "Bitte beantworten Sie offene Fragen oder schreiben Sie im Chat."
+        )
+
     ds.log_eintrag(f"PORTAL_LOGIN | {mandant}")
     return {
         "mandant":               mandant,
@@ -272,6 +292,8 @@ def portal_login(token: str = Query(...)):
         "offene_unterschriften": offen_unterschriften,
         "offene_freigaben":      offen_freigaben,
         "offene_bot_fragen":     offene_bot_fragen,
+        "tage_ohne_antwort":     tage_ohne_antwort,
+        "antwort_hinweis":       antwort_hinweis,
     }
 
 # POST /portal/admin/token/{mandant} — nur in api.py (JWT), nicht hier (vermeidet Admin-Key in der UI)
@@ -426,8 +448,8 @@ def _verarbeite_upload(
     chat_msg_id: Optional[str] = None,
 ) -> Dict:
     store = _store_for_mandant(mandant)
-    max_mb = int(setting_holen("portal_upload_max_mb") or UPLOAD_MAX_MB or 20)
-    if bool(setting_holen("portal_projektnummer_pflicht")) and not str(data.projektnummer or "").strip():
+    max_mb = int(_portal_setting(store, "portal_upload_max_mb") or UPLOAD_MAX_MB or 20)
+    if bool(_portal_setting(store, "portal_projektnummer_pflicht")) and not str(data.projektnummer or "").strip():
         raise HTTPException(400, "Projektnummer ist als Pflichtfeld aktiviert")
     try:
         inhalt = base64.b64decode(data.inhalt_b64)
@@ -568,7 +590,7 @@ def erstelle_unterschrift_anfrage(
     portal_sichtbar: bool = True,
 ) -> Dict:
     """Kanzlei fordert Unterschrift beim Mandanten an (JWT oder Legacy Admin-Key-Route)."""
-    if not bool(setting_holen("portal_unterschrift_aktiv")):
+    if not bool(_portal_setting(store, "portal_unterschrift_aktiv")):
         raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
     if mandant not in store.hole_mandanten():
         raise HTTPException(404, f"Mandant '{mandant}' nicht gefunden")
@@ -639,9 +661,9 @@ def unterschrift_anfragen(data: UnterschriftAnfragen):
 @portal_router.get("/portal/unterschrift/offen", tags=["Unterschrift"])
 def offene_unterschriften(mandant: str = Depends(hole_mandant)):
     """Mandant sieht alle offenen Unterschriftsanfragen."""
-    if not bool(setting_holen("portal_unterschrift_aktiv")):
-        raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
     store = _store_for_mandant(mandant)
+    if not bool(_portal_setting(store, "portal_unterschrift_aktiv")):
+        raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
     p = _portal_store(store, mandant)
     jetzt = datetime.now()
     offene = []
@@ -668,9 +690,9 @@ def offene_unterschriften(mandant: str = Depends(hole_mandant)):
 @portal_router.get("/portal/unterschrift/{uid}/dokument", tags=["Unterschrift"])
 def dokument_herunterladen(uid: str, mandant: str = Depends(hole_mandant)):
     """Zu unterzeichnendes Dokument abrufen."""
-    if not bool(setting_holen("portal_unterschrift_aktiv")):
-        raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
     store = _store_for_mandant(mandant)
+    if not bool(_portal_setting(store, "portal_unterschrift_aktiv")):
+        raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
     u = store.portal_holen("unterschrift", uid) or {}
     if not u: raise HTTPException(404, "Nicht gefunden")
     if u.get("mandant") != mandant: raise HTTPException(403, "Kein Zugriff")
@@ -695,9 +717,9 @@ def unterschrift_leisten(uid: str, data: UnterschriftLeisten,
     Audit-Trail: IP, Zeitpunkt, User-Agent, Browser-Infos werden erfasst.
     Das Ergebnis ist rechtsgültig nach eIDAS EES.
     """
-    if not bool(setting_holen("portal_unterschrift_aktiv")):
-        raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
     store = _store_for_mandant(mandant)
+    if not bool(_portal_setting(store, "portal_unterschrift_aktiv")):
+        raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
     u = store.portal_holen("unterschrift", uid) or {}
     if not u:
         raise HTTPException(404, "Nicht gefunden")
@@ -776,9 +798,9 @@ def unterschrift_leisten(uid: str, data: UnterschriftLeisten,
 @portal_router.post("/portal/unterschrift/{uid}/ablehnen", tags=["Unterschrift"])
 def unterschrift_ablehnen(uid: str, grund: str = Query(""),
                            mandant: str = Depends(hole_mandant)):
-    if not bool(setting_holen("portal_unterschrift_aktiv")):
-        raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
     store = _store_for_mandant(mandant)
+    if not bool(_portal_setting(store, "portal_unterschrift_aktiv")):
+        raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
     u = store.portal_holen("unterschrift", uid) or {}
     if not u or u.get("mandant") != mandant:
         raise HTTPException(404, "Nicht gefunden")
@@ -803,11 +825,16 @@ def unterschrift_ablehnen(uid: str, grund: str = Query(""),
 @portal_router.get("/portal/unterschrift/{uid}/status", tags=["Unterschrift"])
 def unterschrift_status(uid: str, admin_key: str = Query(...)):
     """KANZLEI: Status + Audit-Trail einer Unterschriftsanfrage."""
-    if not bool(setting_holen("portal_unterschrift_aktiv")):
-        raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
     if not secrets.compare_digest(admin_key, os.getenv("PORTAL_ADMIN_KEY","kanzlei-admin-2024")):
         raise HTTPException(403, "Ungültiger Admin-Key")
-    p = _portal()
+    u = ds.portal_holen("unterschrift", uid) or {}
+    store = ds
+    if u.get("mandant"):
+        store = _store_for_mandant(u["mandant"])
+        u = store.portal_holen("unterschrift", uid) or u
+    if not bool(_portal_setting(store, "portal_unterschrift_aktiv")):
+        raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
+    p = _portal_store(store, u.get("mandant"))
     u = p["portal"]["unterschriften"].get(uid)
     if not u: raise HTTPException(404, "Nicht gefunden")
     result = {k:v for k,v in u.items() if k != "dokument_b64"}
@@ -817,11 +844,12 @@ def unterschrift_status(uid: str, admin_key: str = Query(...)):
 
 @portal_router.get("/portal/unterschrift/alle", tags=["Unterschrift"])
 def alle_unterschriften(admin_key: str = Query(...), mandant: Optional[str] = Query(None)):
-    if not bool(setting_holen("portal_unterschrift_aktiv")):
-        raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
     if not secrets.compare_digest(admin_key, os.getenv("PORTAL_ADMIN_KEY","kanzlei-admin-2024")):
         raise HTTPException(403, "Ungültiger Admin-Key")
-    p    = _portal()
+    store = _store_for_mandant(mandant) if mandant else ds
+    if not bool(_portal_setting(store, "portal_unterschrift_aktiv")):
+        raise HTTPException(503, "Digitale Unterschrift ist deaktiviert")
+    p    = _portal_store(store, mandant) if mandant else _portal()
     alle = list(p["portal"]["unterschriften"].values())
     if mandant: alle = [u for u in alle if u.get("mandant")==mandant]
     result = [{"id":u["id"],"mandant":u["mandant"],"dokumentname":u["dokumentname"],
@@ -930,9 +958,9 @@ def portal_chat_als_gelesen(mandant: str = Depends(hole_mandant)):
 
 @portal_router.post("/portal/chat", tags=["Portal-Chat"])
 def portal_chat_senden(data: ChatTextBody, mandant: str = Depends(hole_mandant)):
-    if not bool(setting_holen("portal_nachrichten_aktiv")):
-        raise HTTPException(503, "Chat im Mandantenportal ist deaktiviert")
     store = _store_for_mandant(mandant)
+    if not bool(_portal_setting(store, "portal_nachrichten_aktiv")):
+        raise HTTPException(503, "Chat im Mandantenportal ist deaktiviert")
     text = data.text.strip()
     msg = pc.chat_text_nachricht(store, mandant, text, "mandant")
     store.kommunikation_hinzufuegen(mandant, {
@@ -985,7 +1013,7 @@ def portal_chat_loeschen_mandant(msg_id: str, mandant: str = Depends(hole_mandan
 def nachricht_senden(data: NachrichtCreate, mandant: str = Depends(hole_mandant)):
     try:
         store = _store_for_mandant(mandant)
-        if not bool(setting_holen("portal_nachrichten_aktiv")):
+        if not bool(_portal_setting(store, "portal_nachrichten_aktiv")):
             raise HTTPException(503, "Nachrichten im Mandantenportal sind deaktiviert")
         betreff = (data.betreff or "").strip()
         inhalt = (data.inhalt or "").strip()

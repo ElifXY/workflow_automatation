@@ -284,6 +284,8 @@ def analysiere_alle_mandanten(ds) -> List[Dict]:
             risiko        = _berechne_risiko_daten(name, m, ds)
             umsatz_s      = _umsatz_score(_safe(m, "umsatz", default=0))
             empfehlung    = _fallback_empfehlung(name, m, risiko)
+            from core.mandant_health import health_from_risiko
+            health = health_from_risiko(risiko)
 
             ergebnisse.append({
                 "mandant":               name,
@@ -292,6 +294,10 @@ def analysiere_alle_mandanten(ds) -> List[Dict]:
                 "score":                 risiko["raw_score"],
                 "risiko_score":          risiko["risiko_prozent"],
                 "status":                risiko["status"],
+                "health_score":          health["health_score"],
+                "health_ampel":          health["health_ampel"],
+                "health_label":          health["health_label"],
+                "health_gruende":        health["health_gruende"],
                 "score_details":         [{"grund":i["text"],"punkte":i["punkte"],"typ":"info"} for i in risiko["score_items"]],
                 "tage_ohne_antwort":     risiko["tage_ohne_antwort"],
                 "aufgaben_offen":        risiko["aufgaben_offen"],
@@ -376,6 +382,8 @@ async def analysiere_mandant_komplett(name: str, m: Dict, ds) -> Dict:
 
 def berechne_mandant_score(name: str, m: Dict, ds) -> Dict:
     risiko = _berechne_risiko_daten(name, m, ds)
+    from core.mandant_health import health_from_risiko
+    health = health_from_risiko(risiko)
     return {
         "score":                risiko["raw_score"],
         "status":               risiko["status"],
@@ -385,6 +393,10 @@ def berechne_mandant_score(name: str, m: Dict, ds) -> Dict:
         "aufgaben_offen":       risiko["aufgaben_offen"],
         "aufgaben_ueberfaellig":risiko["aufgaben_ueberfaellig"],
         "fehlende_dokumente":   risiko["fehlende_dokumente"],
+        "health_score":         health["health_score"],
+        "health_ampel":         health["health_ampel"],
+        "health_label":         health["health_label"],
+        "health_gruende":       health["health_gruende"],
     }
 
 

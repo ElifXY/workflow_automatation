@@ -227,30 +227,92 @@ class OnboardingService:
         }
 
     def onboarding_status(self) -> Dict:
-        """Prüft ob Onboarding abgeschlossen ist."""
+        """Prüft ob Onboarding abgeschlossen ist + 4-Schritte-Wizard."""
         mandanten = self.ds.hole_mandanten()
-        from modules.settings_manager import setting_holen
+        from modules.settings_manager import load_settings_for_store
+
+        cfg = load_settings_for_store(self.ds)
         api_key = __import__("os").getenv("OPENAI_API_KEY", "")
 
+        smtp_ok = bool(
+            cfg.get("smtp_aktiv")
+            and str(cfg.get("smtp_host") or "").strip()
+            and str(cfg.get("smtp_user") or "").strip()
+        )
+        kanzlei_ok = bool(
+            cfg.get("kanzlei_name")
+            and str(cfg.get("kanzlei_name")) != "Steuerkanzlei"
+            and cfg.get("kanzlei_email")
+        )
+        try:
+            regeln = self.ds.workflow_regeln_liste() or {}
+            vorlage_ok = any(
+                isinstance(r, dict) and r.get("aktiv")
+                for r in regeln.values()
+            )
+        except Exception:
+            vorlage_ok = False
+        mandant_ok = len(mandanten) > 0
+
+        wizard_schritte = [
+            {
+                "id": "email",
+                "nr": 1,
+                "label": "E-Mail-Versand konfigurieren",
+                "hinweis": "SMTP pro Kanzlei — sonst keine Erinnerungen.",
+                "erledigt": smtp_ok,
+                "tab": "settings",
+                "settings_tab": "email",
+            },
+            {
+                "id": "kanzlei",
+                "nr": 2,
+                "label": "Kanzlei-Daten hinterlegen",
+                "hinweis": "Name und E-Mail für Portal und Berichte.",
+                "erledigt": kanzlei_ok,
+                "tab": "settings",
+                "settings_tab": "kanzlei",
+            },
+            {
+                "id": "vorlage",
+                "nr": 3,
+                "label": "Erste Automations-Vorlage aktivieren",
+                "hinweis": "Ein Klick unter Automationen → Vorlagen.",
+                "erledigt": vorlage_ok,
+                "tab": "automation",
+            },
+            {
+                "id": "mandant",
+                "nr": 4,
+                "label": "Ersten Mandanten anlegen",
+                "hinweis": "Dann greifen Erinnerungen und Ampel.",
+                "erledigt": mandant_ok,
+                "tab": "mandanten",
+            },
+        ]
+
         checks = {
-            "kanzlei_name":      bool(setting_holen("kanzlei_name") and
-                                      setting_holen("kanzlei_name") != "Steuerkanzlei"),
-            "mandanten":         len(mandanten) > 0,
+            "email_smtp":        smtp_ok,
+            "kanzlei_name":      bool(cfg.get("kanzlei_name") and cfg.get("kanzlei_name") != "Steuerkanzlei"),
+            "mandanten":         mandant_ok,
             "api_key":           bool(api_key),
-            "stundensatz":       (setting_holen("stundensatz") or 0) > 0,
-            "kanzlei_email":     bool(setting_holen("kanzlei_email")),
-            "portal_aktiv":      bool(setting_holen("portal_aktiv")),
+            "stundensatz":       (cfg.get("stundensatz") or 0) > 0,
+            "kanzlei_email":     bool(cfg.get("kanzlei_email")),
+            "portal_aktiv":      bool(cfg.get("portal_aktiv")),
+            "vorlage_aktiv":     vorlage_ok,
         }
 
-        abgeschlossen = sum(checks.values())
-        gesamt        = len(checks)
-        prozent       = round(abgeschlossen / gesamt * 100)
+        abgeschlossen = sum(1 for s in wizard_schritte if s["erledigt"])
+        gesamt        = len(wizard_schritte)
+        prozent       = round(abgeschlossen / gesamt * 100) if gesamt else 0
 
         return {
             "prozent":        prozent,
             "abgeschlossen":  abgeschlossen,
             "gesamt":         gesamt,
             "checks":         checks,
-            "bereit":         prozent >= 80,
-            "fehlende_schritte": [k for k, v in checks.items() if not v],
+            "bereit":         abgeschlossen >= gesamt,
+            "wizard_schritte": wizard_schritte,
+            "naechster_schritt": next((s for s in wizard_schritte if not s["erledigt"]), None),
+            "fehlende_schritte": [s["id"] for s in wizard_schritte if not s["erledigt"]],
         }

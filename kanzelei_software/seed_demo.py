@@ -20,7 +20,7 @@ import random
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from core.daten_speicher import DatenSpeicher
-from core.auth import erstelle_benutzer, hat_benutzer
+from backend.auth import erstelle_benutzer, hat_benutzer
 
 ds = DatenSpeicher()
 
@@ -325,7 +325,7 @@ def main():
     print()
     print("  System starten:")
     print("  → Backend:  uvicorn backend.api:app --reload --port 8000")
-    print("  → Portal:   uvicorn backend.portal_api:app --reload --port 8001")
+    print("  → Portal:   gleiche App — uvicorn backend.api:app (Pfade unter /portal/*)")
     print("  → Frontend: npm start")
     print()
     print("  Demo-Login:")

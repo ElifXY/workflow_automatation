@@ -41,8 +41,8 @@ PERMISSION_NAV_TABS: Dict[str, FrozenSet[str]] = {
     "settings:write": frozenset({"settings"}),
     "billing:manage": frozenset({"settings"}),
     "audit:read": frozenset({"settings"}),
-    "engine:run": frozenset({"ki", "steuerbot", "automation"}),
-    "engine:read": frozenset({"ki", "steuerbot", "automation"}),
+    "engine:run": frozenset({"automation"}),
+    "engine:read": frozenset({"automation"}),
     "email:send": frozenset({"mandanten", "portalchat"}),
     "portal:read": frozenset({"portalchat", "mandanten"}),
     "portal:write": frozenset({"portalchat", "mandanten"}),
@@ -71,15 +71,21 @@ def merged_settings_for_user(user: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 def _allowed_tab_ids(canonical_role: str, merged: Dict[str, Any]) -> Optional[Set[str]]:
     """None = keine Nav-Einschränkung (Owner/Admin)."""
-    if canonical_role not in {"steuerberater", "mitarbeiter"}:
+    if canonical_role not in {"teamleiter", "steuerberater", "mitarbeiter"}:
         return None
-    key = "rollen_nav_steuerberater" if canonical_role == "steuerberater" else "rollen_nav_mitarbeiter"
+    key_map = {
+        "teamleiter": "rollen_nav_teamleiter",
+        "steuerberater": "rollen_nav_steuerberater",
+        "mitarbeiter": "rollen_nav_mitarbeiter",
+    }
+    key = key_map.get(canonical_role, "rollen_nav_mitarbeiter")
     raw = merged.get(key)
     if not isinstance(raw, list) or len(raw) == 0:
         raw = list(DEFAULT_SETTINGS.get(key) or [])
     tabs = {str(x).strip().lower() for x in raw if str(x).strip()}
     tabs.add("dashboard")
-    tabs.add("portalchat")
+    if "dokumente" in tabs:
+        tabs.add("belege")
     return tabs
 
 

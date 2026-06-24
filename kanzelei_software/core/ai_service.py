@@ -202,19 +202,142 @@ def _normalize_vertrauen(v: Any) -> float:
     return max(0.0, min(1.0, float(x)))
 
 
+# Alternative Feldnamen aus KI-Antworten (OpenAI/Claude)
+_RECEIPT_FIELD_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "betrag_brutto": (
+        "brutto",
+        "gesamt",
+        "gesamtbetrag",
+        "summe",
+        "total",
+        "total_amount",
+        "gross_amount",
+        "amount_gross",
+        "zu_zahlen",
+        "zu_bezahlen",
+        "endbetrag",
+        "betrag",
+        "amount",
+    ),
+    "betrag_netto": ("netto", "net_amount", "amount_net", "nettobetrag"),
+    "mwst_betrag": ("mwst", "ust", "ust_betrag", "steuer", "tax", "tax_amount", "mehrwertsteuer"),
+    "mwst_satz": ("steuersatz", "ust_satz", "mwst_prozent", "tax_rate", "vat_rate"),
+    "lieferant": (
+        "haendler",
+        "händler",
+        "merchant",
+        "vendor",
+        "supplier",
+        "absender",
+        "verkaeufer",
+        "verkäufer",
+        "firma",
+        "unternehmen",
+    ),
+    "rechnungsnummer": ("beleg_nr", "belegnummer", "receipt_number", "beleg_id", "bon_nr"),
+    "datum": ("belegdatum", "date", "rechnungsdatum"),
+    "buchungstext": ("text", "beschreibung", "verwendungszweck"),
+    "vertrauens_score": ("konfidenz", "confidence", "confidence_score"),
+}
+
+
+def _flatten_receipt_dict(parsed: Dict[str, Any]) -> Dict[str, Any]:
+    """Verschachtelte KI-Strukturen (amounts/totals) flach machen."""
+    out: Dict[str, Any] = dict(parsed)
+    for nest_key in ("amounts", "totals", "betraege", "summen", "total", "payment"):
+        block = parsed.get(nest_key)
+        if isinstance(block, dict):
+            for k, v in block.items():
+                if k not in out or out[k] in (None, "", 0, 0.0):
+                    out[k] = v
+    return out
+
+
+def _apply_receipt_field_aliases(out: Dict[str, Any]) -> None:
+    """Fehlende Standardfelder aus Alias-Namen übernehmen."""
+    for target, aliases in _RECEIPT_FIELD_ALIASES.items():
+        cur = _parse_amount_value(out.get(target)) if "betrag" in target or target == "mwst_betrag" else out.get(target)
+        if target.startswith("betrag") or target == "mwst_betrag":
+            if _parse_amount_value(cur) not in (None, 0.0):
+                continue
+        elif cur not in (None, "", 0):
+            continue
+        for alias in aliases:
+            if alias not in out:
+                continue
+            val = out.get(alias)
+            if target.startswith("betrag") or target == "mwst_betrag":
+                p = _parse_amount_value(val)
+                if p is not None and p > 0:
+                    out[target] = p
+                    break
+            elif val not in (None, "", 0):
+                out[target] = val
+                break
+
+
+def _infer_mwst_satz_from_amounts(brutto: float, netto: float, mwst: float) -> Optional[int]:
+    if netto and netto > 0 and mwst is not None and mwst >= 0:
+        return max(0, min(100, int(round((mwst / netto) * 100))))
+    if brutto and brutto > 0 and netto and netto > 0:
+        implied = (brutto / netto) - 1.0
+        if implied > 0:
+            return max(0, min(100, int(round(implied * 100))))
+    return None
+
+
+def _complete_receipt_amounts(out: Dict[str, Any]) -> None:
+    """Netto/MwSt aus Brutto + Satz ergänzen (Kassenbelege D/A/CH)."""
+    brutto = _parse_amount_value(out.get("betrag_brutto")) or 0.0
+    netto = _parse_amount_value(out.get("betrag_netto"))
+    mwst = _parse_amount_value(out.get("mwst_betrag"))
+    satz_raw = out.get("mwst_satz")
+    satz: Optional[int] = None
+    if satz_raw is not None:
+        satz = _parse_mwst_prozent(satz_raw, default=0)
+        if satz == 0 and satz_raw not in (0, "0"):
+            satz = None
+
+    if brutto <= 0:
+        return
+
+    if satz is None:
+        satz = _infer_mwst_satz_from_amounts(brutto, netto or 0.0, mwst or 0.0)
+    if satz is None:
+        satz = 19
+
+    out["betrag_brutto"] = round(brutto, 2)
+    out["mwst_satz"] = satz
+
+    if netto is None or netto <= 0:
+        netto = round(brutto / (1.0 + satz / 100.0), 2)
+    if mwst is None or mwst < 0:
+        mwst = round(brutto - netto, 2)
+    elif abs((netto + mwst) - brutto) > 0.06:
+        netto = round(brutto - mwst, 2)
+
+    out["betrag_netto"] = round(netto, 2)
+    out["mwst_betrag"] = round(max(0.0, mwst), 2)
+
+
 def _normalize_receipt_payload(parsed: Dict[str, Any]) -> Dict[str, Any]:
     """Modell-antwort tolerant machen (häufige KI-Schreibweise DACH)."""
-    out = dict(parsed)
+    out = _flatten_receipt_dict(parsed or {})
+    _apply_receipt_field_aliases(out)
+
     for key in ("betrag_brutto", "betrag_netto", "mwst_betrag"):
-        if key not in out:
-            continue
-        p = _parse_amount_value(out.get(key))
-        if p is not None:
-            out[key] = round(p, 2)
-    if "mwst_satz" in out:
+        if key in out:
+            p = _parse_amount_value(out.get(key))
+            if p is not None:
+                out[key] = round(p, 2)
+
+    _complete_receipt_amounts(out)
+
+    if "mwst_satz" in out and out.get("mwst_satz") is not None:
         out["mwst_satz"] = _parse_mwst_prozent(out.get("mwst_satz"))
     if "vertrauens_score" in out:
         out["vertrauens_score"] = _normalize_vertrauen(out.get("vertrauens_score"))
+
     vab = out.get("vorsteuer_abzugsfaehig")
     if isinstance(vab, str):
         out["vorsteuer_abzugsfaehig"] = vab.strip().lower() in (
@@ -223,6 +346,7 @@ def _normalize_receipt_payload(parsed: Dict[str, Any]) -> Dict[str, Any]:
             "ja",
             "yes",
         )
+
     uf = out.get("unsichere_felder")
     if uf is None:
         out["unsichere_felder"] = []
@@ -230,9 +354,17 @@ def _normalize_receipt_payload(parsed: Dict[str, Any]) -> Dict[str, Any]:
         out["unsichere_felder"] = [uf] if uf.strip() else []
     elif not isinstance(uf, list):
         out["unsichere_felder"] = []
+    else:
+        out["unsichere_felder"] = [str(x) for x in uf if x]
+
     kat = out.get("kategorie")
     if kat is not None:
         out["kategorie"] = str(kat).strip().lower().replace(" ", "_")[:128]
+
+    for text_key in ("lieferant", "buchungstext", "rechnungsnummer", "notiz", "waehrung", "typ"):
+        if text_key in out and out[text_key] is not None:
+            out[text_key] = str(out[text_key]).strip()
+
     dat = out.get("datum")
     if isinstance(dat, str):
         s = dat.strip()
@@ -245,23 +377,57 @@ def _normalize_receipt_payload(parsed: Dict[str, Any]) -> Dict[str, Any]:
             if sl:
                 d, mo, y = sl.groups()
                 out["datum"] = f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
+
+    if (_parse_amount_value(out.get("betrag_brutto")) or 0) <= 0:
+        uf = list(out.get("unsichere_felder") or [])
+        for fld in ("betrag_brutto", "betrag_netto", "mwst_betrag", "datum", "lieferant"):
+            if fld not in uf:
+                uf.append(fld)
+        out["unsichere_felder"] = uf
+        out["vertrauens_score"] = min(_normalize_vertrauen(out.get("vertrauens_score")), 0.45)
+
     return out
+
+
+def _coerce_receipt_value(key: str, val: Any) -> Any:
+    if val is None:
+        return None
+    if key in ("betrag_brutto", "betrag_netto", "mwst_betrag"):
+        p = _parse_amount_value(val)
+        return p if p is not None else 0.0
+    if key == "mwst_satz":
+        return _parse_mwst_prozent(val)
+    if key == "vertrauens_score":
+        return _normalize_vertrauen(val)
+    if key == "vorsteuer_abzugsfaehig":
+        if isinstance(val, bool):
+            return val
+        return str(val).strip().lower() in ("true", "1", "ja", "yes")
+    if key == "unsichere_felder":
+        if isinstance(val, list):
+            return [str(x) for x in val]
+        if isinstance(val, str) and val.strip():
+            return [val.strip()]
+        return []
+    if key in ("typ", "datum", "waehrung", "lieferant", "rechnungsnummer", "kategorie",
+               "skr03_soll", "skr03_haben", "buchungstext", "notiz"):
+        return str(val).strip()
+    return val
 
 
 def _receipt_model_from_normalized(normalized: Dict[str, Any]) -> ReceiptExtraction:
     keys = set(ReceiptExtraction.model_fields.keys())
-    trimmed = {k: v for k, v in normalized.items() if k in keys}
+    safe = ReceiptExtraction().model_dump()
+    for k in keys:
+        if k not in normalized:
+            continue
+        coerced = _coerce_receipt_value(k, normalized[k])
+        if coerced is not None:
+            safe[k] = coerced
     try:
-        return ReceiptExtraction.model_validate(trimmed)
+        return ReceiptExtraction.model_validate(safe)
     except ValidationError:
-        safe = ReceiptExtraction().model_dump()
-        for k in keys:
-            if k in trimmed:
-                safe[k] = trimmed[k]
-        try:
-            return ReceiptExtraction.model_validate(safe)
-        except ValidationError:
-            return ReceiptExtraction()
+        return ReceiptExtraction.model_validate(safe, strict=False)
 
 
 def _safe_json_load(raw: str) -> Dict[str, Any]:
@@ -460,34 +626,65 @@ async def analyze_document(*, filename: str, b64_content: str) -> DocumentExtrac
         )
 
 
-async def analyze_receipt(*, filename: str, b64_content: str, mandant: str = "") -> ReceiptExtraction:
-    validate_b64_payload(b64_content)
+_RECEIPT_VISION_SYSTEM = (
+    "Du bist ein präziser Beleg-Extraktor für deutsche Steuerkanzleien. "
+    "Lies Kassenbons, Rechnungen und Quittungen (DE/AT/CH) vollständig — auch kleine Schrift. "
+    "Antworte nur mit einem JSON-Objekt (response_format json_object), keine Erklärungen."
+)
+
+_RECEIPT_VISION_PROMPT = """Analysiere den Beleg im Bild für die Buchhaltung.
+
+Pflicht — Beträge vom Beleg übernehmen (nicht 0, wenn lesbar):
+- betrag_brutto: Endbetrag / SUMME / ZU BEZAHLEN / Gesamtbetrag (Zahl mit Punkt als Dezimal, z.B. 4.7)
+- betrag_netto und mwst_betrag: aus Steuerzeile (Netto, MwSt/USt, Brutto) oder berechnen
+- mwst_satz: Prozent als Ganzzahl (19, 13, 10, 7, 0) — AT-Kassenbons oft 13% (Kennzeichnung D)
+
+Weitere Felder:
+- typ: ausgabe oder einnahme
+- datum: YYYY-MM-DD (vom Beleg; TT.MM.JJJJ → umrechnen)
+- lieferant: Firmenname oben auf dem Beleg; bei reinem Kassenbon ohne Namen: "Kasse"
+- rechnungsnummer: Beleg-Nr. / Bon-Nr.
+- kategorie: buero|reise|bewirtung|material|weiterbildung|kfz|software|werbung|versicherung|sonstiges
+- skr03_soll, skr03_haben: passende SKR03-Konten als 4-stellige Strings
+- buchungstext: max 30 Zeichen
+- vorsteuer_abzugsfaehig: boolean
+- waehrung: EUR
+- vertrauens_score: 0.0–1.0
+- unsichere_felder: Array mit Feldnamen die unklar sind (oder [])
+
+JSON-Schlüssel exakt: typ, datum, betrag_brutto, betrag_netto, mwst_betrag, mwst_satz, waehrung,
+lieferant, rechnungsnummer, kategorie, skr03_soll, skr03_haben, buchungstext,
+vorsteuer_abzugsfaehig, notiz, vertrauens_score, unsichere_felder."""
+
+_RECEIPT_VISION_RETRY_PROMPT = """Der vorherige Versuch lieferte keine Beträge. Lies den Beleg erneut, Zeile für Zeile.
+
+Suche explizit nach: SUMME, ZU BEZAHLEN, GESAMT, TOTAL, Brutto, Netto, MwSt/USt, Steuersatz (%).
+Beispiel Kassenbon: SUMME 4,70 → betrag_brutto: 4.7; Netto 4,16; MwSt 0,54; mwst_satz: 13.
+
+Gleiche JSON-Felder wie zuvor. betrag_brutto darf nicht 0 sein wenn ein Endbetrag lesbar ist."""
+
+
+async def _openai_receipt_vision(
+    *,
+    filename: str,
+    b64_content: str,
+    mandant: str,
+    extra_prompt: str,
+) -> ReceiptExtraction:
     mime = _guess_image_mime(filename)
-    prompt = (
-        "Analysiere diesen Beleg/Kassenbeleg (Deutschland/Österreich möglich) für die Buchhaltung. "
-        "Antworte ausschließlich mit einem JSON-Objekt, kein Markdown.\n"
-        "Zahlregeln (technisch):\n"
-        "- betrag_brutto, betrag_netto, mwst_betrag als JSON-Zahl mit Dezimalpunkt (Beispiele: 4.7 oder 4734.87). "
-        "Keine Anführungszeichen um Zahlen.\n"
-        "- mwst_satz als Ganzzahl in Prozent ohne Prozentzeichen (z.B. 19, 13, 7, 10).\n"
-        "- datum bevorzugt YYYY-MM-DD; wenn auf dem Beleg nur TT.MM.JJJJ steht, so übernehmen (wird nachgelagert normalisiert).\n"
-        "- typ: ausgabe oder einnahme.\n"
-        "- kategorie: kurzes Schlüsselwort kleingeschrieben, z.B. weiterbildung, reise, bewirtung, buero, material, "
-        "kfz, software, hardware, werbung, versicherung, sonstiges (passend zur Ausgabenart).\n"
-        "- vertrauens_score: Zahl zwischen 0 und 1 (Lesbarkeit).\n\n"
-        "Felder: typ, datum, betrag_brutto, betrag_netto, mwst_betrag, mwst_satz, waehrung, lieferant, "
-        "rechnungsnummer, kategorie, skr03_soll, skr03_haben, buchungstext, "
-        "vorsteuer_abzugsfaehig, notiz, vertrauens_score, unsichere_felder."
-    )
+    prompt = _RECEIPT_VISION_PROMPT + ("\n\n" + extra_prompt if extra_prompt else "")
     if mandant:
-        prompt += f" Mandantenkontext (optional): {mandant}."
+        prompt += f"\nMandant (Kontext): {mandant}."
     messages = [
-        {"role": "system", "content": "Du bist ein exakter Beleg-Extraktor. Nur valides JSON, keine Erläuterung."},
+        {"role": "system", "content": _RECEIPT_VISION_SYSTEM},
         {
             "role": "user",
             "content": [
                 {"type": "text", "text": f"{prompt}\nDateiname: {filename}"},
-                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64_content}", "detail": "high"}},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{b64_content}", "detail": "high"},
+                },
             ],
         },
     ]
@@ -495,11 +692,92 @@ async def analyze_receipt(*, filename: str, b64_content: str, mandant: str = "")
         endpoint="/belege/analysieren",
         model=VISION_MODEL,
         messages=messages,
-        max_tokens=max(SCAN_TOKEN_BUDGET, 1400),
+        max_tokens=max(SCAN_TOKEN_BUDGET, 1600),
         temperature=0.05,
         response_format={"type": "json_object"},
     )
     parsed = _safe_json_load(_choice_text(resp))
     normalized = _normalize_receipt_payload(parsed or {})
     return _receipt_model_from_normalized(normalized)
+
+
+async def _analyze_receipt_anthropic(
+    *,
+    filename: str,
+    b64_content: str,
+    mandant: str,
+) -> ReceiptExtraction:
+    import base64
+
+    from core.beleg_service import analysiere_beleg
+
+    raw = base64.standard_b64decode(b64_content)
+    buchung = await analysiere_beleg(raw, filename, mandant or "")
+    normalized = _normalize_receipt_payload(buchung or {})
+    return _receipt_model_from_normalized(normalized)
+
+
+def _enrich_receipt_skr03(receipt: ReceiptExtraction) -> ReceiptExtraction:
+    from core.beleg_service import SKR03_KATEGORIEN
+
+    kat = (receipt.kategorie or "sonstiges").strip().lower()
+    konto = SKR03_KATEGORIEN.get(kat, SKR03_KATEGORIEN["sonstiges"])
+    updates: Dict[str, Any] = {}
+    if not (receipt.skr03_soll or "").strip():
+        updates["skr03_soll"] = konto["soll"]
+    if not (receipt.skr03_haben or "").strip():
+        updates["skr03_haben"] = konto["haben"]
+    if updates:
+        return receipt.model_copy(update=updates)
+    return receipt
+
+
+async def analyze_receipt(*, filename: str, b64_content: str, mandant: str = "") -> ReceiptExtraction:
+    """Beleg per Vision (OpenAI) lesen; bei leeren Beträgen Retry + optional Claude."""
+    validate_b64_payload(b64_content)
+
+    result = await _openai_receipt_vision(
+        filename=filename,
+        b64_content=b64_content,
+        mandant=mandant,
+        extra_prompt="",
+    )
+
+    if (result.betrag_brutto or 0) <= 0:
+        result = await _openai_receipt_vision(
+            filename=filename,
+            b64_content=b64_content,
+            mandant=mandant,
+            extra_prompt=_RECEIPT_VISION_RETRY_PROMPT,
+        )
+
+    if (result.betrag_brutto or 0) <= 0 and (os.getenv("ANTHROPIC_API_KEY") or "").strip():
+        try:
+            result = await _analyze_receipt_anthropic(
+                filename=filename,
+                b64_content=b64_content,
+                mandant=mandant,
+            )
+        except Exception:
+            pass
+
+    result = _enrich_receipt_skr03(result)
+
+    if (result.betrag_brutto or 0) <= 0:
+        unsichere = list(result.unsichere_felder or [])
+        for fld in ("betrag_brutto", "betrag_netto", "mwst_betrag"):
+            if fld not in unsichere:
+                unsichere.append(fld)
+        note = (result.notiz or "").strip()
+        if "nicht erkannt" not in note.lower():
+            note = (note + " Beträge nicht automatisch erkannt — bitte korrigieren.").strip()
+        result = result.model_copy(
+            update={
+                "unsichere_felder": unsichere,
+                "vertrauens_score": min(result.vertrauens_score, 0.4),
+                "notiz": note,
+            }
+        )
+
+    return result
 

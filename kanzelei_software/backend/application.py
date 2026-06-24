@@ -49,7 +49,7 @@ logging.basicConfig(
 log = logging.getLogger("kanzlei_api")
 
 app = FastAPI(
-    title="Kanzlei AI — API v3.0",
+    title="Kanzlei Automation — API v3.0",
     description="Vollautomatisches Kanzlei-Management",
     version="3.0.0",
     docs_url="/docs",

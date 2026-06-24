@@ -17,7 +17,7 @@ function readStoredPreference() {
     const v = localStorage.getItem(THEME_STORAGE_KEY);
     if (v === "dark" || v === "light" || v === "system") return v;
   } catch {}
-  return "system";
+  return "light";
 }
 
 function prefersDark() {
@@ -52,7 +52,7 @@ export function applyDocumentTheme(resolved) {
     if (meta) {
       meta.setAttribute(
         "content",
-        resolved === "light" ? "#ebe6dc" : "#0b0d11",
+        resolved === "light" ? "#eef2ff" : "#0b0d11",
       );
     }
   } catch {}
@@ -60,9 +60,9 @@ export function applyDocumentTheme(resolved) {
 
 const ThemeContext = createContext({
   /** @type {ThemePreference} */
-  themePref: "system",
+  themePref: "light",
   /** @type {"dark"|"light"} */
-  resolved: "dark",
+  resolved: "light",
   /** @param {ThemePreference} p */
   setThemePref: () => {},
 });

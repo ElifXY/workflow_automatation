@@ -23,5 +23,8 @@ jobs:
           python-version: "3.11"
 
       - name: Run repository policy check
+        env:
+          ENABLE_ADVANCED_FEATURES: "1"
+          SECURITY_BASELINE_MAX_AGE_HOURS: "24"
         run: |
           python scripts/repo_policy_check.py

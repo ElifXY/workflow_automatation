@@ -1,5 +1,5 @@
 // ============================================================
-// Kanzlei AI — Einstellungen
+// Kanzlei Automation — Einstellungen
 // Datei: src/pages/Settings.js
 //
 // 6 Kategorien = 6 Profitabilitäts-Hebel:
@@ -12,9 +12,11 @@
 // ============================================================
 
 import { useEffect, useState, useCallback } from "react";
+import { Link } from "react-router-dom";
 import { useContentLayoutWidth } from "../useContentLayoutWidth";
 import {
   getSettings,
+  unwrapSettingsPayload,
   updateSetting,
   resetSettings,
   getSystemInfo,
@@ -31,23 +33,43 @@ import {
   createStripeCheckoutSession,
   createStripePortalSession,
   setPilotBaseline,
+  testTenantSmtp,
+  readAuthed,
+  getM365Status,
+  startM365Connect,
+  disconnectM365,
+  getM365CalendarPreview,
+  getM365MailPreview,
+  getBetreuerMatrix,
+  updateMandantAPI,
+  bulkAssignBetreuer,
 } from "../api";
 import PermissionGate, { hasRoleReal } from "../components/PermissionGate";
-import { NAV_TAB_IDS, NAV_TAB_LABELS } from "../navAccess";
+import {
+  NAV_TAB_IDS,
+  NAV_TAB_LABELS,
+  NAV_SETTINGS_GROUPS,
+  ROLE_NAV_PRESETS,
+  FEATURE_PERMISSION_KEYS,
+} from "../navAccess";
 import { ThemeQuickSwitch } from "../theme";
 
-const FONTS = `@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@300;400;500;600&display=swap');`;
+const NAV_TOGGLE_IDS = NAV_TAB_IDS.filter((id) => !["ki", "belege"].includes(id));
 
-// ─── Tabs ────────────────────────────────────────────────────
+const FONTS = `@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');`;
+
+// ─── Tabs (Produktfokus) ───────────────────────────────────────
 const TABS = [
-  { id:"ki",          label:"KI-Konfiguration",      icon:"🧠", badge:"Herzstück" },
-  { id:"workflow",    label:"Workflow-Designer",      icon:"⚙",  badge:null },
-  { id:"portal",      label:"Mandanten-Portal",       icon:"📱",  badge:null },
-  { id:"billing",     label:"Monetarisierung",        icon:"💰",  badge:"Umsatz-Hebel" },
-  { id:"compliance",  label:"Compliance & Security",  icon:"🛡",  badge:null },
-  { id:"schnittstellen",label:"Schnittstellen",       icon:"🔌",  badge:"API-Center" },
-  { id:"kanzlei",     label:"Kanzlei-Daten",         icon:"🏢",  badge:null },
+  { id: "email", label: "E-Mail & Versand", icon: "✉", badge: "Start" },
+  { id: "automation", label: "Automation & Eskalation", icon: "⚙" },
+  { id: "portal", label: "Mandanten-Portal", icon: "📱" },
+  { id: "kanzlei", label: "Kanzlei-Daten", icon: "🏢" },
+  { id: "team", label: "Team & Berechtigungen", icon: "🛡", adminOnly: true },
+  { id: "integrationen", label: "Integrationen", icon: "🔌", adminOnly: true },
+  { id: "erweitert", label: "Erweitert", icon: "⋯", adminOnly: true },
 ];
+
+const ADMIN_TABS = new Set(["team", "integrationen", "erweitert"]);
 
 // ─── Primitives ───────────────────────────────────────────────
 const Btn = ({children,onClick,variant="ghost",size="md",loading=false,disabled=false,style={}}) => {
@@ -440,11 +462,59 @@ const WorkflowTab = ({s, save}) => {
       {[
         {key:"auto_workflow_monatsabschluss", label:"Monatsabschluss automatisch starten"},
         {key:"auto_workflow_lohn",            label:"Lohnabrechnung automatisch starten"},
+        {key:"auto_eskalation_aktiv",          label:"Automatische Eskalation (Tag 3→30)"},
+        {key:"auto_frist_rettung_aktiv",       label:"Fristen-Rettung (Frist + fehlende Docs)"},
       ].map(item=>(
         <Row key={item.key} label={item.label}>
           <Toggle value={s[item.key]??true} onChange={v=>save(item.key,v)}/>
         </Row>
       ))}
+
+      <SectionTitle>Eskalationsplan (Vorschau)</SectionTitle>
+      <div style={{background:"var(--bg3)",borderRadius:12,padding:"14px 16px",marginBottom:16,
+        border:"1px solid var(--border)"}}>
+        <div style={{fontSize:12,color:"var(--text3)",marginBottom:12}}>
+          Standard-Ablauf ohne manuelles Nachfassen — sichtbar in der Mandantenakte.
+        </div>
+        {[
+          "Tag 0 — Dokument angefordert",
+          "Tag 3 — Erste Erinnerung",
+          "Tag 7 — Zweite Erinnerung",
+          "Tag 14 — Deutlicher Hinweis",
+          "Tag 21 — Interne Eskalation",
+          "Tag 30 — Mandant rot markiert",
+        ].map((line, i) => (
+          <div key={i} style={{
+            display:"flex",alignItems:"center",gap:10,padding:"8px 0",
+            borderBottom: i < 5 ? "1px solid var(--border)" : "none",
+            fontSize:13,color:"var(--text2)",
+          }}>
+            <span style={{
+              width:8,height:8,borderRadius:"50%",flexShrink:0,
+              background:"var(--accent)",opacity:0.5 + i * 0.08,
+            }}/>
+            {line}
+          </div>
+        ))}
+      </div>
+
+      <SectionTitle>ROI-Monatsbericht</SectionTitle>
+      <Row label="ROI-Bericht per E-Mail (monatlich)" description="Am 1. des Monats — Zusammenfassung der Automationen.">
+        <Toggle value={s.auto_roi_email_aktiv ?? true} onChange={(v) => save("auto_roi_email_aktiv", v)} />
+      </Row>
+      <Row label="Empfänger (optional)" description="Leer = Kanzlei-E-Mail aus Stammdaten.">
+        <input
+          type="email"
+          defaultValue={s.roi_email_empfaenger || ""}
+          placeholder={s.kanzlei_email || "partner@kanzlei.de"}
+          onBlur={(ev) => save("roi_email_empfaenger", ev.target.value)}
+          style={{
+            width: "100%", maxWidth: 320, background: "var(--bg)", border: "1px solid var(--border2)",
+            borderRadius: 8, color: "var(--text)", padding: "7px 11px", fontSize: 13,
+            outline: "none", fontFamily: "var(--font-body)",
+          }}
+        />
+      </Row>
     </div>
   );
 };
@@ -497,20 +567,6 @@ const PortalTab = ({s, save}) => {
         Proaktive Bot-Fragen erscheinen in der Portal-Übersicht — Mandant antwortet per Klick.
       </div>
     </div>
-
-    <Row label="Produktfokus (optional)"
-         description="Server-seitig schlanke Nav-Liste; Sidebar-Toggle „Erweiterte Module“ bleibt für Power-User">
-      <Toggle value={s.produkt_fokus_aktiv??false} onChange={v=>{
-        save("produkt_fokus_aktiv", v);
-        if(v){
-          save("rollen_nav_steuerberater", ["dashboard","mandanten","portalchat","aufgaben","automation","ki","neu","settings"]);
-          save("rollen_nav_mitarbeiter", ["dashboard","mandanten","portalchat","aufgaben","ki","settings"]);
-        } else {
-          save("rollen_nav_steuerberater", ["dashboard","mandanten","portalchat","aufgaben","ki","profit","steuerbot","dokumente","belege","rechnungen","automation","empfehlungen","analytics","neu","settings"]);
-          save("rollen_nav_mitarbeiter", ["dashboard","mandanten","portalchat","aufgaben","ki","dokumente","belege","rechnungen","empfehlungen","settings"]);
-        }
-      }}/>
-    </Row>
 
     <SectionTitle>Bot-Benachrichtigungen</SectionTitle>
     <Row label="E-Mail an Mandant bei neuer Bot-Frage"
@@ -1031,163 +1087,223 @@ const BillingTab = ({s, save}) => {
 };
 
 // ═══════════════════════════════════════════════════════════
-// 5. COMPLIANCE & SECURITY
+// 5. TEAM & BERECHTIGUNGEN (schlank)
 // ═══════════════════════════════════════════════════════════
 
-const ComplianceTab = ({s, save}) => {
-  const ROLLEN = ["owner", "admin", "steuerberater", "mitarbeiter"];
-  const canEditRoleMatrix = hasRoleReal(["owner", "admin"]);
+const BetreuerMatrix = ({ showToast }) => {
+  const [matrix, setMatrix] = useState(null);
+  const [busy, setBusy] = useState("");
+  const [selected, setSelected] = useState(() => new Set());
+  const [bulkBetreuer, setBulkBetreuer] = useState("");
+  const canEdit = hasRoleReal(["owner", "admin", "steuerberater"]);
+
+  const load = useCallback(() => {
+    getBetreuerMatrix()
+      .then((r) => setMatrix(r?.data ?? r))
+      .catch(() => setMatrix(null));
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const assign = async (mandantName, betreuerEmail) => {
+    if (!canEdit) return;
+    setBusy(mandantName);
+    try {
+      await updateMandantAPI(mandantName, { betreuer_email: betreuerEmail || "" });
+      showToast?.(`Betreuer für ${mandantName} gespeichert`);
+      load();
+    } catch (e) {
+      showToast?.(e.message || "Speichern fehlgeschlagen", "error");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const toggleSelect = (name) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  };
+
+  const assignBulk = async (payload) => {
+    if (!canEdit) return;
+    setBusy("bulk");
+    try {
+      const res = await bulkAssignBetreuer(payload);
+      const msg = res?.data?.message ?? res?.message ?? "Bulk-Zuweisung gespeichert";
+      showToast?.(msg);
+      setSelected(new Set());
+      load();
+    } catch (e) {
+      showToast?.(e.message || "Bulk-Zuweisung fehlgeschlagen", "error");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  if (!matrix?.mandanten?.length) {
+    return (
+      <div style={{ fontSize: 12, color: "var(--text3)", marginBottom: 16 }}>
+        Noch keine Mandanten für die Betreuer-Matrix.
+      </div>
+    );
+  }
+
+  const team = matrix.team || [];
 
   return (
-    <div>
-      <SectionTitle>GoBD & Rechtliches</SectionTitle>
-
-      <Row label="GoBD-Konformität" locked description="Gesetzlich vorgeschrieben — nicht änderbar (§ 147 AO)">
-        <div style={{color:"var(--green)",fontWeight:600,fontSize:14}}>✓ Aktiv</div>
-      </Row>
-      <Row label="Audit-Log unveränderbar" locked description="Revisionssichere Protokollierung — Haftungsschutz">
-        <div style={{color:"var(--green)",fontWeight:600,fontSize:14}}>✓ Aktiv</div>
-      </Row>
-      <Row label="Aufbewahrung (Jahre)" description="§ 147 AO: Handelsbücher 10 Jahre">
-        <div style={{fontSize:14,fontWeight:600,color:"var(--text)"}}>{s.gobd_aufbewahrung_jahre||10} Jahre</div>
-      </Row>
-
-      <SectionTitle>Server & Datenschutz</SectionTitle>
-
-      <Row label="Server-Standort" description="DSGVO: Daten müssen in EU gespeichert werden">
-        <select value={s.server_standort||"DE"}
-          onChange={e=>save("server_standort",e.target.value)}
-          style={{background:"var(--bg)",border:`1px solid var(--border2)`,borderRadius:8,
-            color:"var(--text)",padding:"7px 11px",fontSize:13,outline:"none",
-            fontFamily:"'DM Sans',sans-serif"}}>
-          <option value="DE">🇩🇪 Deutschland (DSGVO)</option>
-          <option value="EU">🇪🇺 EU (DSGVO)</option>
-          <option value="CH">🇨🇭 Schweiz (DSG)</option>
-          <option value="US">🇺🇸 USA (DSGVO-Einschränkungen!)</option>
-        </select>
-      </Row>
-
-      <Row label="Datenschutzbeauftragter (Email)">
-        <input type="email" defaultValue={s.datenschutz_beauftragter||""}
-          placeholder="dsb@kanzlei.de"
-          onBlur={e=>save("datenschutz_beauftragter",e.target.value)}
-          style={{width:220,background:"var(--bg)",border:`1px solid var(--border2)`,borderRadius:8,
-            color:"var(--text)",padding:"7px 11px",fontSize:13,outline:"none",
-            fontFamily:"'DM Sans',sans-serif"}}/>
-      </Row>
-
-      <SectionTitle>Sicherheit</SectionTitle>
-
-      {[
-        {key:"2fa_pflicht",           label:"2-Faktor-Authentifizierung Pflicht", desc:"Für alle Mitarbeiter"},
-        {key:"verschluesselung_aktiv",label:"Daten-Verschlüsselung",               desc:"AES-256 für gespeicherte Daten"},
-        {key:"ip_whitelist_aktiv",    label:"IP-Whitelist aktiv",                  desc:"Nur erlaubte IPs"},
-      ].map(item=>(
-        <Row key={item.key} label={item.label} description={item.desc}>
-          <Toggle value={s[item.key]??false} onChange={v=>save(item.key,v)}/>
-        </Row>
+    <div style={{
+      marginBottom: 20, borderRadius: 12, border: "1px solid var(--border)",
+      overflow: "hidden", background: "var(--bg3)",
+    }}>
+      {canEdit ? (
+        <div style={{
+          padding: "10px 14px", borderBottom: "1px solid var(--border)",
+          display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center",
+        }}>
+          <select
+            value={bulkBetreuer}
+            onChange={(e) => setBulkBetreuer(e.target.value)}
+            style={{
+              flex: "1 1 180px", maxWidth: 280, padding: "7px 10px", borderRadius: 8,
+              border: "1px solid var(--border2)", background: "var(--bg)", fontSize: 12,
+            }}
+          >
+            <option value="">Betreuer wählen…</option>
+            {team.map((t) => (
+              <option key={t.email} value={t.email}>{t.email}</option>
+            ))}
+          </select>
+          <button
+            type="button"
+            disabled={!bulkBetreuer || selected.size === 0 || busy === "bulk"}
+            onClick={() => assignBulk({
+              betreuer_email: bulkBetreuer,
+              mandanten: [...selected],
+            })}
+            style={{
+              padding: "7px 12px", borderRadius: 8, border: "none", cursor: "pointer",
+              background: "var(--accent)", color: "#fff", fontSize: 12, fontWeight: 600,
+              opacity: !bulkBetreuer || selected.size === 0 ? 0.5 : 1,
+            }}
+          >
+            Auf Auswahl ({selected.size})
+          </button>
+          <button
+            type="button"
+            disabled={!bulkBetreuer || busy === "bulk"}
+            onClick={() => assignBulk({ betreuer_email: bulkBetreuer, nur_ohne_betreuer: true })}
+            style={{
+              padding: "7px 12px", borderRadius: 8, border: "1px solid var(--border2)",
+              background: "var(--bg)", color: "var(--text)", fontSize: 12, cursor: "pointer",
+            }}
+          >
+            Alle ohne Betreuer
+          </button>
+        </div>
+      ) : null}
+      <div style={{
+        padding: "10px 14px", fontSize: 11, color: "var(--text3)",
+        textTransform: "uppercase", letterSpacing: "0.06em",
+        borderBottom: "1px solid var(--border)",
+      }}>
+        Mandant · Betreuer (E-Mail)
+      </div>
+      {matrix.mandanten.map((row) => (
+        <div key={row.name} style={{
+          display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+          padding: "10px 14px", borderBottom: "1px solid var(--border)",
+        }}>
+          {canEdit ? (
+            <input
+              type="checkbox"
+              checked={selected.has(row.name)}
+              onChange={() => toggleSelect(row.name)}
+              style={{ flexShrink: 0 }}
+            />
+          ) : null}
+          <div style={{ flex: "1 1 140px", minWidth: 0 }}>
+            <div style={{ fontWeight: 600, fontSize: 13, color: "var(--text)" }}>{row.name}</div>
+            <div style={{ fontSize: 11, color: "var(--text3)" }}>{row.email || "—"}</div>
+          </div>
+          <select
+            disabled={!canEdit || busy === row.name}
+            value={row.betreuer_email || ""}
+            onChange={(e) => assign(row.name, e.target.value)}
+            style={{
+              flex: "1 1 200px", maxWidth: 280, padding: "7px 10px", borderRadius: 8,
+              border: "1px solid var(--border2)", background: "var(--bg)", color: "var(--text)", fontSize: 12,
+            }}
+          >
+            <option value="">— alle Mitarbeiter —</option>
+            {team.map((t) => (
+              <option key={t.email} value={t.email}>
+                {t.email} ({t.rolle})
+              </option>
+            ))}
+          </select>
+        </div>
       ))}
-
-      <Row label="Session-Timeout">
-        <div style={{display:"flex",gap:8,alignItems:"center"}}>
-          <input type="number" defaultValue={s.session_timeout_minuten||60} min={5} max={480}
-            onBlur={e=>save("session_timeout_minuten",parseInt(e.target.value))}
-            style={{width:70,background:"var(--bg)",border:`1px solid var(--border2)`,borderRadius:8,
-              color:"var(--text)",padding:"7px 10px",fontSize:14,textAlign:"center",
-              outline:"none",fontFamily:"'DM Sans',sans-serif"}}/>
-          <span style={{fontSize:12,color:"var(--text3)"}}>Minuten</span>
+      {!canEdit ? (
+        <div style={{ padding: "8px 14px", fontSize: 11, color: "var(--text3)" }}>
+          Nur Steuerberater/Admin können Betreuer zuweisen.
         </div>
-      </Row>
+      ) : null}
+    </div>
+  );
+};
 
-      <SectionTitle>Rollen & Rechte</SectionTitle>
+const TeamTab = ({ s, save, showToast }) => {
+  const ROLLEN = ["owner", "admin", "teamleiter", "steuerberater", "mitarbeiter"];
+  const canEditRoleMatrix = hasRoleReal(["owner", "admin"]);
 
-      <PermissionGate
-        roles={["owner", "admin"]}
-        mode="disable"
-        fallback={null}
+  const applyPreset = (presetId) => {
+    const preset = ROLE_NAV_PRESETS[presetId];
+    if (!preset || !canEditRoleMatrix) return;
+    save("produkt_fokus_aktiv", presetId === "mitarbeiter" || presetId === "teamleiter");
+    save("rollen_nav_steuerberater", preset.steuerberater);
+    save("rollen_nav_teamleiter", preset.teamleiter || preset.steuerberater);
+    save("rollen_nav_mitarbeiter", preset.mitarbeiter);
+    try {
+      window.dispatchEvent(new CustomEvent("kanzlei-settings-changed"));
+    } catch {}
+  };
+
+  const renderNavBlock = (block) => {
+    const defMit = NAV_TOGGLE_IDS.filter(
+      (id) => !["profit", "steuerbot", "automation", "analytics", "neu", "settings"].includes(id),
+    );
+    const fallback = block.key === "rollen_nav_steuerberater"
+      ? NAV_TOGGLE_IDS.filter((id) => id !== "ki")
+      : defMit;
+    const cur = Array.isArray(s[block.key]) && s[block.key].length ? [...s[block.key]] : fallback;
+    const set = new Set(cur.map((x) => String(x).toLowerCase()).filter((id) => id !== "ki"));
+
+    return (
+      <div
+        key={block.key}
+        style={{
+          marginBottom: 14,
+          padding: "12px 14px",
+          borderRadius: 12,
+          border: "1px solid var(--border)",
+          background: "var(--bg3)",
+        }}
       >
-      <div style={{background:"var(--bg3)",borderRadius:12,padding:"14px 16px",
-        border:`1px solid var(--border)`}}>
-        <div style={{fontSize:13,color:"var(--text2)",marginBottom:12}}>
-          Wer darf was? Extrem feingliedrig — schützt Haftung des Steuerberaters.
-        </div>
-        {[
-          {key:"rollen_lohn_sichtbar",     label:"Löhne & Gehälter sehen",        desc:"Lohnabrechnung einsehen"},
-          {key:"rollen_zahlungen_freigabe",label:"Zahlungen freigeben",            desc:"Bank-Überweisungen autorisieren"},
-          {key:"rollen_mandant_loeschen",  label:"Mandanten löschen",              desc:"Unwiderrufliche Löschung"},
-          {key:"rollen_export_datev",      label:"DATEV-Export durchführen",       desc:"Daten exportieren"},
-          {key:"rollen_einstellungen",     label:"Einstellungen ändern",           desc:"Dieses Menü"},
-        ].map(item=>(
-          <div key={item.key} style={{padding:"10px 0",borderBottom:`1px solid var(--border)`}}>
-            <div style={{fontWeight:500,color:"var(--text)",fontSize:13,marginBottom:4}}>{item.label}</div>
-            <div style={{fontSize:11,color:"var(--text3)",marginBottom:6}}>{item.desc}</div>
-            <div style={{display:"flex",gap:6}}>
-              {ROLLEN.map(rolle=>{
-                const aktiv = (s[item.key]||["admin"]).includes(rolle);
-                return (
-                  <div key={rolle} onClick={()=>{
-                    if (!canEditRoleMatrix) return;
-                    const current = s[item.key]||["admin"];
-                    const next = aktiv
-                      ? current.filter(r=>r!==rolle)
-                      : [...current, rolle];
-                    if(next.length > 0) save(item.key, next);
-                  }} style={{
-                    padding:"4px 12px",borderRadius:20,cursor:"pointer",
-                    background:aktiv?"color-mix(in srgb, var(--blue) 16%, var(--bg))":"var(--bg)",
-                    border:`1px solid ${aktiv?"color-mix(in srgb, var(--blue) 38%, transparent)":"var(--border2)"}`,
-                    color:aktiv?"var(--blue)":"var(--text3)",fontSize:12,fontWeight:aktiv?600:400,
-                  }}>{rolle}</div>
-                );
-              })}
-            </div>
-          </div>
-        ))}
-      </div>
-      </PermissionGate>
-      {!canEditRoleMatrix && (
-        <div style={{marginTop:10, fontSize:12, color:"var(--text3)"}}>
-          Nur Owner/Admin dürfen Rollenrechte bearbeiten.
-        </div>
-      )}
-
-      <SectionTitle>Navigation (Sidebar)</SectionTitle>
-      <div style={{ fontSize: 12, color: "var(--text2)", marginBottom: 10, lineHeight: 1.5 }}>
-        Steuerberater/in und Mitarbeitende sehen nur die hier aktivierten Bereiche. <b>Owner</b> und <b>Admin</b> sehen immer die vollständige Navigation (unabhängig von dieser Liste).
-      </div>
-      <PermissionGate
-        roles={["owner", "admin"]}
-        mode="disable"
-        fallback={
-          <div style={{ fontSize: 12, color: "var(--text3)", marginBottom: 8 }}>
-            Nur Owner/Admin können die Sidebar für andere Rollen anpassen.
-          </div>
-        }
-      >
-        {[
-          { key: "rollen_nav_steuerberater", title: "Steuerberater/in (inkl. Selbständige)" },
-          { key: "rollen_nav_mitarbeiter", title: "Mitarbeiter/in & Assistent/in" },
-        ].map((block) => {
-          const defMit = NAV_TAB_IDS.filter(
-            (id) => !["profit", "steuerbot", "automation", "analytics", "neu", "settings"].includes(id),
-          );
-          const fallback = block.key === "rollen_nav_steuerberater" ? [...NAV_TAB_IDS] : defMit;
-          const cur = Array.isArray(s[block.key]) && s[block.key].length ? [...s[block.key]] : fallback;
-          const set = new Set(cur.map((x) => String(x).toLowerCase()));
+        <div style={{ fontWeight: 600, color: "var(--text)", marginBottom: 10, fontSize: 13 }}>{block.title}</div>
+        {NAV_SETTINGS_GROUPS.map((group) => {
+          const ids = group.ids.filter((id) => NAV_TOGGLE_IDS.includes(id));
+          if (!ids.length) return null;
           return (
-            <div
-              key={block.key}
-              style={{
-                marginBottom: 14,
-                padding: "12px 14px",
-                borderRadius: 12,
-                border: "1px solid var(--border)",
-                background: "var(--bg3)",
-              }}
-            >
-              <div style={{ fontWeight: 600, color: "var(--text)", marginBottom: 8, fontSize: 13 }}>{block.title}</div>
+            <div key={`${block.key}-${group.id}`} style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 10, color: "var(--text3)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>
+                {group.label}
+              </div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                {NAV_TAB_IDS.map((tid) => {
+                {ids.map((tid) => {
                   const on = set.has(tid);
                   return (
                     <button
@@ -1215,9 +1331,8 @@ const ComplianceTab = ({s, save}) => {
                         color: on ? "var(--blue)" : "var(--text3)",
                         fontSize: 11,
                         fontWeight: on ? 600 : 400,
-                        opacity: tid === "dashboard" && on ? 0.85 : 1,
                       }}
-                      title={tid === "dashboard" ? "Dashboard ist immer sichtbar." : NAV_TAB_LABELS[tid] || tid}
+                      title={NAV_TAB_LABELS[tid] || tid}
                     >
                       {NAV_TAB_LABELS[tid] || tid}
                     </button>
@@ -1227,17 +1342,302 @@ const ComplianceTab = ({s, save}) => {
             </div>
           );
         })}
+      </div>
+    );
+  };
+
+  return (
+    <div>
+      <div style={{
+        background: "var(--bg3)", borderRadius: 12, padding: "14px 16px",
+        border: "1px solid var(--border)", marginBottom: 18,
+      }}>
+        <div style={{ fontSize: 13, color: "var(--text2)", lineHeight: 1.55 }}>
+          <Link to="/users" style={{ color: "var(--accent)", fontWeight: 600 }}>Team verwalten →</Link>
+          {" "}Personen einladen und Rollen zuweisen. Hier steuern Sie, welche Bereiche in der Sidebar sichtbar sind.
+        </div>
+      </div>
+
+      <SectionTitle>Betreuer-Matrix</SectionTitle>
+      <div style={{ fontSize: 12, color: "var(--text2)", marginBottom: 10, lineHeight: 1.5 }}>
+        Mitarbeiter sehen nur Mandanten mit ihrer E-Mail als Betreuer — oder ohne Zuweisung (alle).
+      </div>
+      <BetreuerMatrix showToast={showToast} />
+
+      <SectionTitle>Produktfokus</SectionTitle>
+      <Row label="Schlanke Navigation (empfohlen)"
+           description="Hauptbereiche sichtbar — Analytics, Profit & Co. unter „Mehr anzeigen“.">
+        <Toggle value={s.produkt_fokus_aktiv ?? true} onChange={(v) => {
+          save("produkt_fokus_aktiv", v);
+          if (v) {
+            save("rollen_nav_steuerberater", [
+              "dashboard", "mandanten", "dokumente", "automation", "aufgaben", "settings",
+            ]);
+            save("rollen_nav_mitarbeiter", [
+              "dashboard", "mandanten", "dokumente", "aufgaben", "settings",
+            ]);
+          } else {
+            applyPreset("inhaber");
+          }
+          try {
+            window.dispatchEvent(new CustomEvent("kanzlei-settings-changed"));
+          } catch {}
+        }} />
+      </Row>
+
+      <SectionTitle>Schnell-Presets</SectionTitle>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
+        {Object.entries(ROLE_NAV_PRESETS).map(([id, preset]) => (
+          <button
+            key={id}
+            type="button"
+            disabled={!canEditRoleMatrix}
+            onClick={() => applyPreset(id)}
+            style={{
+              padding: "8px 12px", borderRadius: 10, cursor: canEditRoleMatrix ? "pointer" : "not-allowed",
+              border: "1px solid var(--border2)", background: "var(--bg2)", textAlign: "left",
+            }}
+          >
+            <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>{preset.label}</div>
+            <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 2 }}>{preset.hint}</div>
+          </button>
+        ))}
+      </div>
+
+      <SectionTitle>Feature-Berechtigungen</SectionTitle>
+      <div style={{ fontSize: 12, color: "var(--text3)", marginBottom: 10, lineHeight: 1.5 }}>
+        Gilt serverseitig für API-Aktionen (Löschen, DATEV, Lohn, Einstellungen) — nicht nur in der Oberfläche.
+      </div>
+      <PermissionGate roles={["owner", "admin"]} mode="disable" fallback={null}>
+        <div style={{ background: "var(--bg3)", borderRadius: 12, padding: "14px 16px", border: "1px solid var(--border)" }}>
+          {FEATURE_PERMISSION_KEYS.map((item) => (
+            <div key={item.key} style={{ padding: "10px 0", borderBottom: "1px solid var(--border)" }}>
+              <div style={{ fontWeight: 500, color: "var(--text)", fontSize: 13, marginBottom: 6 }}>{item.label}</div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {ROLLEN.map((rolle) => {
+                  const aktiv = (s[item.key] || ["admin"]).includes(rolle);
+                  return (
+                    <div
+                      key={rolle}
+                      onClick={() => {
+                        if (!canEditRoleMatrix) return;
+                        const current = s[item.key] || ["admin"];
+                        const next = aktiv ? current.filter((r) => r !== rolle) : [...current, rolle];
+                        if (next.length > 0) save(item.key, next);
+                      }}
+                      style={{
+                        padding: "4px 12px", borderRadius: 20, cursor: canEditRoleMatrix ? "pointer" : "not-allowed",
+                        background: aktiv ? "color-mix(in srgb, var(--blue) 16%, var(--bg))" : "var(--bg)",
+                        border: `1px solid ${aktiv ? "color-mix(in srgb, var(--blue) 38%, transparent)" : "var(--border2)"}`,
+                        color: aktiv ? "var(--blue)" : "var(--text3)", fontSize: 12, fontWeight: aktiv ? 600 : 400,
+                      }}
+                    >
+                      {rolle}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      </PermissionGate>
+      {!canEditRoleMatrix && (
+        <div style={{ marginTop: 10, fontSize: 12, color: "var(--text3)" }}>
+          Nur Owner/Admin dürfen Berechtigungen bearbeiten.
+        </div>
+      )}
+
+      <SectionTitle>Navigation pro Rolle</SectionTitle>
+      <div style={{ fontSize: 12, color: "var(--text2)", marginBottom: 10, lineHeight: 1.5 }}>
+        Owner und Admin sehen immer die volle Navigation. KI ist unsichtbar im Hintergrund — kein eigener Menüpunkt.
+      </div>
+      <PermissionGate
+        roles={["owner", "admin"]}
+        mode="disable"
+        fallback={
+          <div style={{ fontSize: 12, color: "var(--text3)" }}>
+            Nur Owner/Admin können die Sidebar für andere Rollen anpassen.
+          </div>
+        }
+      >
+        {[
+          { key: "rollen_nav_steuerberater", title: "Steuerberater/in" },
+          { key: "rollen_nav_teamleiter", title: "Teamleiter/in" },
+          { key: "rollen_nav_mitarbeiter", title: "Mitarbeiter/in" },
+        ].map(renderNavBlock)}
       </PermissionGate>
     </div>
   );
 };
 
 // ═══════════════════════════════════════════════════════════
+// ERWEITERT — GoBD, KI, Abrechnung
+// ═══════════════════════════════════════════════════════════
+
+const ErweitertTab = ({ s, save, kpiStats }) => (
+  <div>
+    <div style={{
+      fontSize: 13, color: "var(--text2)", lineHeight: 1.55, marginBottom: 18,
+      padding: "12px 14px", borderRadius: 12, background: "var(--bg3)", border: "1px solid var(--border)",
+    }}>
+      Selten gebrauchte Optionen: Compliance, KI-Parameter und Abrechnung. Für den Alltag reichen die ersten fünf Einstellungs-Tabs.
+    </div>
+
+    <SectionTitle>Sicherheit & GoBD</SectionTitle>
+    <Row label="GoBD-Konformität" locked description="Gesetzlich vorgeschrieben — nicht änderbar (§ 147 AO)">
+      <div style={{ color: "var(--green)", fontWeight: 600, fontSize: 14 }}>✓ Aktiv</div>
+    </Row>
+    <Row label="Audit-Log unveränderbar" locked description="Revisionssichere Protokollierung">
+      <div style={{ color: "var(--green)", fontWeight: 600, fontSize: 14 }}>✓ Aktiv</div>
+    </Row>
+    <Row label="Aufbewahrung (Jahre)" description="§ 147 AO: Handelsbücher 10 Jahre">
+      <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text)" }}>{s.gobd_aufbewahrung_jahre || 10} Jahre</div>
+    </Row>
+    <Row label="Server-Standort" description="DSGVO: Daten in EU speichern">
+      <select
+        value={s.server_standort || "DE"}
+        onChange={(e) => save("server_standort", e.target.value)}
+        style={{
+          background: "var(--bg)", border: "1px solid var(--border2)", borderRadius: 8,
+          color: "var(--text)", padding: "7px 11px", fontSize: 13, outline: "none",
+        }}
+      >
+        <option value="DE">🇩🇪 Deutschland (DSGVO)</option>
+        <option value="EU">🇪🇺 EU (DSGVO)</option>
+        <option value="CH">🇨🇭 Schweiz (DSG)</option>
+      </select>
+    </Row>
+    <Row label="Datenschutzbeauftragter (E-Mail)">
+      <input
+        type="email"
+        defaultValue={s.datenschutz_beauftragter || ""}
+        placeholder="dsb@kanzlei.de"
+        onBlur={(e) => save("datenschutz_beauftragter", e.target.value)}
+        style={{
+          width: 220, background: "var(--bg)", border: "1px solid var(--border2)", borderRadius: 8,
+          color: "var(--text)", padding: "7px 11px", fontSize: 13, outline: "none",
+        }}
+      />
+    </Row>
+    {[
+      { key: "2fa_pflicht", label: "2-Faktor-Authentifizierung Pflicht" },
+      { key: "verschluesselung_aktiv", label: "Daten-Verschlüsselung" },
+      { key: "ip_whitelist_aktiv", label: "IP-Whitelist aktiv" },
+    ].map((item) => (
+      <Row key={item.key} label={item.label}>
+        <Toggle value={s[item.key] ?? false} onChange={(v) => save(item.key, v)} />
+      </Row>
+    ))}
+    <Row label="Session-Timeout">
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <input
+          type="number"
+          defaultValue={s.session_timeout_minuten || 60}
+          min={5}
+          max={480}
+          onBlur={(e) => save("session_timeout_minuten", parseInt(e.target.value, 10))}
+          style={{
+            width: 70, background: "var(--bg)", border: "1px solid var(--border2)", borderRadius: 8,
+            color: "var(--text)", padding: "7px 10px", fontSize: 14, textAlign: "center", outline: "none",
+          }}
+        />
+        <span style={{ fontSize: 12, color: "var(--text3)" }}>Minuten</span>
+      </div>
+    </Row>
+
+    <SectionTitle>KI (Erweitert)</SectionTitle>
+    <KITab s={s} save={save} kpiStats={kpiStats} />
+
+    <SectionTitle>Abrechnung</SectionTitle>
+    <BillingTab s={s} save={save} />
+  </div>
+);
+
+// ═══════════════════════════════════════════════════════════
 // 6. SCHNITTSTELLEN
 // ═══════════════════════════════════════════════════════════
 
-const SchnittstellenTab = ({s, save}) => {
+const SchnittstellenTab = ({s, save, showToast}) => {
+  const [m365, setM365] = useState(null);
+  const [m365Busy, setM365Busy] = useState("");
+  const [calPreview, setCalPreview] = useState(null);
+  const [mailPreview, setMailPreview] = useState(null);
+
+  const reloadM365 = useCallback(() => {
+    getM365Status()
+      .then((r) => setM365(r?.data ?? r))
+      .catch(() => setM365(null));
+  }, []);
+
+  useEffect(() => {
+    reloadM365();
+    try {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("m365") === "connected") {
+        showToast("✓ Microsoft 365 verbunden");
+        params.delete("m365");
+        const qs = params.toString();
+        const next = `${window.location.pathname}${qs ? `?${qs}` : ""}`;
+        window.history.replaceState({}, "", next);
+      }
+    } catch {}
+  }, [reloadM365, showToast]);
+
+  const handleM365Connect = async () => {
+    setM365Busy("connect");
+    try {
+      const res = await startM365Connect("/settings");
+      const url = res?.data?.url ?? res?.url;
+      if (!url) throw new Error("Keine OAuth-URL erhalten");
+      window.location.href = url;
+    } catch (e) {
+      showToast(e.message || "Verbindung fehlgeschlagen", "error");
+      setM365Busy("");
+    }
+  };
+
+  const handleM365Disconnect = async () => {
+    if (!window.confirm("Microsoft 365 Verbindung wirklich trennen?")) return;
+    setM365Busy("disconnect");
+    try {
+      await disconnectM365();
+      setCalPreview(null);
+      setMailPreview(null);
+      reloadM365();
+      showToast("Microsoft 365 getrennt");
+    } catch (e) {
+      showToast(e.message || "Trennen fehlgeschlagen", "error");
+    } finally {
+      setM365Busy("");
+    }
+  };
+
+  const handleCalPreview = async () => {
+    setM365Busy("preview");
+    try {
+      const res = await getM365CalendarPreview();
+      setCalPreview(res?.data ?? res);
+    } catch (e) {
+      showToast(e.message || "Kalender-Vorschau fehlgeschlagen", "error");
+    } finally {
+      setM365Busy("");
+    }
+  };
+
+  const handleMailPreview = async () => {
+    setM365Busy("mail");
+    try {
+      const res = await getM365MailPreview(10);
+      setMailPreview(res?.data ?? res);
+    } catch (e) {
+      showToast(e.message || "Postfach-Vorschau fehlgeschlagen", "error");
+    } finally {
+      setM365Busy("");
+    }
+  };
+
   const ROADMAP = [
+    {icon:"📧", label:"Microsoft 365 / Outlook (Kalender & Postfach)"},
     {icon:"🏛", label:"DATEV Live-Sync (Import)"},
     {icon:"🏦", label:"FinTS / EBICS live"},
     {icon:"⚖", label:"ELSTER Direktversand (ERiC)"},
@@ -1252,14 +1652,14 @@ const SchnittstellenTab = ({s, save}) => {
           DATEV bleibt Ihre Buchhaltung
         </div>
         <div style={{fontSize:13,color:"var(--text2)",lineHeight:1.65}}>
-          Kanzlei AI steuert Mandanten, Portal und Nachfassen. Exporte gehen <strong>zu</strong> DATEV —
+          Kanzlei Automation steuert Mandanten, Portal und Nachfassen. Exporte gehen <strong>zu</strong> DATEV —
           wir ersetzen keine Fibu. Nur aktivierte, produktive Schnittstellen sind schaltbar.
         </div>
       </div>
 
       <SectionTitle>Produktiv verfügbar</SectionTitle>
 
-      <Row label="DATEV-Export" description="Buchungsstapel + Stammdaten (EXTF v700) — in DATEV prüfen">
+      <Row label="DATEV-Export (Pilot)" description="Buchungsstapel + Stammdaten (EXTF v700) — Export in DATEV prüfen, kein Live-Sync">
         <Toggle value={s.datev_export_aktiv??true}
           onChange={v=>save("datev_export_aktiv",v)}/>
       </Row>
@@ -1279,6 +1679,116 @@ const SchnittstellenTab = ({s, save}) => {
       <Row label="Kontoauszug-Import (CSV)"
            description="Manueller Upload unter API /bank/import — kein Live-Banking">
         <span style={{fontSize:12,color:"var(--green)"}}>✓ verfügbar</span>
+      </Row>
+
+      <SectionTitle>Microsoft 365</SectionTitle>
+      {m365 ? (
+        <div style={{
+          fontSize: 12, color: "var(--text2)", lineHeight: 1.55, marginBottom: 12,
+          padding: "12px 14px", borderRadius: 10, background: "var(--bg3)", border: "1px solid var(--border)",
+        }}>
+          {m365.graph_verbunden ? (
+            <>
+              <span style={{ color: "var(--green)", fontWeight: 600 }}>✓ Graph verbunden</span>
+              {m365.graph_connected_email ? ` · ${m365.graph_connected_email}` : ""}
+            </>
+          ) : (
+            <>
+              Login-OAuth: {m365.oauth_login_verfuegbar ? "✓ konfiguriert" : "— .env fehlt"} ·
+              Kalender: {m365.kalender_sync_status} · Postfach: {m365.postfach_status}
+            </>
+          )}
+          <div style={{ marginTop: 6, color: "var(--text3)" }}>{m365.naechster_schritt}</div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+            {!m365.graph_verbunden ? (
+              <button
+                type="button"
+                disabled={!m365.oauth_login_verfuegbar || m365Busy === "connect"}
+                onClick={handleM365Connect}
+                style={{
+                  padding: "7px 14px", borderRadius: 8, border: "none", cursor: "pointer",
+                  background: "var(--accent)", color: "#fff", fontSize: 12, fontWeight: 600,
+                  opacity: !m365.oauth_login_verfuegbar ? 0.5 : 1,
+                }}
+              >
+                {m365Busy === "connect" ? "Weiterleitung…" : "Microsoft 365 verbinden"}
+              </button>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  disabled={m365Busy === "preview"}
+                  onClick={handleCalPreview}
+                  style={{
+                    padding: "7px 14px", borderRadius: 8, border: "1px solid var(--border2)",
+                    background: "var(--bg)", color: "var(--text)", fontSize: 12, cursor: "pointer",
+                  }}
+                >
+                  {m365Busy === "preview" ? "Lade…" : "Kalender-Vorschau"}
+                </button>
+                <button
+                  type="button"
+                  disabled={m365Busy === "mail" || !s.m365_postfach_readonly_aktiv}
+                  onClick={handleMailPreview}
+                  style={{
+                    padding: "7px 14px", borderRadius: 8, border: "1px solid var(--border2)",
+                    background: "var(--bg)", color: "var(--text)", fontSize: 12, cursor: "pointer",
+                    opacity: s.m365_postfach_readonly_aktiv ? 1 : 0.55,
+                  }}
+                >
+                  {m365Busy === "mail" ? "Lade…" : "Postfach-Vorschau"}
+                </button>
+                <button
+                  type="button"
+                  disabled={m365Busy === "disconnect"}
+                  onClick={handleM365Disconnect}
+                  style={{
+                    padding: "7px 14px", borderRadius: 8, border: "1px solid var(--red, #c44)",
+                    background: "transparent", color: "var(--red, #c44)", fontSize: 12, cursor: "pointer",
+                  }}
+                >
+                  Trennen
+                </button>
+              </>
+            )}
+          </div>
+          {calPreview?.events?.length ? (
+            <div style={{ marginTop: 10, fontSize: 11, color: "var(--text3)" }}>
+              {calPreview.hinweis}
+              <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                {calPreview.events.slice(0, 5).map((ev, i) => (
+                  <li key={i}>{ev.subject} — {String(ev.start || "").slice(0, 16)}</li>
+                ))}
+              </ul>
+            </div>
+          ) : calPreview?.hinweis ? (
+            <div style={{ marginTop: 8, fontSize: 11, color: "var(--text3)" }}>{calPreview.hinweis}</div>
+          ) : null}
+          {mailPreview?.messages?.length ? (
+            <div style={{ marginTop: 10, fontSize: 11, color: "var(--text3)" }}>
+              {mailPreview.hinweis}
+              <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                {mailPreview.messages.slice(0, 5).map((msg, i) => (
+                  <li key={i}>
+                    {msg.subject}
+                    {msg.mandant_vorschlag ? ` → ${msg.mandant_vorschlag}` : ""}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : mailPreview?.hinweis ? (
+            <div style={{ marginTop: 8, fontSize: 11, color: "var(--text3)" }}>{mailPreview.hinweis}</div>
+          ) : null}
+        </div>
+      ) : null}
+      <Row label="Kalender-Sync (Pilot)" description="Vorbereitet — aktiviert Graph-Anbindung wenn verfügbar">
+        <Toggle value={s.m365_kalender_sync_aktiv ?? false} onChange={(v) => save("m365_kalender_sync_aktiv", v)} />
+      </Row>
+      <Row label="Postfach read-only (Pilot)" description="Eingehende Mandanten-Mails zuordnen — folgt">
+        <Toggle value={s.m365_postfach_readonly_aktiv ?? false} onChange={(v) => save("m365_postfach_readonly_aktiv", v)} />
+      </Row>
+      <Row label="Microsoft-Anmeldung" description="OAuth für Login — Kalender-Sync folgt in M365-Integration">
+        <span style={{ fontSize: 12, color: "var(--green)" }}>✓ Login verfügbar</span>
       </Row>
 
       <SectionTitle>In Entwicklung (nicht aktivierbar)</SectionTitle>
@@ -1321,7 +1831,119 @@ const SchnittstellenTab = ({s, save}) => {
 };
 
 // ═══════════════════════════════════════════════════════════
-// 7. KANZLEI-DATEN
+// 7. E-MAIL-VERSAND (SMTP pro Kanzlei)
+// ═══════════════════════════════════════════════════════════
+
+const SMTP_PRESETS = [
+  { label: "Microsoft 365", host: "smtp.office365.com", port: 587 },
+  { label: "Google / Gmail", host: "smtp.gmail.com", port: 587 },
+  { label: "IONOS", host: "smtp.ionos.de", port: 587 },
+  { label: "STRATO", host: "smtp.strato.de", port: 465 },
+];
+
+const EmailVersandTab = ({ s, save, setSettings, showToast }) => {
+  const [testing, setTesting] = useState(false);
+  const userMail = (readAuthed()?.email || "").trim();
+
+  const applyPreset = (p) => {
+    setSettings((prev) => ({ ...prev, smtp_host: p.host, smtp_port: p.port }));
+    save("smtp_host", p.host);
+    save("smtp_port", p.port);
+  };
+
+  const runTest = async () => {
+    setTesting(true);
+    try {
+      await testTenantSmtp(userMail || undefined);
+      showToast("SMTP-Test gesendet — Postfach prüfen");
+    } catch (e) {
+      showToast(e.message || "SMTP-Test fehlgeschlagen", "error");
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  return (
+    <div>
+      <div style={{
+        background: "linear-gradient(135deg, color-mix(in srgb, var(--accent) 10%, transparent), color-mix(in srgb, var(--blue) 6%, transparent))",
+        border: "1px solid color-mix(in srgb, var(--accent) 22%, transparent)",
+        borderRadius: 14, padding: "14px 18px", marginBottom: 20,
+      }}>
+        <div style={{ fontWeight: 600, color: "var(--accent)", fontSize: 14, marginBottom: 4 }}>
+          Ihr Kanzlei-Postfach — nicht das des Software-Betreibers
+        </div>
+        <div style={{ fontSize: 13, color: "var(--text2)", lineHeight: 1.65 }}>
+          Jede Steuerkanzlei hinterlegt hier SMTP-Server, Benutzer und App-Passwort.
+          Mandanten-E-Mails gehen von <strong>Ihrer</strong> Adresse aus.
+          Microsoft 365 OAuth folgt später — bis dahin App-Passwort oder SMTP-Zugang des Providers.
+        </div>
+      </div>
+
+      <SectionTitle>SMTP-Verbindung</SectionTitle>
+
+      <Row label="E-Mail-Versand aktiv" description="Ohne Aktivierung werden keine Mandanten-Mails versendet">
+        <Toggle value={!!s.smtp_aktiv} onChange={(v) => save("smtp_aktiv", v)} />
+      </Row>
+
+      <Row label="Vorlage" description="Übliche Provider — Host/Port werden übernommen">
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {SMTP_PRESETS.map((p) => (
+            <Btn key={p.label} variant="subtle" size="sm" onClick={() => applyPreset(p)}>{p.label}</Btn>
+          ))}
+        </div>
+      </Row>
+
+      <Row label="SMTP-Server">
+        <input type="text" value={s.smtp_host ?? ""} placeholder="smtp.office365.com"
+          onChange={(e) => setSettings((prev) => ({ ...prev, smtp_host: e.target.value }))}
+          onBlur={(e) => save("smtp_host", e.target.value)}
+          style={{ width: 280, background: "var(--bg)", border: "1px solid var(--border2)", borderRadius: 8,
+            color: "var(--text)", padding: "7px 11px", fontSize: 13, outline: "none" }} />
+      </Row>
+
+      <Row label="Port" description="587 (STARTTLS) oder 465 (SSL)">
+        <input type="number" value={s.smtp_port ?? 587} min={1} max={65535}
+          onChange={(e) => setSettings((prev) => ({ ...prev, smtp_port: parseInt(e.target.value, 10) || 587 }))}
+          onBlur={(e) => save("smtp_port", parseInt(e.target.value, 10) || 587)}
+          style={{ width: 90, background: "var(--bg)", border: "1px solid var(--border2)", borderRadius: 8,
+            color: "var(--text)", padding: "7px 10px", fontSize: 14, textAlign: "center", outline: "none" }} />
+      </Row>
+
+      <Row label="STARTTLS">
+        <Toggle value={s.smtp_tls !== false} onChange={(v) => save("smtp_tls", v)} />
+      </Row>
+
+      <Row label="Benutzer (E-Mail)" description="Muss mit dem Postfach übereinstimmen, von dem versendet wird">
+        <input type="email" value={s.smtp_user ?? ""} placeholder="info@ihre-kanzlei.de"
+          onChange={(e) => setSettings((prev) => ({ ...prev, smtp_user: e.target.value }))}
+          onBlur={(e) => save("smtp_user", e.target.value)}
+          style={{ width: 280, background: "var(--bg)", border: "1px solid var(--border2)", borderRadius: 8,
+            color: "var(--text)", padding: "7px 11px", fontSize: 13, outline: "none" }} />
+      </Row>
+
+      <Row label="Passwort / App-Passwort" description={s.smtp_pass_gesetzt ? "Gespeichert — nur bei Änderung neu eintragen" : "Vom Mail-Provider erzeugen (nicht Ihr Login-Passwort)"}>
+        <input type="password" autoComplete="new-password"
+          placeholder={s.smtp_pass_gesetzt ? "********" : ""}
+          onBlur={(e) => {
+            const v = e.target.value.trim();
+            if (v && v !== "********") save("smtp_pass", v);
+          }}
+          style={{ width: 280, background: "var(--bg)", border: "1px solid var(--border2)", borderRadius: 8,
+            color: "var(--text)", padding: "7px 11px", fontSize: 13, outline: "none" }} />
+      </Row>
+
+      <Row label="Verbindung testen" description={userMail ? `Test an ${userMail}` : "Test an Ihre Login-E-Mail"}>
+        <Btn variant="primary" loading={testing} disabled={!s.smtp_aktiv} onClick={runTest}>
+          Test-E-Mail senden
+        </Btn>
+      </Row>
+    </div>
+  );
+};
+
+// ═══════════════════════════════════════════════════════════
+// 8. KANZLEI-DATEN
 // ═══════════════════════════════════════════════════════════
 
 const KanzleiTab = ({s, save, setSettings, sysInfo, readiness, onExport, onReset}) => (
@@ -1331,9 +1953,9 @@ const KanzleiTab = ({s, save, setSettings, sysInfo, readiness, onExport, onReset
     {[
       {id:"k_name",   key:"kanzlei_name",         label:"Kanzlei-Name",       ph:"Dr. Müller Steuerberatung GmbH"},
       {id:"k_abs",    key:"email_absender_name",  label:"Name im Postfach des Empfängers",
-        ph:"Dr. Müller Steuerberatung", description:"So erscheint der Absender bei Mandanten-E-Mails (nicht „Kanzlei AI“). Leer = Kanzlei-Name."},
+        ph:"Dr. Müller Steuerberatung", description:"So erscheint der Absender bei Mandanten-E-Mails (nicht „Kanzlei Automation“). Leer = Kanzlei-Name."},
       {id:"k_email",  key:"kanzlei_email",         label:"E-Mail-Adresse der Kanzlei", ph:"kanzlei@mail.de", type:"email",
-        description:"Antwort-Adresse im Mailtext; SMTP-Absender-Adresse, sofern mit Ihrem Mail-Konto übereinstimmt."},
+        description:"Kontakt in Mailtext & Signatur. Versand-Adresse = Tab „E-Mail-Versand“ (smtp_user)."},
       {id:"k_telefon",key:"kanzlei_telefon",       label:"Telefon",            ph:"+49 89 123456"},
       {id:"k_web",    key:"kanzlei_website",       label:"Website",            ph:"https://kanzlei.de",        type:"url"},
       {id:"k_adr",    key:"kanzlei_adresse",       label:"Adresse"},
@@ -1509,7 +2131,14 @@ export default function Settings() {
   const [loading,   setLoading]   = useState(true);
   const [,          setSaving]    = useState({});
   const [toast,     setToast]     = useState(null);
-  const [tab,       setTab]       = useState("ki");
+  const [tab,       setTab]       = useState(() => {
+    try {
+      const open = sessionStorage.getItem("kanzlei_settings_open_tab");
+      if (open && TABS.some((t) => t.id === open)) return open;
+    } catch {}
+    return "email";
+  });
+  const [formEpoch, setFormEpoch] = useState(0);
   const [suggestions, setSuggestions] = useState([]);
   const [applyingS, setApplyingS] = useState({});
   const [readiness, setReadiness] = useState(null);
@@ -1540,8 +2169,8 @@ export default function Settings() {
         getKpis(),
       ]);
       if (s.status === "fulfilled") {
-        const payload = s.value?.data ?? s.value ?? {};
-        setSettings(payload);
+        setSettings(unwrapSettingsPayload(s.value));
+        setFormEpoch((e) => e + 1);
       } else {
         setSettings({});
         const reason = s.reason?.message || "unbekannter Fehler";
@@ -1597,11 +2226,39 @@ export default function Settings() {
 
   useEffect(()=>{ laden(); },[laden]);
 
+  useEffect(() => {
+    try {
+      const aliases = {
+        workflow: "automation",
+        compliance: "team",
+        schnittstellen: "integrationen",
+        ki: "erweitert",
+        billing: "erweitert",
+      };
+      let open = sessionStorage.getItem("kanzlei_settings_open_tab");
+      if (open && aliases[open]) open = aliases[open];
+      if (open && TABS.some((t) => t.id === open)) {
+        setTab(open);
+        sessionStorage.removeItem("kanzlei_settings_open_tab");
+      }
+    } catch {}
+  }, []);
+
+  const isSettingsAdmin = hasRoleReal(["owner", "admin"]);
+  const visibleTabs = TABS.filter((t) => !t.adminOnly || isSettingsAdmin);
+
+  useEffect(() => {
+    if (!isSettingsAdmin && ADMIN_TABS.has(tab)) setTab("email");
+  }, [tab, isSettingsAdmin]);
+
   const save = useCallback(async (key, wert) => {
     setSaving(p=>({...p,[key]:true}));
     try {
-      await updateSetting(key, wert);
-      setSettings(p=>({...p,[key]:wert}));
+      const res = await updateSetting(key, wert);
+      const bestaetigt = res?.bestaetigt ?? res?.data?.bestaetigt ?? res?.wert ?? wert;
+      const fresh = await getSettings();
+      setSettings(fresh);
+      setFormEpoch((e) => e + 1);
       if (
         String(key).startsWith("rollen_nav")
         || String(key).startsWith("kanzlei_")
@@ -1611,7 +2268,7 @@ export default function Settings() {
           window.dispatchEvent(new CustomEvent("kanzlei-settings-changed"));
         } catch {}
       }
-      showToast(`✓ ${key.replace(/_/g," ")} gespeichert`);
+      showToast(`✓ Gespeichert: ${String(bestaetigt).slice(0, 48)}`);
     } catch(e) {
       showToast(e.message||"Fehler","error");
     } finally {
@@ -1666,15 +2323,15 @@ export default function Settings() {
   );
 
   const CONTENT = {
-    ki:              <KITab s={settings} save={save} kpiStats={kpiStats}/>,
-    workflow:        <WorkflowTab s={settings} save={save}/>,
+    email:           <EmailVersandTab s={settings} save={save} setSettings={setSettings} showToast={showToast} />,
+    automation:      <WorkflowTab s={settings} save={save}/>,
     portal:          <PortalTab s={settings} save={save}/>,
-    billing:         <BillingTab s={settings} save={save}/>,
-    compliance:      <ComplianceTab s={settings} save={save}/>,
-    schnittstellen:  <SchnittstellenTab s={settings} save={save}/>,
     kanzlei:         <KanzleiTab s={settings} save={save} setSettings={setSettings} sysInfo={sysInfo}
                       readiness={readiness}
                        onExport={handleExport} onReset={handleReset}/>,
+    team:            <TeamTab s={settings} save={save} showToast={showToast}/>,
+    integrationen:   <SchnittstellenTab s={settings} save={save} showToast={showToast}/>,
+    erweitert:       <ErweitertTab s={settings} save={save} kpiStats={kpiStats}/>,
   };
 
   return (
@@ -1705,10 +2362,10 @@ export default function Settings() {
       <div style={{background:"var(--bg2)",borderBottom:"1px solid var(--border)",
         padding:stackTabs ? "16px max(14px, env(safe-area-inset-right)) 16px max(14px, env(safe-area-inset-left))" : "20px 32px",
         flexShrink:0}}>
-        <div style={{fontFamily:"'DM Serif Display',serif",fontSize:stackTabs?20:24,
+        <div style={{fontFamily:"var(--font-head)",fontSize:stackTabs?20:24,
           color:"var(--text)",marginBottom:4}}>Einstellungen</div>
         <div style={{fontSize:12,color:"var(--text3)",lineHeight:1.45}}>
-          Steuerzentrum der Profitabilität — 6 Hebel für Skalierbarkeit & Klebrigkeit
+          Zuerst E-Mail konfigurieren — dann laufen Erinnerungen, Portal und Eskalation automatisch.
         </div>
       </div>
 
@@ -1726,7 +2383,7 @@ export default function Settings() {
           padding:"16px 8px",overflowY:"auto",overflowX:"hidden",flexShrink:0,
           display:"flex",flexDirection:"column",
         }}>
-          {TABS.map(t=>{
+          {visibleTabs.map(t=>{
             const aktiv = tab===t.id;
             return (
               <button key={t.id} onClick={()=>setTab(t.id)} style={{
@@ -1874,7 +2531,9 @@ export default function Settings() {
               </div>
             </div>
           )}
-          {CONTENT[tab]}
+          <div key={`settings-tab-${tab}-${formEpoch}`}>
+            {CONTENT[tab]}
+          </div>
         </div>
       </div>
     </div>
